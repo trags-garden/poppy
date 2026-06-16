@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger (Actions tab / `gh workflow run publish.yml`). Builds the
+  # version currently in pyproject.toml; PyPI rejects re-uploading an existing
+  # version, so use this to re-run a failed upload or publish a fresh bump.
+  workflow_dispatch:
 
 jobs:
   build-and-publish:
