@@ -15,6 +15,7 @@ jobs:
 
     permissions:
       contents: read
+      id-token: write   # OIDC token for PyPI Trusted Publishing (no stored API token)
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,4 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: python -m twine upload dist/*
+        uses: pypa/gh-action-pypi-publish@release/v1
