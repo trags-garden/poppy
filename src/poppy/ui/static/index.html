@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Poppy — memory</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="pmark">p</span>
+    <span class="word">poppy</span>
+    <span class="sub">memory</span>
+  </div>
+  <div class="search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+      <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
+    </svg>
+    <input id="q" type="text" placeholder="Search your memory…" autocomplete="off" spellcheck="false" />
+    <span class="kbd">/</span>
+  </div>
+  <div class="right">
+    <div class="density topbar-density" id="density">
+      <button data-d="comfortable" class="on">Comfortable</button>
+      <button data-d="compact">Compact</button>
+    </div>
+    <span id="status" class="status"></span>
+    <a class="ghb" href="https://github.com/trags-garden/poppy" target="_blank" rel="noopener" aria-label="GitHub">
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    </a>
+  </div>
+</header>
+
+<main class="shell">
+  <aside class="sidebar">
+    <div class="rail-num">§ 01<br/>view</div>
+
+    <nav class="scope" id="scope">
+      <button class="on" data-scope="today">Today <span class="count" id="count-today">—</span></button>
+      <button data-scope="active">All memories <span class="count" id="count-active">—</span></button>
+      <button data-scope="tombstoned">Tombstoned <span class="count" id="count-tomb">—</span></button>
+    </nav>
+
+    <div class="facet-label">Type</div>
+    <nav class="facet" id="facet-type"></nav>
+
+    <div class="facet-label">Project</div>
+    <nav class="facet" id="facet-project"></nav>
+
+    <div class="facet-label">Source</div>
+    <nav class="facet" id="facet-source"></nav>
+
+    <div class="sidebar-foot">
+      <div class="card-soft">
+        <div class="card-label">Engine</div>
+        <div class="card-line" id="engine-name">…</div>
+        <div class="card-meta" id="engine-meta">memory · sqlite</div>
+      </div>
+      <p class="margin-note">
+        <strong>poppy, n.</strong> <em>papaver</em> — closes at night, opens with the sun. Your agent, same idea.
+      </p>
+    </div>
+  </aside>
+
+  <section class="list-pane" id="list-pane">
+    <div class="list-head" id="list-head">
+      <div>
+        <div class="eyebrow" id="list-eyebrow">All memories</div>
+        <h2 class="h-section" id="list-title">Recent first</h2>
+      </div>
+    </div>
+
+    <div id="empty" class="empty" hidden>
+      <div class="empty-mark">∅</div>
+      <h3>Nothing here yet.</h3>
+      <p>Try <code>poppy remember "thing"</code>, then come back.</p>
+    </div>
+
+    <ul class="list" id="list"></ul>
+
+    <div id="today" class="today" hidden></div>
+  </section>
+
+  <aside class="detail-pane" id="detail">
+    <div class="detail-empty">
+      <div class="rail-num">§ 02<br/>detail</div>
+      <p class="margin-note">
+        Select a memory to <em>read it</em>, edit, or tombstone. Deletes are reversible for 7 days.
+      </p>
+    </div>
+  </aside>
+</main>
+
+<div id="toast-wrap" class="toast-wrap"></div>
+<div id="modal-wrap"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

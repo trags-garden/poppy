@@ -1,0 +1,64 @@
+{
+  "manifest_version": "0.4",
+  "name": "poppy-memory",
+  "display_name": "Poppy",
+  "icon": "icon.png",
+  "version": "0.0.0-dev",
+  "description": "Developer memory CLI. Remember what matters across sessions.",
+  "long_description": "Poppy is a local developer memory store. Agents call remember/recall via MCP to retrieve non-obvious decisions, preferences, and lessons across coding sessions. Storage lives at ~/.poppy/. The first run downloads ~160MB of sentence-transformer weights for hybrid retrieval.",
+  "author": {
+    "name": "Haris Pasic",
+    "email": "security@trags.ai",
+    "url": "https://github.com/trags-garden/poppy"
+  },
+  "homepage": "https://github.com/trags-garden/poppy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trags-garden/poppy"
+  },
+  "license": "AGPL-3.0-or-later",
+  "keywords": ["memory", "mcp", "rag", "developer-tools", "claude"],
+  "server": {
+    "type": "uv",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${__dirname}",
+        "run",
+        "python",
+        "server/main.py"
+      ],
+      "env": {
+        "POPPY_DIR": "${user_config.poppy_dir}"
+      }
+    }
+  },
+  "tools": [
+    {"name": "remember", "description": "Store a memory (decision, preference, fact, lesson, summary)."},
+    {"name": "recall", "description": "Search and return memories with full content."},
+    {"name": "recall_index", "description": "Cheap two-stage recall: returns id + snippet only."},
+    {"name": "recall_full", "description": "Fetch full memory bodies for a list of ids."},
+    {"name": "edit", "description": "Modify an existing memory's content or metadata."},
+    {"name": "forget", "description": "Delete a memory by id."},
+    {"name": "consolidate", "description": "Persist a session summary plus extracted facts."},
+    {"name": "context", "description": "List recent memories scoped to a project."}
+  ],
+  "user_config": {
+    "poppy_dir": {
+      "type": "directory",
+      "title": "Storage directory",
+      "description": "Where Poppy keeps its SQLite database and embedding cache.",
+      "default": "${HOME}/.poppy",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}

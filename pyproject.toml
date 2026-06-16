@@ -1,0 +1,88 @@
+[project]
+name = "poppy-memory"
+version = "0.2.0"
+description = "Developer memory CLI. Remember what matters."
+authors = [{name = "Haris Pasic"}]
+license = {text = "AGPL-3.0-or-later"}
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Environment :: Console",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "click>=8.1",
+    "mcp>=1.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "fastembed>=0.8.0",
+    "posthog>=3.0",
+    # Required for the default `bloom` engine. Pulls torch CPU wheels (~600 MB).
+    # bge-small + ms-marco-MiniLM-CE weights add ~225 MB on first use.
+    "sentence-transformers>=3.0",
+    "numpy>=1.26",
+    # End-to-end encryption of the device-code API key in
+    # `poppy setup trags` (RSA-OAEP-SHA256).
+    "cryptography>=42",
+]
+
+[project.scripts]
+# Points at the main() wrapper (not the bare click group) so an offline
+# cold-cache ModelUnavailableError renders as one actionable line, not a
+# raw HuggingFace traceback.
+poppy = "poppy.cli.main:main"
+
+[project.urls]
+Homepage = "https://trags.ai/poppy"
+Repository = "https://github.com/trags-garden/poppy"
+Issues = "https://github.com/trags-garden/poppy/issues"
+
+[project.optional-dependencies]
+# Optional: anthropic SDK for LLM-driven consolidation and conflict detection.
+llm = [
+    "anthropic>=0.50",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/poppy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+    "slow: marks tests as slow (require API keys, network)",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules embed editorial prompt strings or fixture text that must remain
+# readable as prose for the LLM consumer; line-length lint would force lossy
+# reflows.
+"src/poppy/setup/claude_code.py" = ["E501"]
+"src/poppy/consolidation.py" = ["E501"]
+"tests/test_claude_memory_import.py" = ["E501"]
