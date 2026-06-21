@@ -27,3 +27,6 @@ htmlcov/
 # Built .mcpb bundles (the mcpb/ source dir with manifest.json + shim is checked in)
 *.mcpb
 mcpb-build/
+
+# Local-only agent context; intentionally not published
+CLAUDE.md
