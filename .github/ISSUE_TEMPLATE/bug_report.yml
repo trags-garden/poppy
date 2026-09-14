@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in Poppy is broken or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please check that the issue still happens on the latest release (`pipx upgrade poppy-memory`).
+        Security vulnerabilities go to security@trags.ai, not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. poppy ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Poppy version
+      description: Output of `poppy --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: poppy doctor output
+      description: Output of `poppy doctor`. Remove anything you consider private before posting.
+      render: text
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, install method (pipx, pip, uv), and the agent client if relevant (Claude Code, Codex, Claude Desktop, ...).

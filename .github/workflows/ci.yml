@@ -1,0 +1,174 @@
+name: CI
+
+# push is restricted to main so PR branches run once (via pull_request),
+# not twice (push + pull_request) — PR #3 review follow-up.
+# pull_request filters on the BASE branch, so stacked PRs (base reveal-prep/*)
+# must be listed too or they would get zero CI runs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches:
+      - main
+      - "reveal-prep/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        # --extra encryption so the encryption tests actually run (they
+        # importorskip when the extra is absent). Retrieval needs no extra: the
+        # bloom engine's ONNX runtime is a base dependency.
+        run: uv sync --extra encryption
+
+      - name: Lint
+        run: |
+          uv run ruff check src/ tests/
+          uv run ruff format --check src/ tests/
+
+      - name: Test
+        run: uv run pytest -v
+
+  # Base install (no extras): proves the package imports and runs the way a
+  # plain `pip install poppy-memory` does — no sqlcipher3, and no
+  # torch/sentence-transformers, which as of 0.3.0 no extra can pull in either.
+  # keyring IS present (a base dependency, so keychain storage works on
+  # sync-only installs) and so is the bloom engine's ONNX runtime; only the
+  # sqlcipher3 encryption suites skip themselves here.
+  base-install:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies (no extra)
+        run: uv sync
+
+      - name: Assert dependency boundaries hold
+        run: |
+          uv run python - <<'PY'
+          import importlib.util, sys
+          # encryption extra: only sqlcipher3 stays extra-only now that keyring
+          # is a base dependency.
+          if importlib.util.find_spec("sqlcipher3") is not None:
+              sys.exit("sqlcipher3 is installed in the base env; it must live only in the [encryption] extra")
+          # The slim-install win depends on torch NOT being pulled in. Since
+          # 0.3.0 there is no extra that ships it, so any hit here is a
+          # dependency regression, not a mis-selected extra.
+          for mod in ("torch", "sentence_transformers"):
+              if importlib.util.find_spec(mod) is not None:
+                  sys.exit(f"{mod} is installed; poppy-memory must not depend on the torch stack")
+          # keyring is a base dependency: keychain storage of the Trags API key
+          # must work on a plain `pip install poppy-memory` with no extras.
+          if importlib.util.find_spec("keyring") is None:
+              sys.exit("keyring is missing from the base env; it must be a base dependency")
+          # bloom's ONNX runtime must be present in the base install: the
+          # default engine has to run with no extra selected.
+          for mod in ("fastembed", "onnxruntime"):
+              if importlib.util.find_spec(mod) is None:
+                  sys.exit(f"{mod} is missing from the base env; the default bloom engine needs it")
+          print("base env: no sqlcipher3, no torch/sentence-transformers, has keyring+fastembed+onnxruntime")
+          PY
+
+      - name: CLI import smoke
+        run: uv run poppy --help
+
+      - name: Test (encryption suites skip)
+        run: uv run pytest -q
+
+      # The suite forces POPPY_TELEMETRY_OFF=1, so the atexit flush never runs
+      # under pytest. Install the built wheel into a fresh venv (a fresh
+      # resolve, like a user's pipx install), run real commands with telemetry
+      # ON against a loopback sink, and fail if anything but the first-run
+      # notice reaches stderr or a telemetry-emitting command takes longer than
+      # a few seconds to exit.
+      - name: Telemetry-on smoke on the built wheel (fresh resolve)
+        env:
+          POPPY_TELEMETRY_HOST: http://127.0.0.1:9
+          POPPY_UPDATE_CHECK_OFF: "1"
+          POPPY_SUPPRESS_HOOKS: "1"
+          POPPY_DIR: /tmp/telemetry-smoke/store
+        run: |
+          set -u
+          : "${POPPY_TELEMETRY_HOST:?must point at a loopback sink, never production}"
+          unset POPPY_TELEMETRY_OFF
+          uv build --wheel -o /tmp/telemetry-smoke/dist
+          uv venv /tmp/telemetry-smoke/venv
+          uv pip install --python /tmp/telemetry-smoke/venv/bin/python /tmp/telemetry-smoke/dist/*.whl
+          mkdir -p "$POPPY_DIR"
+          P=/tmp/telemetry-smoke/venv/bin/poppy
+          ERR=/tmp/telemetry-smoke/stderr.txt
+          : > "$ERR"
+          # `engines use` and `--version` emit no event; `remember` and `recall`
+          # do, so they exercise the atexit flush. Warm the interpreter/model
+          # cache with the first emitting command, then measure the second: its
+          # cost is dominated by the flush, so a regression to the old multi-
+          # second exit delay trips the duration check, not only the traceback.
+          timeout 15 "$P" engines use seed 2>> "$ERR"
+          timeout 15 "$P" --version 2>> "$ERR"
+          timeout 10 "$P" remember "telemetry smoke" --type fact 2>> "$ERR"
+          start=$(date +%s)
+          timeout 10 "$P" recall smoke 2>> "$ERR"
+          elapsed=$(( $(date +%s) - start ))
+          echo "telemetry-on recall took ${elapsed}s"
+          if [ "$elapsed" -gt 4 ]; then
+            echo "::error::telemetry-on command took ${elapsed}s; the exit flush is not bounded"
+            exit 1
+          fi
+          echo "--- stderr ---"; cat "$ERR"
+          NOTICE='poppy: anonymous usage telemetry is on (no memory content is ever sent). Disable: poppy telemetry off'
+          if grep -vxF "$NOTICE" "$ERR" | grep -q .; then
+            echo "::error::telemetry-on commands wrote more than the first-run notice to stderr"
+            exit 1
+          fi
+
+  # Build-only release rehearsal on every push. Publishing to PyPI happens
+  # exclusively in publish.yml, which triggers only on v* tags.
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build wheel + sdist
+        run: python -m build
+
+      - name: Verify build metadata
+        run: python -m twine check dist/*
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7

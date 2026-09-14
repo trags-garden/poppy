@@ -1,0 +1,13 @@
+{
+  "session_id": "cursor-session-fixture",
+  "transcript_path": null,
+  "cwd": "",
+  "hook_event_name": "preToolUse",
+  "tool_name": "Shell",
+  "tool_input": {
+    "command": "echo fixture_probe",
+    "cwd": "",
+    "timeout": 30000
+  },
+  "cursor_version": "2026.07.20-8cc9c0b"
+}

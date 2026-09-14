@@ -1,0 +1,8 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wednesday, Jul 22, 2026, 11:43 AM (UTC+2)</timestamp>\n<user_query>\nrun a command, then create and edit dd.txt.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"[REDACTED]"},{"type":"tool_use","name":"Shell","input":{"command":"echo docset_probe"}},{"type":"tool_use","name":"Write","input":{"path":"/workspace/dd.txt","contents":"a"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"[REDACTED]"},{"type":"tool_use","name":"StrReplace","input":{"path":"/workspace/dd.txt","old_string":"a","new_string":"ab"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Ran the command and updated `dd.txt` to `ab`.\n\n[REDACTED]"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"[REDACTED]"}]}}
+{"unexpected":"record"}
+{"type":"turn_ended","status":"success"}
+{"role":"assistant","message":{"content":[

@@ -1,0 +1,1054 @@
+/* Poppy memory UI — the trags.ai dashboard's design system, run locally.
+   Tokens, type scale and chrome mirror web/app/globals.css (anthotype)
+   so the local UI and the hosted dashboard read as one product. */
+
+/* Self-hosted fonts: latin subsets of the variable fonts, served
+   from the package so the UI never phones a CDN. OFL texts sit next to the
+   files in fonts/. */
+@font-face {
+  font-family: "Fraunces";
+  src: url("fonts/Fraunces-latin.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Fraunces";
+  src: url("fonts/Fraunces-Italic-latin.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-latin.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-Italic-latin.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-style: italic;
+  font-display: swap;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; border: 0; background: none; cursor: pointer; color: inherit; }
+input, textarea { font: inherit; color: inherit; }
+ul { list-style: none; }
+img, svg { display: block; }
+
+:root {
+  /* ---- Anthotype palette (mirrored from trags.ai) --------------
+     One pigment, two states. The hosted dashboard prints a chlorophyll
+     pigment on a warm cream sheet; the values below are the literal
+     `--an-*` tokens from the web app's globals.css, so the local UI and
+     trags.ai are the same product rather than two dialects of one. Forest
+     stays reserved for data ink (memory pins, the captures sparkline). */
+  --an-paper-lit: #fef3d8;   /* mount board: cards sit above the sheet */
+  --an-paper: #f7ecd1;       /* the sheet */
+  --an-paper-sunk: #f0e5cb;  /* recessed band: sidebar, detail rail */
+  --an-paper-kraft: #eadec3; /* printed label / tag cards */
+  --an-plate: #023726;       /* the pigment, as ink on the sheet */
+  --an-ink-dim: #3f5c50;     /* thinned pigment: reading text, meta */
+  --an-link: #0b6a52;
+  --an-print: #eff7f2;       /* type that reads ON the pigment */
+  --an-seal: #d5503f;        /* the mark's red, GRAPHIC ONLY */
+  --an-seal-ink: #9b2e1e;    /* the same red where it carries a word */
+
+  --hb-paper: var(--an-paper);     /* page background */
+  --hb-paper-2: var(--an-paper-sunk); /* sidebar / recessed rails */
+  --hb-mount: var(--an-paper-lit); /* cards/panes sit LIGHTER than the sheet */
+  --hb-kraft: var(--an-paper-kraft);  /* kraft tag / printed-label cards */
+  --hb-ink: var(--an-plate);       /* primary text */
+  --hb-ink-soft: var(--an-ink-dim);   /* secondary text / meta */
+  --hb-link: var(--an-link);
+  --hb-accent: var(--an-seal-ink); /* accession-stamp red — used sparingly */
+  --hb-panel: var(--an-plate);     /* dark panel accents */
+  --hb-panel-ink: var(--an-print); /* type on those panels */
+
+  /* Forest data-ink gradations, derived from brand forest #2D493D. These are
+     the ONLY non-sepia tones in the chrome, reserved for data marks. */
+  --forest: #2d493d;
+  --forest-08: rgba(45, 73, 61, 0.08);
+  --forest-15: rgba(45, 73, 61, 0.15);
+  --forest-30: rgba(45, 73, 61, 0.30);
+  --forest-50: rgba(45, 73, 61, 0.50);
+  --forest-70: rgba(45, 73, 61, 0.70);
+
+  --poppy: var(--an-seal);      /* the bloom — locked accent, graphic only */
+  --poppy-deep: var(--an-seal-ink); /* the red where it carries a word */
+  --lesson: #b23e2c;            /* deep rust — the lesson pin */
+
+  /* Printed hairline rules. Same weights the dashboard uses for --border and
+     --border-strong inside the anthotype scope. */
+  --rule: color-mix(in srgb, var(--hb-ink) 22%, transparent);
+  --rule-strong: color-mix(in srgb, var(--hb-ink) 40%, transparent);
+  /* The ring a dashboard card wears instead of a border. */
+  --ring-card: color-mix(in srgb, var(--hb-ink) 10%, transparent);
+
+  /* ---- Semantic aliases -------------------------------------------------
+     The stylesheet was authored against a cream/ink token vocabulary; rather
+     than rename ~150 call sites we re-point those names onto the herbarium
+     palette. New rules should prefer the --hb-* / --forest-* tokens above. */
+  --cream: var(--hb-paper);
+  --cream-2: var(--hb-mount);   /* cards lift lighter than the sheet */
+  --cream-3: var(--rule);       /* borders become printed ink rules */
+  --cream-4: var(--forest-30);
+  --ink: var(--hb-ink);
+  --ink-2: color-mix(in srgb, var(--hb-ink) 80%, var(--hb-paper));
+  --ink-3: var(--hb-ink-soft);
+  --ink-4: color-mix(in srgb, var(--hb-ink-soft) 62%, var(--hb-paper));
+  --forest-2: var(--forest-70);
+  --rust: var(--lesson);
+  --sand: #e8d9b8;              /* warm fill: scores, quiet chips */
+  --peach: #f1c394;             /* warm highlight: counts on a forest fill */
+
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: "Fraunces", "Times New Roman", serif;
+
+  --pad: 24px;
+  --radius: 0.125rem;           /* 2px — the dashboard's anthotype radius */
+  --row-pad: 12px;
+  --topbar-h: 56px;             /* the dashboard's topbar row height */
+
+  /* ---- The label tier and its phone floor (mirrored) ----------
+     The anthotype prints its data tier small on purpose: tracked labels,
+     chips, ids and running heads between 9px and 10.5px. On a phone that
+     tier stops being legible, so every size below 11px is one of these
+     tokens and the whole tier lifts in one media query. Desktop values are
+     the dashboard's measured originals, so nothing at or above 640px moves. */
+  --hb-fs-chip: 9px;
+  --hb-fs-meta: 9.5px;
+  --hb-fs-tiny: 10px;
+  --hb-fs-label: 10.5px;
+}
+
+@media (max-width: 639px) {
+  :root {
+    --hb-fs-chip: 11px;
+    --hb-fs-meta: 11px;
+    --hb-fs-tiny: 11px;
+    --hb-fs-label: 11px;
+    --topbar-h: 104px;
+  }
+}
+
+/* Letterpress emboss for engraved uppercase labels and eyebrows — a faint
+   light edge, as if the type were pressed into the paper. */
+.hb-engrave,
+.rail-num, .facet-label, .card-label, .eyebrow,
+.today-date, .today-meta .stat span, .h-mono-label, .spark-axis,
+.modal-label, .band-label .tick {
+  text-shadow: 0 1px 0 rgb(254 243 216 / 0.5); /* --an-paper-lit */
+}
+
+html, body {
+  background-color: var(--hb-paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  font-feature-settings: "ss01", "ss02";
+  height: 100%;
+  overflow: hidden;
+}
+/* Coating grain only: the tooth of a hand-coated sheet, and nothing else.
+   The three broad radial washes this replaces were inherited from the aged
+   paper, where a brown stain on a tan sheet read as foxing; in the pigment
+   they read as olive, which is the one thing this palette rules out. The
+   dashboard dropped them in the same round. The noise ships as a same-origin
+   file (grain.svg) so the CSP default-src 'self' stays locked. */
+body {
+  background-image: url("grain.svg");
+  background-repeat: repeat;
+}
+
+/* ---------- Topbar ----------
+   The dashboard's topbar: a 56px row, hairline underneath via an inset
+   shadow rather than a border (so the row height is exactly 56), the
+   surface name set in the display face with the route slug in mono behind
+   a vertical rule, a centred search control, and quiet status at the end. */
+.topbar {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  padding: 0 20px;
+  box-shadow: inset 0 -1px 0 var(--rule);
+  background: color-mix(in srgb, var(--cream) 96%, transparent);
+  backdrop-filter: blur(10px);
+  position: sticky; top: 0; z-index: 10;
+  height: var(--topbar-h);
+}
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand .pmark {
+  width: 20px; height: 20px;
+  color: var(--forest);
+}
+.brand .word {
+  font-family: var(--serif); font-weight: 500;
+  font-variation-settings: "SOFT" 44, "opsz" 144;
+  font-size: 17px; letter-spacing: -0.012em;
+}
+.brand .sub {
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--ink-3);
+  border-left: 1px solid var(--rule-strong);
+  padding-left: 12px;
+  white-space: nowrap;
+}
+
+.search {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--hb-kraft);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  height: 32px; padding: 0 10px;
+  max-width: 360px; width: 100%;
+  margin: 0 auto;
+  transition: border-color .15s, background .15s;
+}
+.search:hover { border-color: var(--rule); }
+.search:focus-within {
+  border-color: var(--rule-strong);
+  background: var(--cream);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hb-ink) 12%, transparent);
+}
+.search svg { color: var(--ink-3); flex-shrink: 0; }
+.search input {
+  flex: 1; min-width: 0; background: none; border: 0; outline: none;
+  font-family: var(--mono); font-size: 13px;
+  color: var(--ink);
+}
+.search input::placeholder { color: var(--ink-3); }
+.search .kbd {
+  font-family: var(--mono); font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 3px; color: var(--ink-3);
+  background: var(--cream);
+}
+
+.right { display: flex; align-items: center; gap: 10px; }
+/* The facet rail is a column at desk width and a sheet on a phone; this is
+   its handle, and it only exists once the rail has nowhere to stand. */
+.filters-toggle { display: none; }
+/* Quiet, steady, and green: a status light, not an alarm. Matches the
+   dashboard's "Poppy · synced" indicator, halo included. */
+.status {
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--ink-3);
+  display: flex; align-items: center; gap: 8px;
+  white-space: nowrap;
+}
+.status:empty { display: none; }
+.status::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: oklch(0.55 0.13 150);
+  box-shadow: 0 0 0 3px oklch(0.55 0.13 150 / 0.18);
+}
+/* The one outbound link in the chrome. A word, not a vendor mark: where the
+   local UI is, trags.ai is the other half of the same product. */
+.tlink {
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--ink-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.tlink:hover { color: var(--ink); border-color: var(--rule-strong); background: var(--hb-kraft); }
+
+/* ---------- Shell ---------- */
+.shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr) 380px;
+  height: calc(100vh - var(--topbar-h));
+  height: calc(100dvh - var(--topbar-h));
+  overflow: hidden;
+}
+
+/* ---------- Sidebar ----------
+   232px, the recessed stock, and a hairline drawn inside the box so the
+   column width is exactly 232. Same construction as the dashboard rail. */
+.sidebar {
+  box-shadow: inset -1px 0 0 var(--rule);
+  padding: 14px 12px 12px;
+  overflow-y: auto;
+  display: flex; flex-direction: column;
+  gap: 6px;
+  background: var(--hb-paper-2);
+}
+.rail-num {
+  font-size: var(--hb-fs-tiny); font-weight: 600;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--ink-3); line-height: 1.55;
+  padding: 4px 10px 10px;
+  box-shadow: inset 0 -1px 0 var(--rule);
+  margin-bottom: 4px;
+}
+
+.scope, .facet { display: flex; flex-direction: column; gap: 1px; }
+.scope button, .facet button {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  color: color-mix(in srgb, var(--hb-ink) 85%, var(--hb-paper-2));
+  border-radius: 3px;
+  transition: background .12s, color .12s;
+  text-align: left;
+}
+.scope button > :first-child, .facet button > :first-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scope button:hover, .facet button:hover { background: var(--forest-08); color: var(--ink); }
+/* Active facet = a solid forest fill with print on it. Forest is data ink and
+   this is the one chrome control that carries it, exactly as on the hosted
+   list: the selection is a mark on the sheet, not a darker sheet. */
+.scope button.on, .facet button.on {
+  background: var(--forest); color: var(--an-print);
+}
+.scope button.on .count, .facet button.on .count {
+  color: var(--peach);
+}
+.scope button .count, .facet button .count {
+  font-size: var(--hb-fs-label); color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.facet-label {
+  font-size: var(--hb-fs-meta); font-weight: 600;
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--ink-3); margin: 10px 4px 2px;
+}
+
+.sidebar-foot {
+  margin-top: auto; padding-top: 14px;
+  flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 10px;
+}
+/* Engine info card — a printed kraft specimen label. */
+.card-soft {
+  background: var(--hb-kraft);
+  border-radius: var(--radius); padding: 10px 12px;
+  box-shadow:
+    0 0 0 1px var(--hb-mount),
+    0 0 0 2px color-mix(in srgb, var(--hb-ink) 28%, transparent);
+}
+.card-label {
+  font-size: var(--hb-fs-meta); font-weight: 600;
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 4px;
+}
+.card-line {
+  font-family: var(--mono); font-size: 13px; font-weight: 500;
+  color: var(--ink);
+}
+.card-meta {
+  font-size: var(--hb-fs-label); color: var(--ink-3); margin-top: 2px;
+}
+.margin-note {
+  font-family: var(--serif); font-style: italic;
+  color: var(--ink-3); font-size: 12.5px; line-height: 1.5;
+  padding: 0 4px;
+}
+.margin-note strong { font-style: normal; color: var(--ink); font-weight: 500; }
+.margin-note em { color: var(--poppy-deep); font-style: italic; }
+/* The papaver marginalia in the sidebar folder sits on the sheet itself, the
+   way a hand note does; only the engine card is a pasted label. */
+.sidebar-foot .margin-note {
+  padding: 10px 4px 0;
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+
+/* ---------- List pane ---------- */
+.list-pane {
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  /* Transparent so the paper grain painted on <body> reads through the main
+     reading column (and stays put while the list scrolls). */
+  background: transparent;
+}
+.list-head {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  padding: 24px 24px 14px;
+  flex-shrink: 0;
+}
+.eyebrow {
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--ink-3);
+  margin-bottom: 8px;
+}
+.h-section {
+  font-family: var(--serif); font-weight: 500;
+  font-variation-settings: "SOFT" 44, "opsz" 144;
+  font-size: 26px; line-height: 1.1; letter-spacing: -0.015em;
+}
+.h-section em { color: var(--poppy-deep); font-style: italic; }
+.density {
+  display: inline-flex;
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px; overflow: hidden;
+  font-size: var(--hb-fs-meta); letter-spacing: 0.16em; text-transform: uppercase;
+}
+.density button {
+  padding: 6px 10px; color: var(--ink-3);
+  transition: color .12s, background .12s;
+}
+.density button:hover { color: var(--ink); }
+.density button.on { background: var(--forest); color: var(--an-print); }
+.density button + button { border-left: 1px solid var(--rule-strong); }
+/* The density switch lives at the foot of the facet rail, same as the list on
+   trags.ai: it is a property of the register, not of the window chrome. */
+.sidebar .density { align-self: flex-start; flex-shrink: 0; margin: 14px 4px 0; }
+
+.list {
+  overflow-y: auto;
+  flex: 1;
+}
+.row {
+  padding: var(--row-pad) 24px;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 12px;
+  transition: background .1s;
+}
+/* Rules BETWEEN rows, not under each one: the list ends on paper, the way a
+   register does on the hosted dashboard. */
+.row + .row { box-shadow: inset 0 1px 0 var(--rule); }
+.row:hover { background: color-mix(in srgb, var(--hb-mount) 60%, transparent); }
+.row.active { background: var(--hb-mount); }
+/* Dim a tombstone through its text, not through wrapper opacity, so the tag
+   that explains the dimming stays legible. */
+.row.tombstoned .content { color: color-mix(in srgb, var(--hb-ink) 60%, var(--hb-paper)); }
+.row.tombstoned .pin { opacity: 0.5; }
+
+.row .pin {
+  width: 8px; height: 8px; border-radius: 50%;
+  margin-top: 7px;
+}
+/* Memory-type pins are DATA INK — brand forest gradations + the poppy
+   accent, matching the hosted dashboard exactly. These stay forest on the
+   sepia paper; they are the one place chrome does not go sepia. Unscoped so
+   the same spectrum colors row pins, feed pins, and the detail type-pill. */
+.pin.fact        { background: var(--forest-50); }
+.pin.decision    { background: var(--forest-70); }
+.pin.preference  { background: var(--poppy); }
+.pin.lesson      { background: var(--lesson); }
+.pin.context     { background: var(--forest-30); }
+.pin.summary     { background: var(--forest-30); }
+
+.row .body {
+  display: flex; flex-direction: column; gap: 6px;
+  min-width: 0;
+}
+.row .content {
+  font-family: var(--mono); font-size: 13.5px; line-height: 1.55;
+  color: var(--ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.row .meta {
+  font-size: var(--hb-fs-label);
+  color: var(--ink-3);
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+  align-items: center;
+}
+.row .meta .type {
+  font-family: var(--mono); font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.16em;
+  color: color-mix(in srgb, var(--hb-ink) 70%, var(--hb-paper));
+}
+.row .meta .proj { color: var(--ink); }
+.row .meta .src { text-transform: uppercase; letter-spacing: 0.14em; }
+/* The relative age is the right-hand column of every list row on the hosted
+   dashboard; it holds that edge here too. */
+.row .meta .age {
+  margin-left: auto;
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.row .meta .score {
+  font-family: var(--mono); font-size: var(--hb-fs-chip);
+  background: var(--sand); color: var(--ink);
+  padding: 1px 6px; border-radius: 3px;
+}
+.row .meta .tomb-tag {
+  border: 1px solid color-mix(in srgb, var(--poppy) 50%, transparent);
+  background: color-mix(in srgb, var(--poppy) 10%, transparent);
+  color: var(--poppy-deep);
+  font-size: var(--hb-fs-chip); font-weight: 500;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 3px;
+}
+
+/* Compact density */
+body.compact .row { padding: 8px 24px; }
+body.compact .row .content { -webkit-line-clamp: 1; }
+body.compact .row .body { gap: 4px; }
+
+body.compact .today { padding: 24px 28px 40px; }
+body.compact .today-hero { padding-bottom: 18px; margin-bottom: 18px; }
+body.compact .today-quote { font-size: clamp(22px, 2.6vw, 32px); max-width: 38ch; }
+body.compact .today-date .day-num { font-size: 36px; }
+body.compact .today-meta { margin-top: 14px; gap: 0 24px; }
+body.compact .today-meta .stat strong { font-size: 22px; }
+body.compact .feed-band { padding: 10px 0; }
+body.compact .feed-band .band-label { min-height: 40px; }
+body.compact .feed-band .band-label .band-count { font-size: 18px; }
+body.compact .feed-item { padding: 7px 0; }
+body.compact .feed-item .body .text { -webkit-line-clamp: 1; font-size: 12.5px; }
+body.compact .feed-item .body .meta { font-size: 9.5px; }
+body.compact .today-cards { gap: 12px; }
+body.compact .today-card { padding: 14px; gap: 10px; }
+body.compact .today-card .row-line { font-size: 12px; padding: 2px 0; }
+
+.empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  flex: 1;
+  text-align: center;
+  color: var(--ink-3);
+  padding: 60px 32px;
+}
+.empty[hidden] { display: none; }
+.empty-mark {
+  font-family: var(--serif); font-size: 64px; color: var(--forest-15);
+  line-height: 1;
+}
+.empty h3 {
+  font-family: var(--serif); font-weight: 500; font-size: 20px;
+  font-variation-settings: "SOFT" 44, "opsz" 144;
+  color: var(--ink); margin-top: 12px;
+  letter-spacing: -0.01em;
+}
+.empty p { color: var(--ink-3); font-size: 14px; margin-top: 4px; }
+.empty code {
+  font-family: var(--mono); font-size: 13px;
+  background: var(--hb-kraft); padding: 1px 6px; border-radius: 3px;
+  color: var(--ink);
+}
+
+/* ---------- Today recap ---------- */
+.today {
+  overflow-y: auto;
+  flex: 1;
+  padding: 32px 36px 60px;
+}
+.today-hero {
+  border-bottom: 1px solid var(--cream-3);
+  padding-bottom: 28px;
+  margin-bottom: 28px;
+}
+.today-date {
+  font-size: 10.5px; letter-spacing: 0.28em; text-transform: uppercase;
+  color: var(--ink-3);
+  font-family: var(--mono);
+  margin-bottom: 16px;
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+}
+.today-date .day-num {
+  font-family: var(--serif); font-style: italic; font-weight: 300;
+  font-variation-settings: "opsz" 144;
+  font-size: 48px; line-height: 1; letter-spacing: -0.02em;
+  color: var(--poppy-deep);
+  margin-right: -8px;
+}
+.today-quote {
+  font-family: var(--serif); font-weight: 500;
+  font-variation-settings: "SOFT" 44, "opsz" 144;
+  font-size: clamp(26px, 3.2vw, 38px);
+  line-height: 1.1; letter-spacing: -0.018em;
+  color: var(--ink);
+  max-width: 28ch;
+}
+.today-quote em { color: var(--poppy-deep); font-style: italic; }
+.today-quote strong { color: var(--ink); font-weight: 500; }
+.today-meta {
+  margin-top: 22px;
+  display: flex; flex-wrap: wrap; gap: 0 36px;
+  font-size: 12px; color: var(--ink-3);
+  font-family: var(--mono);
+}
+.today-meta .stat {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.today-meta .stat strong {
+  font-family: var(--serif); font-style: italic; font-weight: 300;
+  font-variation-settings: "opsz" 144;
+  font-size: 30px; color: var(--ink); line-height: 1;
+  letter-spacing: -0.01em;
+}
+.today-meta .stat span {
+  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.today-section-head {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  margin-bottom: 16px; gap: 12px;
+}
+.today-section-head .eyebrow { margin-bottom: 6px; }
+.today-section-head h2 {
+  font-family: var(--serif); font-weight: 500;
+  font-variation-settings: "SOFT" 44, "opsz" 144;
+  font-size: 22px; line-height: 1.1; letter-spacing: -0.015em;
+}
+.today-section-head h2 em { color: var(--poppy-deep); font-style: italic; }
+
+.feed-grouped {
+  display: flex; flex-direction: column;
+  margin-bottom: 36px;
+}
+.feed-band {
+  display: grid; grid-template-columns: 110px 1fr;
+  gap: 24px;
+  border-top: 1px solid var(--cream-3);
+  padding: 18px 0;
+  align-items: start;
+}
+.feed-band:first-child { border-top: 0; padding-top: 6px; }
+.feed-band .band-label {
+  position: sticky; top: 0;
+  display: flex; flex-direction: column; gap: 6px;
+  align-items: flex-end;
+  padding-right: 14px;
+  border-right: 1px solid var(--cream-3);
+  padding-top: 4px;
+  min-height: 56px;
+}
+.feed-band .band-label .tick {
+  font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--hb-ink-soft); font-weight: 500;
+  font-family: var(--mono);
+}
+.feed-band .band-label .band-count {
+  font-family: var(--serif); font-style: italic; font-weight: 300;
+  font-variation-settings: "opsz" 144;
+  font-size: 22px; color: var(--ink); line-height: 1;
+  letter-spacing: -0.01em;
+}
+.band-items { display: flex; flex-direction: column; gap: 1px; }
+.feed-item {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--cream-2);
+  cursor: pointer;
+  display: grid; grid-template-columns: 56px 14px 1fr;
+  gap: 14px;
+  transition: background .1s;
+}
+.feed-item:last-child { border-bottom: 0; }
+.feed-item:hover { background: color-mix(in srgb, var(--cream-2) 50%, transparent); }
+.feed-item .when {
+  font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+  letter-spacing: 0.06em; padding-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.feed-item .pin { width: 8px; height: 8px; border-radius: 50%; margin-top: 8px; }
+.feed-item .body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.feed-item .body .text {
+  font-size: 13px; color: var(--ink); line-height: 1.55;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.feed-item .body .meta {
+  font-size: 10.5px; letter-spacing: 0.06em; color: var(--ink-3);
+  display: flex; gap: 14px;
+}
+
+.today-cards {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  margin-top: 8px;
+}
+.today-card {
+  background: var(--hb-mount);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex; flex-direction: column; gap: 14px;
+  /* A dashboard card wears a ring, not a frame: one hairline at ink/10 on
+     mount stock, the way the web app's Card primitive is built. */
+  box-shadow: 0 0 0 1px var(--ring-card);
+}
+.today-card .h-mono-label {
+  font-size: var(--hb-fs-tiny); font-weight: 600;
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--ink-3); font-family: var(--mono);
+}
+.today-card .row-line {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 13px; padding: 4px 0;
+}
+.today-card .row-line span:first-child {
+  color: var(--ink); font-family: var(--mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.today-card .row-line .bullet {
+  color: var(--poppy); margin-right: 6px; font-size: 9px;
+}
+.today-card .row-line .num {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2); font-size: 12px;
+}
+
+.spark-wrap { position: relative; }
+/* The captures sparkline is DATA INK — brand forest, not sepia (cardinal
+   herbarium rule). currentColor drives the line, the area-fill gradient, and
+   the hover dots. */
+.spark { width: 100%; height: 60px; color: var(--forest); display: block; overflow: visible; }
+.spark-axis {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 9.5px;
+  color: var(--ink-3); margin-top: 6px;
+  letter-spacing: 0.1em; text-transform: uppercase;
+}
+.spark-pt .hot { fill: transparent; cursor: pointer; }
+.spark-pt .dot {
+  fill: var(--cream);
+  stroke: var(--forest); stroke-width: 1.5;
+  opacity: 0;
+  transition: opacity .12s, r .12s;
+  pointer-events: none;
+}
+.spark-pt .rule {
+  stroke: var(--forest); stroke-width: 0.7;
+  stroke-dasharray: 2 3;
+  opacity: 0;
+  transition: opacity .12s;
+  pointer-events: none;
+}
+.spark-pt.on .dot { opacity: 1; r: 3.5; }
+.spark-pt.on .rule { opacity: 0.6; }
+.spark-tip {
+  position: absolute;
+  top: -28px;
+  transform: translateX(-50%);
+  background: var(--hb-panel); color: var(--hb-panel-ink);
+  font-family: var(--mono); font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+  letter-spacing: 0.04em;
+  box-shadow: 0 8px 18px -10px rgba(0,0,0,0.35);
+  z-index: 5;
+}
+.spark-tip::after {
+  content: ''; position: absolute;
+  bottom: -4px; left: 50%; transform: translateX(-50%) rotate(45deg);
+  width: 6px; height: 6px;
+  background: var(--hb-panel);
+}
+
+.quiet-line {
+  font-size: 13px; color: var(--ink-2); line-height: 1.55;
+}
+.quiet-line em {
+  font-family: var(--serif); font-style: italic; color: var(--ink);
+}
+.quiet-empty {
+  font-family: var(--serif); font-style: italic; color: var(--ink-3);
+  font-size: 14px;
+}
+
+@media (max-width: 1100px) {
+  .today-cards { grid-template-columns: 1fr; }
+  .feed-band { grid-template-columns: 80px 1fr; }
+}
+
+/* ---------- Detail pane ---------- */
+.detail-pane {
+  box-shadow: inset 1px 0 0 var(--rule);
+  background: var(--hb-paper-2);
+  overflow-y: auto;
+  padding: 24px 22px 32px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.detail-empty {
+  display: flex; flex-direction: column; gap: 14px;
+}
+/* Only reachable once the pane goes full-screen under 880px. */
+.detail-pane .detail-back { display: none; align-self: flex-start; }
+
+.detail-pane .row-spread {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 14px;
+}
+
+.detail-pane .type-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-weight: 500;
+  font-size: var(--hb-fs-label); letter-spacing: 0.16em; text-transform: uppercase;
+  color: color-mix(in srgb, var(--hb-ink) 70%, var(--hb-paper-2));
+}
+.detail-pane .type-pill .pin {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.detail-pane .id {
+  font-family: var(--mono); font-size: var(--hb-fs-label);
+  color: var(--ink-3);
+  background: var(--hb-kraft); padding: 2px 6px; border-radius: 3px;
+}
+.detail-pane .content-box {
+  background: var(--hb-mount);
+  border-radius: var(--radius);
+  padding: 14px;
+  box-shadow: 0 0 0 1px var(--ring-card);
+}
+.detail-pane textarea {
+  width: 100%; min-height: 132px;
+  font-family: var(--mono); font-size: 13.5px; line-height: 1.65;
+  color: var(--ink);
+  background: transparent;
+  border: 0; outline: 0; resize: vertical;
+}
+/* Provenance register: label above value, two per row where there is room —
+   the dashboard's expanded-row grid, turned on its side for a rail. */
+.detail-pane .meta-grid {
+  display: grid; grid-template-columns: 108px minmax(0, 1fr);
+  gap: 10px 14px;
+  font-size: 12px;
+  box-shadow: inset 0 1px 0 var(--rule);
+  padding-top: 14px;
+}
+.detail-pane .meta-grid dt {
+  font-size: var(--hb-fs-meta); font-weight: 600;
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--ink-3);
+  padding-top: 3px;
+}
+.detail-pane .meta-grid dd {
+  color: var(--ink); font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  min-width: 0; overflow-wrap: anywhere;
+}
+.detail-pane .meta-grid select,
+.detail-pane .meta-grid input {
+  width: 100%;
+  background: var(--cream); border: 1px solid var(--rule);
+  border-radius: 3px; padding: 4px 7px;
+  font-family: var(--mono); font-size: 12px; color: var(--ink);
+}
+.detail-pane .meta-grid select:focus,
+.detail-pane .meta-grid input:focus {
+  outline: none; border-color: var(--rule-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hb-ink) 12%, transparent);
+}
+
+.detail-pane .actions {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-top: 4px;
+}
+/* Buttons are the dashboard's: 28px tall, sentence case, medium weight, a
+   2px radius. The old tracked-uppercase stamp belonged to the marketing
+   sheet, not to a control someone clicks forty times a day. */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 28px; padding: 0 10px;
+  font-size: 12.5px; font-weight: 500;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  color: var(--ink); background: var(--hb-mount);
+  transition: background .15s, color .15s, border-color .15s;
+}
+.btn:hover { background: var(--hb-kraft); }
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hb-ink) 20%, transparent);
+}
+.btn.primary { background: var(--ink); border-color: var(--ink); color: var(--an-print); }
+.btn.primary:hover { background: color-mix(in srgb, var(--hb-ink) 80%, var(--hb-paper)); }
+.btn.danger {
+  border-color: transparent; color: var(--poppy-deep);
+  background: color-mix(in srgb, var(--poppy-deep) 10%, transparent);
+}
+.btn.danger:hover { background: color-mix(in srgb, var(--poppy-deep) 20%, transparent); }
+.btn.ghost { border-color: transparent; background: none; color: var(--ink-3); }
+.btn.ghost:hover { background: var(--hb-kraft); color: var(--ink); }
+
+.tomb-banner {
+  background: color-mix(in srgb, var(--poppy) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--poppy) 35%, transparent);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 12px; color: var(--ink);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.tomb-banner strong { color: var(--poppy-deep); }
+.tomb-banner .countdown { color: var(--ink-3); }
+
+/* ---------- Toast ---------- */
+.toast-wrap {
+  position: fixed; bottom: 22px; right: 22px;
+  display: flex; flex-direction: column; gap: 10px;
+  z-index: 100;
+}
+.toast {
+  background: var(--hb-panel); color: var(--hb-panel-ink);
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  display: flex; align-items: center; gap: 14px;
+  box-shadow: 0 22px 44px -24px rgb(2 55 38 / 0.55);
+  animation: rise 220ms cubic-bezier(.2,.8,.2,1);
+  min-width: 280px;
+}
+.toast .undo {
+  font-family: var(--mono); font-size: var(--hb-fs-label);
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--peach);
+  padding: 4px 8px; border: 1px solid color-mix(in srgb, var(--peach) 60%, transparent);
+  border-radius: 3px;
+}
+.toast .undo:hover { background: var(--peach); color: var(--ink); }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1100px) {
+  .shell { grid-template-columns: 208px minmax(0, 1fr) 320px; }
+  .topbar { grid-template-columns: 208px minmax(0, 1fr) auto; }
+}
+@media (max-width: 880px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .sidebar, .detail-pane { display: none; }
+  /* One pane at a time below the two-column breakpoint: picking a memory
+     pushes the detail over the list, and the back control returns. */
+  body.detail-open .list-pane { display: none; }
+  body.detail-open .detail-pane { display: flex; box-shadow: none; }
+  .detail-pane .detail-back { display: inline-flex; }
+
+  /* Filters open as a full sheet under the topbar. Picking any facet closes
+     it, so the common path is two taps and no chrome to dismiss. */
+  .filters-toggle {
+    display: inline-flex; align-items: center;
+    height: 36px; padding: 0 12px;
+    font-size: 12.5px; font-weight: 500;
+    border: 1px solid var(--rule-strong); border-radius: var(--radius);
+    color: var(--ink);
+  }
+  .filters-toggle[aria-expanded="true"] {
+    background: var(--forest); border-color: var(--forest); color: var(--an-print);
+  }
+  body.filters-open .sidebar {
+    display: flex;
+    position: fixed; inset: var(--topbar-h) 0 0 0; z-index: 15;
+    box-shadow: none;
+    padding: 16px;
+  }
+}
+
+/* Phone: the topbar stacks into a title row and a full-width search row, and
+   the small-type tier has already lifted to its 11px floor at :root. */
+@media (max-width: 639px) {
+  .topbar {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: auto;
+    align-content: center;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+  .brand { order: 1; }
+  .right { order: 2; position: absolute; right: 16px; top: 12px; }
+  .search { order: 3; max-width: none; margin: 0; height: 36px; }
+  /* Measured at 390px: the shortest useful count ("7 · 2") leaves 2.3px
+     between the masthead slug and the Filters handle, and collides outright
+     below 390. The counts stay on the list instead, where the facet rail
+     already names them. */
+  .status { display: none; }
+  .list-head { padding: 18px 16px 12px; }
+  .row { padding: var(--row-pad) 16px; }
+  body.compact .row { padding: 8px 16px; }
+  .detail-pane { padding: 18px 16px 28px; }
+  .detail-pane .meta-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .detail-pane .meta-grid dt { padding-top: 8px; }
+  .today { padding: 22px 16px 48px; }
+  .empty { padding: 48px 20px; }
+}
+
+/* ---------- Supersede modal ---------- */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgb(2 55 38 / 0.44);   /* the dashboard's modal scrim */
+  display: flex; align-items: center; justify-content: center;
+  z-index: 60; padding: 24px;
+}
+.modal-panel {
+  background: var(--hb-mount);
+  border-radius: var(--radius);
+  box-shadow: 0 0 0 1px var(--rule-strong), 0 24px 60px -20px rgb(2 55 38 / 0.35);
+  width: min(640px, 100%);
+  max-height: 90vh; overflow: auto;
+  display: flex; flex-direction: column;
+}
+.modal-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+  padding: 20px 22px 12px;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+.modal-head h2 {
+  font-family: var(--serif); font-weight: 500; font-size: 20px; line-height: 1.25;
+  font-variation-settings: "SOFT" 44, "opsz" 144;
+  color: var(--ink); margin-top: 4px;
+}
+.modal-head h2 em { font-style: italic; color: var(--ink-2); }
+.modal-body { padding: 18px 24px; display: flex; flex-direction: column; gap: 14px; }
+.modal-label {
+  display: block;
+  font-family: var(--mono); font-size: var(--hb-fs-meta); font-weight: 600;
+  letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--ink-3); margin-bottom: 6px;
+}
+.modal-label .hint { letter-spacing: 0; text-transform: none; color: var(--ink-4); margin-left: 4px; }
+.modal-body textarea,
+.modal-body input,
+.modal-body select {
+  width: 100%;
+  background: var(--cream); border: 1px solid var(--rule);
+  border-radius: 3px; padding: 8px 10px;
+  font-family: var(--mono); font-size: 12px; color: var(--ink);
+}
+.modal-body textarea:focus,
+.modal-body input:focus,
+.modal-body select:focus {
+  outline: none; border-color: var(--rule-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--hb-ink) 12%, transparent);
+}
+.modal-body textarea { resize: vertical; min-height: 110px; line-height: 1.5; }
+.modal-row { display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 12px; }
+.modal-actions {
+  display: flex; gap: 10px; justify-content: flex-end;
+  padding: 14px 22px 18px;
+  box-shadow: inset 0 1px 0 var(--rule);
+}
+.rel-id {
+  display: inline-flex; align-items: center;
+  font-family: var(--mono); font-size: 11px;
+  background: var(--hb-kraft); border: 1px solid var(--rule);
+  border-radius: 3px; padding: 1px 6px; cursor: pointer;
+  color: var(--ink);
+}
+.rel-id:hover { background: var(--hb-mount); border-color: var(--rule-strong); }
+.rel-badge {
+  display: inline-block;
+  font-family: var(--mono); font-size: var(--hb-fs-chip);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 1px 6px;
+  color: var(--ink-3); background: var(--hb-kraft);
+}
+@media (max-width: 640px) {
+  .modal-row { grid-template-columns: 1fr; }
+}

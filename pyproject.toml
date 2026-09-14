@@ -1,0 +1,140 @@
+[project]
+name = "poppy-memory"
+version = "0.3.1"
+description = "Developer memory CLI. Remember what matters."
+authors = [{name = "Haris Pasic"}]
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: Apache Software License",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "click>=8.1",
+    # <2: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp and renamed
+    # streamablehttp_client; migrating to the 2.x API is tracked separately.
+    "mcp>=1.27,<2",
+    # Direct dep: capture workers delegate embed/rerank to the daemon over HTTP
+    # (engine/_daemon_models.py). Already in the tree via mcp, but relying on a
+    # transitive would let a future mcp release silently break delegation.
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    # fastembed serves the `bloom` engine over ONNX (onnxruntime wheel +
+    # tokenizers, no torch): bge-small bi-encoder + ms-marco-MiniLM-L-6-v2
+    # cross-encoder. This is what keeps the default engine runnable from a plain
+    # `pip install poppy-memory`.
+    "fastembed>=0.8.0",
+    # >=6: capture(event, distinct_id=...) is the 6.0 signature; 3.x-5.x take
+    # (distinct_id, event) positionally and would silently send nothing. <8: the
+    # SDK's lifecycle surface has shifted across majors (6.0 dropped
+    # shutdown(timeout=)); the bound keeps a future major from
+    # breaking the atexit flush unreviewed.
+    "posthog>=6,<8",
+    "numpy>=1.26",
+    # Comment-preserving merges of Codex's ~/.codex/config.toml.
+    "tomlkit>=0.13",
+    # End-to-end encryption of the device-code API key in
+    # `poppy setup trags` (RSA-OAEP-SHA256).
+    "cryptography>=42",
+    # OS keychain storage for the Trags API key (poppy.keychain) on every
+    # install, not just the encryption extra: base and sync-only installs keep
+    # the key in the OS credential store rather than plaintext config.json. The
+    # import stays lazy, and storage falls back to config.json (0600) when no
+    # keychain backend is available (headless Linux, CI).
+    "keyring>=24",
+]
+
+[project.scripts]
+# Points at the main() wrapper (not the bare click group) so an offline
+# cold-cache ModelUnavailableError renders as one actionable line, not a
+# raw HuggingFace traceback.
+poppy = "poppy.cli.main:main"
+
+[project.urls]
+Homepage = "https://trags.ai/poppy"
+Documentation = "https://trags.ai/docs/poppy"
+
+[project.optional-dependencies]
+# Optional: anthropic SDK for LLM-driven consolidation and conflict detection.
+llm = [
+    "anthropic>=0.50",
+]
+# Optional: encryption at rest for the local store (`poppy encrypt`).
+# sqlcipher3 ships self-contained wheels (bundled SQLCipher + FTS5) for
+# macOS/Linux/Windows on CPython 3.9-3.13, so this stays off the base install.
+# (`keyring`, which holds the raw key in the OS credential store, is now a base
+# dependency, so the encryption extra only needs sqlcipher3.)
+encryption = [
+    "sqlcipher3>=0.6.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/poppy"]
+
+[tool.hatch.build.targets.sdist]
+# Explicit allowlist: hatchling otherwise ships every git-tracked file, which
+# used to include local QA scratch stores. Keep this in sync with
+# what `tests/` and README's "Hacking on it" section actually need.
+include = [
+    "src/",
+    "tests/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "pyproject.toml",
+    "mcpb/",
+    "docs/",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+    "slow: marks tests as slow (require API keys, network)",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+# Deliberately NOT in `dev`: the encryption dep (sqlcipher3) lives only in the
+# [encryption] extra. CI installs it in the main test leg via
+# `uv sync --extra encryption`, and runs a separate base-install leg (no extra)
+# so the guarded lazy imports and the encryption tests' importorskip skips are
+# actually exercised. keyring is a base dependency now, so keychain storage is
+# exercised in every leg.
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# These modules embed editorial prompt strings or fixture text that must remain
+# readable as prose for the LLM consumer; line-length lint would force lossy
+# reflows.
+"src/poppy/setup/claude_code.py" = ["E501"]
+"src/poppy/consolidation.py" = ["E501"]
+"tests/test_claude_memory_import.py" = ["E501"]

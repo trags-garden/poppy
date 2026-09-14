@@ -1,0 +1,910 @@
+import json
+import tomllib
+
+import pytest
+
+from poppy.setup.claude_code import (
+    CLAUDE_MD_BEGIN,
+    CLAUDE_MD_END,
+    CURSOR_DOCUMENTED_HOOK_EVENTS,
+    get_poppy_executable,
+    install_claude_md_block,
+    install_codex_hooks,
+    install_cursor_hooks,
+    install_for_client,
+    install_mcp_config,
+    install_post_compact_hook,
+    install_pre_tool_use_hook,
+    install_session_end_hook,
+    install_session_start_hook,
+    install_user_prompt_submit_hook,
+    is_codex_hooks_installed,
+    is_cursor_hooks_installed,
+    is_hook_installed,
+    is_mcp_installed,
+    managed_claude_md_present,
+    remove_legacy_hooks,
+)
+
+
+@pytest.fixture(autouse=True)
+def deterministic_poppy_path(tmp_path, monkeypatch):
+    executable = tmp_path / "resolved-bin" / "poppy"
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: str(executable))
+
+
+@pytest.fixture(autouse=True)
+def isolate_client_home_overrides(monkeypatch):
+    monkeypatch.delenv("COPILOT_HOME", raising=False)
+    monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("CURSOR_HOME", raising=False)
+
+
+def expected_poppy_path(tmp_path):
+    return str((tmp_path / "resolved-bin" / "poppy").resolve())
+
+
+def test_get_poppy_executable_prefers_path_hit(tmp_path, monkeypatch):
+    executable = tmp_path / "path-bin" / "poppy"
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: str(executable))
+
+    assert get_poppy_executable() == str(executable.resolve())
+
+
+def test_get_poppy_executable_falls_back_to_python_sibling(tmp_path, monkeypatch):
+    python = tmp_path / "venv" / "bin" / "python"
+    sibling = python.parent / "poppy"
+    sibling.parent.mkdir(parents=True)
+    sibling.touch()
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: None)
+    monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(python))
+
+    assert get_poppy_executable() == str(sibling.resolve())
+
+
+def test_get_poppy_executable_returns_bare_command_when_unresolved(tmp_path, monkeypatch):
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: None)
+    monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(tmp_path / "venv" / "bin" / "python"))
+
+    assert get_poppy_executable() == "poppy"
+
+
+def test_install_mcp_config_claude_code(tmp_path):
+    # Claude Code stores MCP server registrations in ~/.claude.json (sibling
+    # of the ~/.claude directory), not in ~/.claude/settings.json.
+    install_mcp_config(claude_config_dir=tmp_path, client="claude-code")
+    settings = json.loads((tmp_path / ".claude.json").read_text())
+    assert "poppy" in settings["mcpServers"]
+    assert settings["mcpServers"]["poppy"]["command"] == expected_poppy_path(tmp_path)
+    assert settings["mcpServers"]["poppy"]["args"] == ["serve", "--source", "claude-code"]
+    assert is_mcp_installed(tmp_path, client="claude-code")
+
+
+def test_install_session_start_hook(tmp_path):
+    install_session_start_hook(claude_config_dir=tmp_path)
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    hooks = settings["hooks"]["SessionStart"]
+    assert any(h.get("command") == "poppy hook session-start" for group in hooks for h in group.get("hooks", []))
+    assert is_hook_installed(tmp_path, "SessionStart")
+
+
+def test_install_session_end_hook(tmp_path):
+    install_session_end_hook(claude_config_dir=tmp_path)
+    assert is_hook_installed(tmp_path, "SessionEnd")
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    hooks = settings["hooks"]["SessionEnd"]
+    assert any(h.get("command") == "poppy hook session-end" for group in hooks for h in group.get("hooks", []))
+
+
+def test_install_post_compact_hook(tmp_path):
+    install_post_compact_hook(claude_config_dir=tmp_path)
+    assert is_hook_installed(tmp_path, "PostCompact")
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    hooks = settings["hooks"]["PostCompact"]
+    assert any(h.get("command") == "poppy hook post-compact" for group in hooks for h in group.get("hooks", []))
+
+
+def test_remove_legacy_stop_hook_preserves_user_hooks(tmp_path):
+    settings = {
+        "hooks": {
+            "Stop": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {"type": "command", "command": "poppy hook stop"},
+                        {"type": "command", "command": "user's other hook"},
+                    ],
+                }
+            ]
+        }
+    }
+    (tmp_path / "settings.json").write_text(json.dumps(settings))
+    removed = remove_legacy_hooks(tmp_path)
+    assert "Stop:poppy hook stop" in removed
+
+    final = json.loads((tmp_path / "settings.json").read_text())
+    stop_cmds = [h.get("command") for g in final.get("hooks", {}).get("Stop", []) for h in g.get("hooks", [])]
+    assert "poppy hook stop" not in stop_cmds
+    assert "user's other hook" in stop_cmds
+
+
+def test_install_hook_idempotent(tmp_path):
+    install_session_start_hook(claude_config_dir=tmp_path)
+    install_session_start_hook(claude_config_dir=tmp_path)
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    matching = [
+        h
+        for group in settings["hooks"]["SessionStart"]
+        for h in group.get("hooks", [])
+        if h.get("command") == "poppy hook session-start"
+    ]
+    assert len(matching) == 1
+
+
+def test_install_pre_tool_use_hook_migrates_owned_stale_matcher(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    user_group = {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "user's hook"}],
+    }
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Edit|Write|MultiEdit",
+                            "hooks": [{"type": "command", "command": "poppy hook pre-tool-use"}],
+                        },
+                        user_group,
+                    ]
+                }
+            }
+        )
+    )
+
+    install_pre_tool_use_hook(tmp_path)
+    migrated = json.loads(settings_path.read_text())
+    assert migrated["hooks"]["PreToolUse"][0]["matcher"] == "Edit|Write|NotebookEdit"
+    assert migrated["hooks"]["PreToolUse"][1] == user_group
+
+    after_migration = settings_path.read_text()
+    install_pre_tool_use_hook(tmp_path)
+    assert settings_path.read_text() == after_migration
+
+
+def test_install_pre_tool_use_hook_leaves_mixed_user_group_untouched(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    settings = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Edit|Write|MultiEdit",
+                    "hooks": [
+                        {"type": "command", "command": "poppy hook pre-tool-use"},
+                        {"type": "command", "command": "user's other hook"},
+                    ],
+                }
+            ]
+        }
+    }
+    settings_path.write_text(json.dumps(settings))
+
+    install_pre_tool_use_hook(tmp_path)
+
+    assert json.loads(settings_path.read_text()) == settings
+
+
+def test_install_claude_md_block_creates_file(tmp_path):
+    install_claude_md_block(claude_config_dir=tmp_path)
+    text = (tmp_path / "CLAUDE.md").read_text()
+    assert CLAUDE_MD_BEGIN in text
+    assert CLAUDE_MD_END in text
+    assert "Poppy memory" in text
+    assert managed_claude_md_present(tmp_path)
+
+
+def test_install_claude_md_block_preserves_existing(tmp_path):
+    md = tmp_path / "CLAUDE.md"
+    md.write_text("# Existing CLAUDE.md\n\nUser content here.\n")
+    install_claude_md_block(claude_config_dir=tmp_path)
+    text = md.read_text()
+    assert "User content here." in text
+    assert CLAUDE_MD_BEGIN in text
+
+
+def test_install_claude_md_block_replaces_old_block(tmp_path):
+    md = tmp_path / "CLAUDE.md"
+    md.write_text(f"prefix\n{CLAUDE_MD_BEGIN}\nstale content\n{CLAUDE_MD_END}\nsuffix\n")
+    install_claude_md_block(claude_config_dir=tmp_path)
+    text = md.read_text()
+    assert "prefix" in text
+    assert "suffix" in text
+    assert "stale content" not in text
+    assert "Poppy memory" in text
+
+
+def test_install_for_client_claude_code_full(tmp_path):
+    paths = install_for_client(client="claude-code", claude_config_dir=tmp_path)
+    assert "MCP config" in paths
+    assert "SessionStart hook" in paths
+    assert "UserPromptSubmit hook" in paths
+    assert "PreToolUse hook" in paths
+    assert "SessionEnd hook" in paths
+    assert "PostCompact hook" in paths
+    assert "CLAUDE.md block" in paths
+
+
+def test_install_user_prompt_submit_hook(tmp_path):
+    install_user_prompt_submit_hook(claude_config_dir=tmp_path)
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    hooks = settings["hooks"]["UserPromptSubmit"]
+    assert any(h.get("command") == "poppy hook user-prompt-submit" for group in hooks for h in group.get("hooks", []))
+    assert is_hook_installed(tmp_path, "UserPromptSubmit")
+
+
+def test_install_pre_tool_use_hook_has_matcher(tmp_path):
+    install_pre_tool_use_hook(claude_config_dir=tmp_path)
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    groups = settings["hooks"]["PreToolUse"]
+    # The PreToolUse hook must scope to write-capable tools, not fire on every tool call.
+    matcher_for_poppy = next(
+        g.get("matcher") for g in groups if any(h.get("command") == "poppy hook pre-tool-use" for h in g["hooks"])
+    )
+    assert matcher_for_poppy == "Edit|Write|NotebookEdit"
+    assert is_hook_installed(tmp_path, "PreToolUse")
+
+
+def test_install_for_client_no_hooks(tmp_path):
+    paths = install_for_client(client="claude-code", claude_config_dir=tmp_path, install_hooks=False)
+    assert "MCP config" in paths
+    assert "SessionStart hook" not in paths
+
+
+def test_install_for_client_cursor(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Cursor writes to ~/.cursor/mcp.json regardless of claude_config_dir
+    install_for_client(client="cursor", claude_config_dir=tmp_path)
+    cursor_config = tmp_path / ".cursor" / "mcp.json"
+    assert cursor_config.exists()
+    settings = json.loads(cursor_config.read_text())
+    assert "poppy" in settings["mcpServers"]
+    assert (tmp_path / ".cursor" / "hooks.json").exists()
+
+
+def test_install_cursor_hooks_fresh_native_shape_and_allowlist(tmp_path):
+    hooks_path = install_cursor_hooks(tmp_path)
+    settings = json.loads(hooks_path.read_text())
+
+    assert settings["version"] == 1
+    assert set(settings["hooks"]) == {
+        "sessionStart",
+        "beforeSubmitPrompt",
+        "preToolUse",
+        "sessionEnd",
+        "preCompact",
+    }
+    assert set(settings["hooks"]) <= CURSOR_DOCUMENTED_HOOK_EVENTS
+    assert all(set(entry) == {"command"} for entries in settings["hooks"].values() for entry in entries)
+    assert is_cursor_hooks_installed(tmp_path)
+
+
+def test_install_cursor_hooks_merge_preserves_user_content_and_is_idempotent(tmp_path):
+    hooks_path = tmp_path / "hooks.json"
+    original_user_entry = {"command": "user-hook", "timeout": 17, "matcher": "Write"}
+    unknown_user_value = [{"command": "future-user-hook", "custom": {"keep": True}}]
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "userTopLevel": {"keep": True},
+                "hooks": {
+                    "preToolUse": [
+                        original_user_entry,
+                        {"command": "poppy hook pre-tool-use"},
+                        {"command": "poppy hook pre-tool-use"},
+                    ],
+                    "futureEvent": unknown_user_value,
+                },
+            }
+        )
+    )
+
+    install_cursor_hooks(tmp_path)
+    first = hooks_path.read_text()
+    install_cursor_hooks(tmp_path)
+    assert hooks_path.read_text() == first
+
+    merged = json.loads(first)
+    assert merged["userTopLevel"] == {"keep": True}
+    assert merged["hooks"]["futureEvent"] == unknown_user_value
+    assert original_user_entry in merged["hooks"]["preToolUse"]
+    assert [entry["command"] for entry in merged["hooks"]["preToolUse"]].count("poppy hook pre-tool-use") == 1
+
+
+def test_install_cursor_hooks_backs_up_malformed_json_and_writes_fresh(tmp_path):
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text("{malformed")
+
+    install_cursor_hooks(tmp_path)
+
+    assert (tmp_path / "hooks.json.bak").read_text() == "{malformed"
+    assert is_cursor_hooks_installed(tmp_path)
+
+
+def test_install_cursor_hooks_backs_up_non_list_owned_event_and_writes_fresh(tmp_path, capsys):
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text(json.dumps({"userTopLevel": "discard malformed file", "hooks": {"preToolUse": {}}}))
+
+    install_cursor_hooks(tmp_path)
+
+    captured = capsys.readouterr()
+    assert "non-list values for Poppy-owned hook events: preToolUse" in captured.err
+    assert str(tmp_path / "hooks.json.bak") in captured.err
+    assert json.loads((tmp_path / "hooks.json.bak").read_text())["userTopLevel"] == "discard malformed file"
+    assert "userTopLevel" not in json.loads(hooks_path.read_text())
+    assert is_cursor_hooks_installed(tmp_path)
+
+
+def test_install_cursor_hooks_rotates_backups_without_clobbering(tmp_path):
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text("{first malformed")
+    install_cursor_hooks(tmp_path)
+    hooks_path.write_text("{second malformed")
+
+    install_cursor_hooks(tmp_path)
+
+    assert (tmp_path / "hooks.json.bak").read_text() == "{first malformed"
+    assert (tmp_path / "hooks.json.bak-1").read_text() == "{second malformed"
+
+
+def test_install_cursor_no_hooks(tmp_path, monkeypatch):
+    cursor_home = tmp_path / "cursor-home"
+    monkeypatch.setenv("CURSOR_HOME", str(cursor_home))
+
+    paths = install_for_client(client="cursor", install_hooks=False)
+
+    assert "Cursor hooks" not in paths
+    assert not (cursor_home / "hooks.json").exists()
+
+
+def test_install_codex_writes_toml_and_primer_idempotently(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert not is_mcp_installed(client="codex")
+
+    paths = install_for_client(client="codex")
+    config = tmp_path / ".codex" / "config.toml"
+    primer = tmp_path / ".codex" / "AGENTS.md"
+    assert paths["MCP config"] == config
+    assert paths["Primer (AGENTS.md)"] == primer
+    assert paths["Codex hooks"] == tmp_path / ".codex" / "hooks.json"
+    assert tomllib.loads(config.read_text())["mcp_servers"]["poppy"] == {
+        "command": expected_poppy_path(tmp_path),
+        "args": ["serve", "--source", "codex"],
+    }
+    assert is_mcp_installed(client="codex")
+    assert is_codex_hooks_installed()
+
+    install_for_client(client="codex")
+    primer_text = primer.read_text()
+    assert primer_text.count(CLAUDE_MD_BEGIN) == 1
+    assert primer_text.count(CLAUDE_MD_END) == 1
+
+
+def test_install_codex_hooks_merges_migrates_and_is_idempotent(tmp_path):
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "unrelated": {"keep": True},
+                "hooks": {
+                    "SessionStart": [
+                        {"matcher": "", "hooks": [{"type": "command", "command": "poppy hook session-start"}]},
+                        {"matcher": "", "hooks": [{"type": "command", "command": "user start hook"}]},
+                    ],
+                    "PreToolUse": [
+                        {
+                            "matcher": "Edit|Write|NotebookEdit",
+                            "hooks": [
+                                {"type": "command", "command": "poppy hook pre-tool-use"},
+                                {"type": "command", "command": "user edit hook"},
+                            ],
+                        }
+                    ],
+                    "SessionEnd": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                {"type": "command", "command": "poppy hook session-end"},
+                                {"type": "command", "command": "user end hook"},
+                            ],
+                        }
+                    ],
+                    "PostCompact": [
+                        {"matcher": "", "hooks": [{"type": "command", "command": "poppy hook post-compact"}]}
+                    ],
+                },
+            }
+        )
+    )
+
+    assert install_codex_hooks(tmp_path) == hooks_path
+    first = hooks_path.read_text()
+    assert is_codex_hooks_installed(tmp_path)
+    install_codex_hooks(tmp_path)
+    assert hooks_path.read_text() == first
+
+    settings = json.loads(first)
+    assert settings["unrelated"] == {"keep": True}
+    assert "PostCompact" not in settings["hooks"]
+    commands = {
+        event: [h["command"] for group in groups for h in group.get("hooks", [])]
+        for event, groups in settings["hooks"].items()
+    }
+    assert commands["SessionStart"].count("poppy hook session-start") == 1
+    assert "user start hook" in commands["SessionStart"]
+    assert "poppy hook session-end" not in commands["SessionEnd"]
+    assert "user end hook" in commands["SessionEnd"]
+    poppy_patch_group = next(
+        group
+        for group in settings["hooks"]["PreToolUse"]
+        if any(h.get("command") == "poppy hook pre-tool-use" for h in group["hooks"])
+    )
+    assert poppy_patch_group["matcher"] == "apply_patch"
+    assert commands["Stop"] == ["poppy hook stop"]
+
+
+def test_install_codex_no_hooks(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+    paths = install_for_client(client="codex", install_hooks=False)
+
+    assert "Codex hooks" not in paths
+    assert not (tmp_path / "codex-home" / "hooks.json").exists()
+
+
+def test_install_codex_preserves_toml_content_comments_and_backup(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    original = '# keep this comment\nmodel = "gpt-test"\n\n[mcp_servers.other]\ncommand = "other"\n'
+    config.write_text(original)
+
+    paths = install_for_client(client="codex")
+    backup = config.with_name(config.name + ".pre-poppy.bak")
+    assert paths["backup"] == backup
+    assert backup.read_text() == original
+    merged = config.read_text()
+    assert "# keep this comment" in merged
+    assert tomllib.loads(merged)["mcp_servers"]["other"]["command"] == "other"
+
+    config.write_text(config.read_text().replace('model = "gpt-test"', 'model = "gpt-new"'))
+    second_paths = install_for_client(client="codex")
+    assert second_paths["backup"] == config.with_name(config.name + ".pre-poppy.bak-1")
+    assert backup.read_text() == original
+    assert 'model = "gpt-new"' in second_paths["backup"].read_text()
+
+
+def test_install_codex_aborts_on_corrupt_toml_without_modifying_it(tmp_path, monkeypatch):
+    from poppy.setup.claude_code import CorruptConfigError
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    corrupt = "[mcp_servers.poppy\ncommand = nope"
+    config.write_text(corrupt)
+
+    with pytest.raises(CorruptConfigError):
+        install_for_client(client="codex")
+    assert config.read_text() == corrupt
+    assert not config.with_name(config.name + ".pre-poppy.bak").exists()
+
+
+def test_install_codex_migrates_only_legacy_poppy_json_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / ".codex" / "config.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "poppy": {"command": "poppy", "type": "stdio"},
+                    "other": {"command": "other"},
+                },
+                "unrelated": {"keep": True},
+            }
+        )
+    )
+
+    paths = install_for_client(client="codex")
+    assert paths["Removed legacy MCP config"] == legacy
+    migrated = json.loads(legacy.read_text())
+    assert "poppy" not in migrated["mcpServers"]
+    assert migrated["mcpServers"]["other"] == {"command": "other"}
+    assert migrated["unrelated"] == {"keep": True}
+
+
+def test_install_for_client_copilot_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    install_for_client(client="copilot-cli", claude_config_dir=tmp_path)
+    config = tmp_path / ".copilot" / "mcp-config.json"
+    assert config.exists()
+    settings = json.loads(config.read_text())
+    assert settings["mcpServers"]["poppy"]["command"] == expected_poppy_path(tmp_path)
+    assert settings["mcpServers"]["poppy"]["args"] == ["serve", "--source", "copilot-cli"]
+
+
+def test_install_copilot_cli_preserves_existing_servers(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = tmp_path / ".copilot" / "mcp-config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"mcpServers": {"playwright": {"command": "playwright-mcp"}}}))
+    install_for_client(client="copilot-cli", claude_config_dir=tmp_path)
+    settings = json.loads(config.read_text())
+    assert settings["mcpServers"]["playwright"]["command"] == "playwright-mcp"
+    assert settings["mcpServers"]["poppy"]["command"] == expected_poppy_path(tmp_path)
+
+
+def test_install_for_client_pi(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    install_for_client(client="pi", claude_config_dir=tmp_path)
+    config = tmp_path / ".pi" / "agent" / "mcp.json"
+    assert config.exists()
+    settings = json.loads(config.read_text())
+    assert settings["mcpServers"]["poppy"]["command"] == expected_poppy_path(tmp_path)
+    assert settings["mcpServers"]["poppy"]["args"] == ["serve", "--source", "pi"]
+
+
+def test_install_copilot_cli_writes_primer(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    paths = install_for_client(client="copilot-cli", claude_config_dir=tmp_path)
+    primer = tmp_path / ".copilot" / "copilot-instructions.md"
+    assert paths["Primer (copilot-instructions.md)"] == primer
+    assert primer.exists()
+    text = primer.read_text()
+    assert CLAUDE_MD_BEGIN in text
+    assert CLAUDE_MD_END in text
+    assert "Poppy memory" in text
+
+
+def test_install_pi_writes_primer(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    paths = install_for_client(client="pi", claude_config_dir=tmp_path)
+    primer = tmp_path / ".pi" / "agent" / "AGENTS.md"
+    assert paths["Primer (AGENTS.md)"] == primer
+    assert primer.exists()
+    assert "Poppy memory" in primer.read_text()
+
+
+def test_primer_block_preserves_existing_agents_md(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    primer = tmp_path / ".copilot" / "copilot-instructions.md"
+    primer.parent.mkdir(parents=True)
+    primer.write_text("# Existing instructions\n\nMy own rules here.\n")
+    install_for_client(client="copilot-cli", claude_config_dir=tmp_path)
+    text = primer.read_text()
+    assert "My own rules here." in text
+    assert CLAUDE_MD_BEGIN in text
+
+
+def test_primer_block_replaces_stale_block_at_new_pi_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    agents = tmp_path / ".pi" / "agent" / "AGENTS.md"
+    agents.parent.mkdir(parents=True)
+    agents.write_text(f"prefix\n{CLAUDE_MD_BEGIN}\nstale\n{CLAUDE_MD_END}\nsuffix\n")
+    install_for_client(client="pi", claude_config_dir=tmp_path)
+    text = agents.read_text()
+    assert "prefix" in text
+    assert "suffix" in text
+    assert "stale" not in text
+    assert "Poppy memory" in text
+
+
+@pytest.mark.parametrize(
+    ("client", "legacy_relative"),
+    [
+        ("copilot-cli", ".copilot/AGENTS.md"),
+        ("pi", ".pi/AGENTS.md"),
+    ],
+)
+def test_install_removes_managed_block_from_legacy_primer_preserving_user_content(
+    tmp_path, monkeypatch, client, legacy_relative
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / legacy_relative
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(f"# User rules\n{CLAUDE_MD_BEGIN}\nstale\n{CLAUDE_MD_END}\nKeep this.\n")
+
+    install_for_client(client=client)
+    install_for_client(client=client)
+
+    text = legacy.read_text()
+    assert "# User rules" in text
+    assert "Keep this." in text
+    assert CLAUDE_MD_BEGIN not in text
+    assert CLAUDE_MD_END not in text
+
+
+@pytest.mark.parametrize(
+    ("client", "legacy_relative"),
+    [
+        ("copilot-cli", ".copilot/AGENTS.md"),
+        ("pi", ".pi/AGENTS.md"),
+    ],
+)
+def test_install_deletes_legacy_primer_containing_only_managed_block(tmp_path, monkeypatch, client, legacy_relative):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    legacy = tmp_path / legacy_relative
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(f" \n{CLAUDE_MD_BEGIN}\nstale\n{CLAUDE_MD_END}\n\t")
+
+    install_for_client(client=client)
+
+    assert not legacy.exists()
+
+
+def test_copilot_home_overrides_mcp_and_primer_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    copilot_home = tmp_path / "custom-copilot"
+    monkeypatch.setenv("COPILOT_HOME", str(copilot_home))
+    legacy = copilot_home / "AGENTS.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(f"{CLAUDE_MD_BEGIN}\nstale\n{CLAUDE_MD_END}\n")
+
+    paths = install_for_client(client="copilot-cli")
+
+    assert paths["MCP config"] == copilot_home / "mcp-config.json"
+    assert paths["Primer (copilot-instructions.md)"] == copilot_home / "copilot-instructions.md"
+    assert (copilot_home / "mcp-config.json").exists()
+    assert (copilot_home / "copilot-instructions.md").exists()
+    assert not legacy.exists()
+
+
+def test_pi_agent_dir_overrides_mcp_and_primer_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    agent_dir = tmp_path / "custom-pi-agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+
+    paths = install_for_client(client="pi")
+
+    assert paths["MCP config"] == agent_dir / "mcp.json"
+    assert paths["Primer (AGENTS.md)"] == agent_dir / "AGENTS.md"
+    assert (agent_dir / "mcp.json").exists()
+    assert (agent_dir / "AGENTS.md").exists()
+
+
+# ---------- claude-desktop integration ----------
+
+
+def test_install_for_client_claude_desktop_writes_config(tmp_path, monkeypatch):
+    target = tmp_path / "Claude" / "claude_desktop_config.json"
+    monkeypatch.setenv("POPPY_CLAUDE_DESKTOP_CONFIG", str(target))
+
+    paths = install_for_client(client="claude-desktop")
+    assert paths["MCP config"] == target
+    settings = json.loads(target.read_text())
+    assert settings["mcpServers"]["poppy"]["command"] == expected_poppy_path(tmp_path)
+    assert settings["mcpServers"]["poppy"]["args"] == ["serve", "--source", "claude-desktop"]
+    assert is_mcp_installed(client="claude-desktop")
+
+
+def test_install_claude_desktop_backs_up_existing_config(tmp_path, monkeypatch):
+    target = tmp_path / "claude_desktop_config.json"
+    target.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}, "userField": 42}))
+    monkeypatch.setenv("POPPY_CLAUDE_DESKTOP_CONFIG", str(target))
+
+    paths = install_for_client(client="claude-desktop")
+    backup = target.with_name(target.name + ".pre-poppy.bak")
+    assert paths["backup"] == backup
+    assert backup.exists()
+    # Backup must be the byte-identical pre-merge config.
+    assert json.loads(backup.read_text()) == {"mcpServers": {"other": {"command": "x"}}, "userField": 42}
+    # Merged config preserves the user's other entries.
+    merged = json.loads(target.read_text())
+    assert merged["userField"] == 42
+    assert merged["mcpServers"]["other"]["command"] == "x"
+    assert merged["mcpServers"]["poppy"]["args"] == ["serve", "--source", "claude-desktop"]
+
+
+def test_install_claude_desktop_backup_rotates(tmp_path, monkeypatch):
+    target = tmp_path / "claude_desktop_config.json"
+    original = {"mcpServers": {}, "marker": "v1"}
+    target.write_text(json.dumps(original))
+    monkeypatch.setenv("POPPY_CLAUDE_DESKTOP_CONFIG", str(target))
+
+    install_for_client(client="claude-desktop")
+    # Mutate target so the second backup represents a distinct pre-merge state.
+    target.write_text(json.dumps({"mcpServers": {"poppy": {"command": "poppy"}}, "marker": "v2"}))
+
+    paths = install_for_client(client="claude-desktop")
+    backup = target.with_name(target.name + ".pre-poppy.bak")
+    rotated = target.with_name(target.name + ".pre-poppy.bak-1")
+    assert paths["backup"] == rotated
+    assert json.loads(backup.read_text()) == original
+    assert json.loads(rotated.read_text())["marker"] == "v2"
+
+
+def test_install_claude_desktop_no_backup_when_absent(tmp_path, monkeypatch):
+    target = tmp_path / "claude_desktop_config.json"
+    monkeypatch.setenv("POPPY_CLAUDE_DESKTOP_CONFIG", str(target))
+
+    paths = install_for_client(client="claude-desktop")
+    assert "backup" not in paths
+    assert not target.with_name(target.name + ".pre-poppy.bak").exists()
+    assert target.exists()
+
+
+def test_get_claude_desktop_config_path_env_override(tmp_path, monkeypatch):
+    from poppy.setup.claude_code import get_claude_desktop_config_path
+
+    monkeypatch.setenv("POPPY_CLAUDE_DESKTOP_CONFIG", str(tmp_path / "x.json"))
+    assert get_claude_desktop_config_path() == tmp_path / "x.json"
+
+
+def test_get_claude_desktop_config_path_macos_default(monkeypatch, tmp_path):
+    from poppy.setup.claude_code import get_claude_desktop_config_path
+
+    monkeypatch.delenv("POPPY_CLAUDE_DESKTOP_CONFIG", raising=False)
+    monkeypatch.setattr("os.name", "posix")
+    # Pin the platform: on a Linux runner the real sys.platform would take the
+    # Linux branch and this test would assert the wrong default.
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    expected = tmp_path / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    assert get_claude_desktop_config_path() == expected
+
+
+def test_get_claude_desktop_config_path_linux_default(monkeypatch, tmp_path):
+    from poppy.setup.claude_code import get_claude_desktop_config_path
+
+    monkeypatch.delenv("POPPY_CLAUDE_DESKTOP_CONFIG", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    expected = tmp_path / ".config" / "Claude" / "claude_desktop_config.json"
+    assert get_claude_desktop_config_path() == expected
+
+
+def test_get_claude_desktop_config_path_linux_respects_xdg(monkeypatch, tmp_path):
+    from poppy.setup.claude_code import get_claude_desktop_config_path
+
+    monkeypatch.delenv("POPPY_CLAUDE_DESKTOP_CONFIG", raising=False)
+    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    expected = tmp_path / "xdg" / "Claude" / "claude_desktop_config.json"
+    assert get_claude_desktop_config_path() == expected
+
+
+def test_get_claude_desktop_msix_config_path_detects_virtualized_directory(tmp_path, monkeypatch):
+    from poppy.setup.claude_code import get_claude_desktop_msix_config_path
+
+    local_appdata = tmp_path / "LocalAppData"
+    virtualized_dir = local_appdata / "Packages" / "Claude_random-id" / "LocalCache" / "Roaming" / "Claude"
+    virtualized_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+
+    assert get_claude_desktop_msix_config_path() == virtualized_dir / "claude_desktop_config.json"
+
+
+def test_get_claude_desktop_msix_config_path_returns_none_without_install(tmp_path, monkeypatch):
+    from poppy.setup.claude_code import get_claude_desktop_msix_config_path
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+
+    assert get_claude_desktop_msix_config_path() is None
+
+
+def test_install_claude_desktop_also_merges_msix_config(tmp_path, monkeypatch):
+    normal_config = tmp_path / "normal" / "claude_desktop_config.json"
+    msix_dir = tmp_path / "LocalAppData" / "Packages" / "Claude_random-id" / "LocalCache" / "Roaming" / "Claude"
+    msix_dir.mkdir(parents=True)
+    msix_config = msix_dir / "claude_desktop_config.json"
+    msix_config.write_text(json.dumps({"mcpServers": {"other": {"command": "other"}}, "marker": "keep"}))
+    monkeypatch.setenv("POPPY_CLAUDE_DESKTOP_CONFIG", str(normal_config))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+
+    paths = install_for_client(client="claude-desktop")
+
+    assert paths["MCP config"] == normal_config
+    assert paths["MSIX MCP config"] == msix_config
+    msix_backup = msix_config.with_name(msix_config.name + ".pre-poppy.bak")
+    assert paths["MSIX backup"] == msix_backup
+    assert json.loads(msix_backup.read_text())["marker"] == "keep"
+    normal = json.loads(normal_config.read_text())
+    msix = json.loads(msix_config.read_text())
+    assert normal["mcpServers"]["poppy"]["command"] == expected_poppy_path(tmp_path)
+    assert msix["mcpServers"]["poppy"]["command"] == expected_poppy_path(tmp_path)
+    assert msix["mcpServers"]["other"] == {"command": "other"}
+    assert msix["marker"] == "keep"
+
+
+# --- PP-02: corrupt-config safety, universal backup, atomic write ---
+
+
+def test_install_aborts_on_corrupt_config_without_overwriting(tmp_path):
+    from poppy.setup.claude_code import CorruptConfigError
+
+    config = tmp_path / ".claude.json"
+    garbage = "{ this is not valid json "
+    config.write_text(garbage)
+
+    with pytest.raises(CorruptConfigError):
+        install_mcp_config(claude_config_dir=tmp_path, client="claude-code")
+    # The corrupt file is left byte-for-byte intact — not truncated to a stub.
+    assert config.read_text() == garbage
+
+
+def test_install_backs_up_existing_config_for_non_desktop_client(tmp_path):
+    from poppy.setup.claude_code import CONFIG_BACKUP_SUFFIX
+
+    config = tmp_path / ".claude.json"
+    config.write_text(json.dumps({"mcpServers": {"existing": {"command": "x"}}, "userField": 7}))
+
+    install_mcp_config(claude_config_dir=tmp_path, client="claude-code")
+
+    backup = config.with_name(config.name + CONFIG_BACKUP_SUFFIX)
+    assert backup.exists()
+    assert json.loads(backup.read_text()) == {"mcpServers": {"existing": {"command": "x"}}, "userField": 7}
+    # Live config gained poppy while preserving the user's other entries.
+    live = json.loads(config.read_text())
+    assert "poppy" in live["mcpServers"]
+    assert live["mcpServers"]["existing"]["command"] == "x"
+    assert live["userField"] == 7
+
+
+def test_install_no_backup_when_config_absent(tmp_path):
+    from poppy.setup.claude_code import CONFIG_BACKUP_SUFFIX
+
+    config = tmp_path / ".claude.json"
+    install_mcp_config(claude_config_dir=tmp_path, client="claude-code")
+
+    assert not config.with_name(config.name + CONFIG_BACKUP_SUFFIX).exists()
+    assert config.exists()
+
+
+def test_write_json_leaves_no_temp_file(tmp_path):
+    install_mcp_config(claude_config_dir=tmp_path, client="claude-code")
+    # Atomic write must clean up its same-dir temp file.
+    assert not list(tmp_path.glob(".claude.json.poppy-tmp-*"))
+
+
+def test_install_codex_hooks_preserves_group_without_hooks_key(tmp_path):
+    """A user-authored group with no "hooks" key must not be silently dropped."""
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {"matcher": "custom", "disabled": True},  # no "hooks" key
+                        {"matcher": "", "hooks": [{"type": "command", "command": "poppy hook user-prompt-submit"}]},
+                    ]
+                }
+            }
+        )
+    )
+    install_codex_hooks(tmp_path)
+    settings = json.loads(hooks_path.read_text())
+    groups = settings["hooks"]["UserPromptSubmit"]
+    assert {"matcher": "custom", "disabled": True} in groups
+    assert any(h.get("command") == "poppy hook user-prompt-submit" for g in groups for h in g.get("hooks", []))
+    assert is_codex_hooks_installed(tmp_path)
+
+
+def test_install_codex_hooks_preserves_non_list_event_value(tmp_path):
+    """A malformed non-list event value must be preserved verbatim, not crash."""
+    hooks_path = tmp_path / "hooks.json"
+    hooks_path.write_text(json.dumps({"hooks": {"Stop": "poppy hook stop"}}))  # non-list value
+    # Must not raise.
+    install_codex_hooks(tmp_path)
+    settings = json.loads(hooks_path.read_text())
+    assert settings["hooks"]["Stop"] == "poppy hook stop"  # user value untouched
+    # Other events still got their poppy hooks installed.
+    assert any(
+        h.get("command") == "poppy hook session-start"
+        for g in settings["hooks"]["SessionStart"]
+        for h in g.get("hooks", [])
+    )

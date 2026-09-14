@@ -1,0 +1,13 @@
+# Gitleaks allowlist. Default rules stay on; only known non-secrets are excluded.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secrets in history"
+regexTarget = "match"
+regexes = [
+  '''phc_[A-Za-z0-9]{40,}''',            # PostHog project API key: public, write-only by design
+  '''usr_secretkey_abc123''',            # tests/test_config_keychain.py fixture
+  '''SQUIRREL_CANARY_9f3a''',            # tests/test_encryption.py fixture
+  '''moreBase64LinesHere''',             # tests/capture/test_redaction.py fake RSA key
+]

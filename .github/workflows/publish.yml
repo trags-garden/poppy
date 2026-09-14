@@ -1,0 +1,108 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual trigger (Actions tab / `gh workflow run publish.yml`). Builds the
+  # version currently in pyproject.toml; PyPI rejects re-uploading an existing
+  # version, so use this to re-run a failed upload or publish a fresh bump.
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for PyPI Trusted Publishing (no stored API token)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Verify build metadata
+        run: python -m twine check dist/*
+
+      # Hand the exact bytes that go to PyPI to the release job below, so the
+      # GitHub Release attaches the published artifacts rather than a rebuild.
+      # Uploaded before the publish step: PyPI versions are immutable, so a
+      # re-run after a successful publish cannot get past it to retry the upload.
+      # Kept 30 days to cover GitHub's re-run window for the release job.
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # A tag publish should leave a GitHub Release behind: the changelog section as
+  # notes, the published wheel + sdist attached. Separate job so `contents:
+  # write` stays off the build job, which keeps the read-only default.
+  github-release:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+
+    # Gate on the ref, not the event: a workflow_dispatch run launched against a
+    # v* tag does run this job (github.ref is that tag), while a dispatch run on
+    # a branch ref has no tag to name a release after and skips it.
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write   # create the release and upload its assets
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Extract changelog section for this version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Take everything between "## [X.Y.Z] - date" and the next "## [" heading.
+          awk -v hdr="## [$VERSION]" '
+            index($0, hdr) == 1 { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section for tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # PEP 440 pre/dev releases are marked so they do not show as "Latest".
+          PRERELEASE=()
+          if printf '%s' "${GITHUB_REF_NAME#v}" | grep -Eiq '(a|b|rc|dev)[0-9]+'; then
+            PRERELEASE=(--prerelease)
+          fi
+          # Re-running this job after a partial failure has to converge, not die
+          # on "release already exists", so update an existing release in place.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file notes.md "${PRERELEASE[@]}"
+          fi

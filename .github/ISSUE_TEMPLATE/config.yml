@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/trags-garden/poppy/blob/main/SECURITY.md
+    about: Please do not file security issues publicly. Email security@trags.ai instead.
+  - name: Feedback by email
+    url: mailto:feedback@trags.ai
+    about: No GitHub account, or prefer email? Send bug reports and feedback to feedback@trags.ai.
