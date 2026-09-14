@@ -266,8 +266,8 @@ def _read_json(path: Path, *, strict: bool = False) -> dict:
     return {}
 
 
-def _write_json(path: Path, data: dict) -> None:
-    _write_text(path, json.dumps(data, indent=2))
+def _write_json(path: Path, data: dict, *, target: Path) -> None:
+    _write_text(path, json.dumps(data, indent=2), target=target)
 
 
 def _resolve_write_target(path: Path) -> Path:
@@ -276,34 +276,51 @@ def _resolve_write_target(path: Path) -> Path:
     Users who manage client configs with a dotfiles tool (stow, chezmoi, yadm)
     keep them as symlinks. ``os.replace`` onto the link would swap the link for
     a plain file and silently detach the config, so writes go to the link's
-    final target instead (relative and chained links included). A dangling
-    link is written through like a shell redirect would, creating its target,
-    provided the target's directory exists. A link loop or a target directory
-    that is missing is refused rather than guessed at.
+    final target instead (relative and chained links included). A link that
+    does not lead to an existing, writable file is refused: guessing where a
+    dangling link "should" point can overwrite an unrelated file.
     """
     if not path.is_symlink():
         return path
     try:
-        return Path(os.path.realpath(path, strict=True))
-    except FileNotFoundError:
-        target = Path(os.path.realpath(path))
+        target = Path(os.path.realpath(path, strict=True))
+        # realpath collapses ".." textually; only trust the result when it is
+        # the same file the operating system opens through the link.
+        same_file = os.path.samefile(path, target)
     except OSError as exc:
         raise CorruptConfigError(
-            f"Refusing to write through unresolvable symlink at {path} ({exc.strerror}). "
-            "Fix or remove it, then re-run `poppy setup`."
+            f"Refusing to write through symlink at {path}: its target cannot be opened ({exc.strerror}). "
+            "Fix or remove the link, then re-run `poppy setup`."
         ) from exc
-    if not target.parent.is_dir():
+    if not same_file:
         raise CorruptConfigError(
-            f"Refusing to write through dangling symlink at {path}: {target.parent} does not exist. "
-            "Fix or remove it, then re-run `poppy setup`."
+            f"Refusing to write through symlink at {path}: it does not resolve to {target}. "
+            "Fix or remove the link, then re-run `poppy setup`."
+        )
+    if not (os.access(target.parent, os.W_OK | os.X_OK) and os.access(target, os.W_OK)):
+        raise CorruptConfigError(
+            f"Refusing to write through symlink at {path}: {target} is not writable. "
+            "Make it writable or remove the link, then re-run `poppy setup`."
         )
     return target
 
 
-def _write_text(path: Path, content: str) -> None:
-    """Atomically replace a text file using a same-directory temporary file."""
+def _write_text(path: Path, content: str, *, target: Path) -> None:
+    """Atomically replace a text file using a same-directory temporary file.
+
+    ``target`` is the file the caller resolved ``path`` to when it read the
+    config. If ``path`` now resolves elsewhere (a symlink was retargeted in
+    between), nothing is written, so content read from one file never lands
+    in another.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path = _resolve_write_target(path)
+    resolved = _resolve_write_target(path)
+    if resolved != target:
+        raise CorruptConfigError(
+            f"Refusing to write {path}: it was repointed from {target} to {resolved} "
+            "while `poppy setup` was running. Re-run `poppy setup`."
+        )
+    path = resolved
     # Preserve client config permissions; new configs may contain a bearer token.
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     # Atomic write: render to a temp file in the same directory, then os.replace
@@ -414,8 +431,10 @@ def _install_codex_mcp_config(
     legacy_path = config_path.with_suffix(".json")
 
     # Validate every existing user-owned config before modifying either file.
-    settings = _read_codex_toml(config_path, strict=True)
-    legacy = _read_json(legacy_path, strict=True)
+    config_target = _resolve_write_target(config_path)
+    legacy_target = _resolve_write_target(legacy_path)
+    settings = _read_codex_toml(config_target, strict=True)
+    legacy = _read_json(legacy_target, strict=True)
 
     mcp_servers = settings.get("mcp_servers")
     if mcp_servers is None:
@@ -441,13 +460,13 @@ def _install_codex_mcp_config(
     mcp_servers["poppy"] = poppy
 
     backup = _backup_once(config_path, CONFIG_BACKUP_SUFFIX)
-    _write_text(config_path, tomlkit.dumps(settings))
+    _write_text(config_path, tomlkit.dumps(settings), target=config_target)
 
     migrated = None
     legacy_servers = legacy.get("mcpServers")
     if isinstance(legacy_servers, dict) and "poppy" in legacy_servers:
         del legacy_servers["poppy"]
-        _write_json(legacy_path, legacy)
+        _write_json(legacy_path, legacy, target=legacy_target)
         migrated = legacy_path
 
     return config_path, backup, migrated
@@ -464,7 +483,8 @@ def _install_json_mcp_config(
 ) -> Path:
     # Read strict first: abort on a corrupt existing config before we touch it,
     # rather than truncating the user's file to a 3-key stub (PP-02).
-    settings = _read_json(settings_path, strict=True)
+    target = _resolve_write_target(settings_path)
+    settings = _read_json(target, strict=True)
     # Back up any existing config before the first overwrite, for every client.
     if backup_existing:
         _backup_once(settings_path, CONFIG_BACKUP_SUFFIX)
@@ -478,7 +498,7 @@ def _install_json_mcp_config(
         token=daemon_token,
     )
 
-    _write_json(settings_path, settings)
+    _write_json(settings_path, settings, target=target)
     return settings_path
 
 
@@ -739,6 +759,8 @@ def _validate_cursor_hooks_config(settings: object, path: Path) -> str | None:
 
 
 def _read_cursor_hooks_config(path: Path) -> tuple[dict, str | None]:
+    # Only the writer and the setup preflight read hooks through here, so an
+    # unfollowable symlink is refused before any file changes.
     _resolve_write_target(path)
     if not path.exists():
         return {}, None
@@ -757,7 +779,8 @@ def _read_cursor_hooks_config(path: Path) -> tuple[dict, str | None]:
 def install_cursor_hooks(cursor_home: Path | None = None) -> Path:
     """Merge Poppy's hooks into Cursor's native global ``hooks.json``."""
     hooks_path = (cursor_home or get_cursor_home()) / "hooks.json"
-    settings, reset_reason = _read_cursor_hooks_config(hooks_path)
+    target = _resolve_write_target(hooks_path)
+    settings, reset_reason = _read_cursor_hooks_config(target)
     if reset_reason is not None:
         backup = _backup_once(hooks_path, ".bak")
         sys.stderr.write(
@@ -791,7 +814,7 @@ def install_cursor_hooks(cursor_home: Path | None = None) -> Path:
 
     settings["version"] = 1
     settings["hooks"] = merged
-    _write_json(hooks_path, settings)
+    _write_json(hooks_path, settings, target=target)
     return hooks_path
 
 
@@ -831,7 +854,8 @@ def install_codex_hooks(codex_home: Path | None = None) -> Path:
     deterministic, idempotent result.
     """
     hooks_path = (codex_home or get_codex_home()) / "hooks.json"
-    settings = _read_json(hooks_path, strict=True)
+    target = _resolve_write_target(hooks_path)
+    settings = _read_json(target, strict=True)
     hooks = _validate_hooks_object(settings, hooks_path, allow_null=True)
 
     # Preserve verbatim any shape the merger does not positively recognize as a
@@ -878,7 +902,7 @@ def install_codex_hooks(codex_home: Path | None = None) -> Path:
             )
 
     settings["hooks"] = merged
-    _write_json(hooks_path, settings)
+    _write_json(hooks_path, settings, target=target)
     return hooks_path
 
 
@@ -951,7 +975,8 @@ def has_any_codex_poppy_hook(codex_home: Path | None = None) -> bool:
 
 def _install_hook(claude_dir: Path, event: str) -> Path:
     settings_path = claude_dir / "settings.json"
-    settings = _read_json(settings_path, strict=True)
+    target = _resolve_write_target(settings_path)
+    settings = _read_json(target, strict=True)
     _validate_claude_hooks_config(settings, settings_path)
     settings.setdefault("hooks", {})
     settings["hooks"].setdefault(event, [])
@@ -964,7 +989,7 @@ def _install_hook(claude_dir: Path, event: str) -> Path:
         if group.get("hooks") == poppy_hooks:
             if group.get("matcher") != matcher:
                 group["matcher"] = matcher
-                _write_json(settings_path, settings)
+                _write_json(settings_path, settings, target=target)
             return settings_path
 
     # A mixed group may be user-owned. Treat the command as installed without
@@ -980,7 +1005,7 @@ def _install_hook(claude_dir: Path, event: str) -> Path:
             "hooks": poppy_hooks,
         }
     )
-    _write_json(settings_path, settings)
+    _write_json(settings_path, settings, target=target)
     return settings_path
 
 
@@ -1012,7 +1037,8 @@ def remove_legacy_hooks(claude_config_dir: Path | None = None) -> list[str]:
     """
     claude_dir = claude_config_dir or get_claude_config_dir()
     settings_path = claude_dir / "settings.json"
-    settings = _read_json(settings_path, strict=True)
+    target = _resolve_write_target(settings_path)
+    settings = _read_json(target, strict=True)
     _validate_claude_hooks_config(settings, settings_path)
     hooks = settings.get("hooks", {})
     removed: list[str] = []
@@ -1035,7 +1061,7 @@ def remove_legacy_hooks(claude_config_dir: Path | None = None) -> list[str]:
 
     if removed:
         settings["hooks"] = hooks
-        _write_json(settings_path, settings)
+        _write_json(settings_path, settings, target=target)
     return removed
 
 
