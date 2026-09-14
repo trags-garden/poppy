@@ -8,7 +8,10 @@ traceback or a silent 32x retry storm.
 
 from __future__ import annotations
 
+import errno
+import io
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -19,7 +22,7 @@ from poppy.models import Memory, Source
 from poppy.sync import pull, push
 from poppy.sync.client import TragsAuthError, TragsConflictError, TragsError, TragsQuotaError
 from poppy.sync.serializer import is_tombstone, memory_to_wire, tombstone_to_wire
-from poppy.sync.state import PUSH_WATERMARK_VERSION, RemoteState, SyncState, clear_error, load, record_error
+from poppy.sync.state import PUSH_WATERMARK_VERSION, RemoteState, SyncState, clear_error, load, record_error, save
 from poppy.ui.tombstones import TombstoneStore
 
 _NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -928,6 +931,66 @@ def test_a_state_save_that_never_lands_leaves_the_watermark_pass_owed(tmp_path, 
     again = _FakeClient()
     push(engine=engine, tombstones=tombstones, client=again, state=load(tmp_path), poppy_dir=tmp_path)
     assert {u["id"] for u in again.upserts} == {"stranded"}
+
+
+class _DiskFullMidWrite:
+    """A writable file that stores the first half of what it is given, then fails as a full disk would."""
+
+    def __init__(self, handle):
+        self._handle = handle
+
+    def write(self, text):
+        self._handle.write(text[: len(text) // 2])
+        self._handle.flush()
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._handle.close()
+
+
+@pytest.mark.parametrize("failure", ["write", "replace"])
+def test_an_interrupted_state_save_keeps_the_previous_state(tmp_path, monkeypatch, failure):
+    """A save that dies part way must leave the last good state readable.
+
+    The lenient ``load`` reads a torn file as "no state", so a save that
+    truncated in place would silently reset every remote's watermarks and force
+    the recovery passes to run again on the next sync.
+    """
+    before = SyncState(
+        remotes={"https://trags.test": RemoteState(last_pushed_at="2026-07-01T12:00:00+00:00", pushed_count=3)}
+    )
+    save(tmp_path, before)
+    after = SyncState(
+        remotes={"https://trags.test": RemoteState(last_pushed_at="2026-07-02T12:00:00+00:00", pushed_count=9)}
+    )
+
+    if failure == "write":
+        real_open = io.open
+
+        def disk_fills(file, mode="r", *args, **kwargs):
+            handle = real_open(file, mode, *args, **kwargs)
+            return _DiskFullMidWrite(handle) if "w" in mode else handle
+
+        monkeypatch.setattr(io, "open", disk_fills)
+    else:
+
+        def killed_before_rename(*_args, **_kwargs):
+            raise OSError("interrupted")
+
+        monkeypatch.setattr(os, "replace", killed_before_rename)
+
+    with pytest.raises(OSError):
+        save(tmp_path, after)
+    monkeypatch.undo()
+
+    assert load(tmp_path, strict=True) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["sync_state.json"]
 
 
 def test_do_sync_keeps_error_when_cycle_has_errors(tmp_path, monkeypatch):

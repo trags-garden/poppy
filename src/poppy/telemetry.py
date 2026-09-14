@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from poppy.paths import ensure_poppy_dir
+from poppy.paths import ensure_poppy_dir, write_text_atomic
 
 # Public project API key — safe to embed (PostHog `phc_*` keys are write-only).
 _POSTHOG_KEY = "phc_sL4ZeJng3mDGinNXn8esUpzzVazeomJofqQC6SF52R4F"
@@ -100,7 +100,9 @@ def _load(poppy_dir: Path) -> dict:
 def _save(poppy_dir: Path, data: dict) -> None:
     p = _analytics_path(poppy_dir)
     ensure_poppy_dir(p.parent)
-    p.write_text(json.dumps(data, indent=2))
+    # Atomic: a torn file reads as empty, which would mint a new device id and
+    # replay the first-run notice and milestone events.
+    write_text_atomic(p, json.dumps(data, indent=2))
 
 
 @contextmanager

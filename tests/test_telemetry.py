@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -79,6 +80,22 @@ def test_first_run_creates_analytics_with_device_id(tmp_path: Path, telemetry_on
     assert data["telemetry"] == "on"
     assert len(data["device_id"]) >= 16
     assert "created_at" in data
+
+
+def test_an_interrupted_analytics_save_keeps_the_previous_file(tmp_path: Path, monkeypatch) -> None:
+    """A torn analytics.json reads as empty, minting a new device id; a failed save must leave the old file."""
+    telemetry._save(tmp_path, {"device_id": "kept", "first_run_notice_shown": True})
+
+    def killed_before_rename(*_args, **_kwargs):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(os, "replace", killed_before_rename)
+    with pytest.raises(OSError):
+        telemetry._save(tmp_path, {"device_id": "new"})
+    monkeypatch.undo()
+
+    assert telemetry._load(tmp_path) == {"device_id": "kept", "first_run_notice_shown": True}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["analytics.json"]
 
 
 def test_telemetry_off_writes_nothing(tmp_path: Path, telemetry_on, fresh_client_state) -> None:

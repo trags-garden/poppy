@@ -15,7 +15,9 @@ or config.
 
 from __future__ import annotations
 
+import os
 import stat
+import tempfile
 from pathlib import Path
 
 # Owner-only (rwx) directory mode. mkdir's own mode argument is masked by umask
@@ -49,3 +51,30 @@ def ensure_poppy_dir(poppy_dir: Path) -> Path:
     except OSError:
         pass
     return poppy_dir
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` so readers see the old file or the new one, never a torn one.
+
+    A plain ``write_text`` truncates first, so a crash, kill or full disk part way
+    through leaves a half-written file. Lenient loaders read that as "no data"
+    and the next save makes the loss permanent. Here the text goes to a temporary
+    file in the same directory (``os.replace`` only renames atomically within one
+    filesystem), is flushed to disk, and then renamed over the target. The
+    temporary name is unique per writer, so two processes never publish each
+    other's half-written bytes, and a failed write never leaves it behind.
+    ``mkstemp`` creates the file owner-only (0600), matching the directory.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise

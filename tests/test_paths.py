@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from poppy.paths import ensure_poppy_dir
+from poppy.paths import ensure_poppy_dir, write_text_atomic
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX dir modes")
 
@@ -86,3 +86,13 @@ def test_journal_record_tightens_dir(tmp_path):
     d.chmod(0o755)
     journal.record(d, session_id="s1", project=None, count=0, items=[])
     assert _mode(d) == 0o700
+
+
+def test_write_text_atomic_replaces_a_loose_file_with_an_owner_only_one(tmp_path):
+    target = tmp_path / "state.json"
+    target.write_text("old")
+    target.chmod(0o644)
+    write_text_atomic(target, "new")
+    assert target.read_text() == "new"
+    assert _mode(target) == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
