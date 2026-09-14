@@ -78,3 +78,16 @@ def write_text_atomic(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+    # The rename is recorded in the directory, so flush that too, or a power loss
+    # right after can bring the old file back. Best effort: some platforms
+    # (Windows) and filesystems cannot open or fsync a directory.
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
