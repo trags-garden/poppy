@@ -899,6 +899,164 @@ def test_setup_refuses_malformed_hooks_before_any_changes(tmp_path, monkeypatch,
     assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
 
 
+_INVALID_CLAUDE_HOOKS = [
+    ([], "config root must be an object"),
+    ({"hooks": []}, '"hooks" must be an object'),
+    ({"hooks": None}, '"hooks" must be an object'),
+    ({"hooks": {"UserPromptSubmit": None}}, '"hooks.UserPromptSubmit" must be a list'),
+    ({"hooks": {"UserPromptSubmit": {}}}, '"hooks.UserPromptSubmit" must be a list'),
+    ({"hooks": {"UserPromptSubmit": "wrong"}}, '"hooks.UserPromptSubmit" must be a list'),
+    ({"hooks": {"UserPromptSubmit": [None]}}, '"hooks.UserPromptSubmit[0]" must be an object'),
+    ({"hooks": {"UserPromptSubmit": [[]]}}, '"hooks.UserPromptSubmit[0]" must be an object'),
+    ({"hooks": {"UserPromptSubmit": [{"hooks": None}]}}, '"hooks.UserPromptSubmit[0].hooks" must be a list'),
+    ({"hooks": {"UserPromptSubmit": [{"hooks": {}}]}}, '"hooks.UserPromptSubmit[0].hooks" must be a list'),
+    ({"hooks": {"UserPromptSubmit": [{"hooks": [None]}]}}, '"hooks.UserPromptSubmit[0].hooks[0]" must be an object'),
+    ({"hooks": {"Stop": None}}, '"hooks.Stop" must be a list'),
+]
+
+_REFUSED_CLIENT_CONFIGS = (
+    [
+        ("claude-code", ".claude/settings.json", json.dumps(settings).encode(), reason)
+        for settings, reason in _INVALID_CLAUDE_HOOKS
+    ]
+    + [
+        (client, f".{client}/hooks.json", json.dumps({"hooks": value}).encode(), '"hooks" must be an object')
+        for client in ("cursor", "codex")
+        for value in ([], "wrong", 1)
+    ]
+    + [
+        ("codex", ".codex/hooks.json", b"[]", "config root must be an object"),
+    ]
+    + [
+        (client, path, b"\xff\xfe", None)
+        for client, path in (
+            ("claude-code", ".claude/settings.json"),
+            ("claude-code", ".claude.json"),
+            ("cursor", ".cursor/hooks.json"),
+            ("cursor", ".cursor/mcp.json"),
+            ("codex", ".codex/hooks.json"),
+            ("codex", ".codex/config.json"),
+            ("codex", ".codex/config.toml"),
+        )
+    ]
+)
+
+
+@pytest.mark.parametrize("client,relative_path,original,reason", _REFUSED_CLIENT_CONFIGS)
+@pytest.mark.parametrize("daemon_mode", [False, True])
+@pytest.mark.parametrize("existing_mcp", [False, True])
+def test_setup_refuses_invalid_config_before_any_changes(
+    tmp_path, monkeypatch, client, relative_path, original, reason, daemon_mode, existing_mcp
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path / ".poppy"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path / ".cursor"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    mcp_path = (
+        tmp_path
+        / {
+            "claude-code": ".claude.json",
+            "cursor": ".cursor/mcp.json",
+            "codex": ".codex/config.toml",
+        }[client]
+    )
+    if existing_mcp:
+        mcp_path.parent.mkdir(parents=True, exist_ok=True)
+        mcp_path.write_bytes(
+            b'model = "keep"\r\n' if client == "codex" else b'{"mcpServers":{"other":{"command":"keep"}}}\r\n'
+        )
+    path = tmp_path / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(original)
+    (tmp_path / "unrelated.txt").write_bytes(b"keep\r\n")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+    def unexpected_daemon_setup():
+        pytest.fail("Daemon bootstrap must not run with invalid client config")
+
+    monkeypatch.setattr("poppy.cli.main._daemon_setup_kwargs", unexpected_daemon_setup)
+    prefix = (
+        f"Refusing to overwrite unparseable config at {path}. "
+        if reason is None
+        else f"Refusing to overwrite invalid hooks config at {path}: {reason}. "
+    )
+    message = prefix + "Fix or remove it, then re-run `poppy setup`."
+    with pytest.raises(CorruptConfigError) as exc:
+        install_for_client(client=client, daemon=daemon_mode, daemon_token="test-token" if daemon_mode else None)
+    assert str(exc.value) == message
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+    result = CliRunner().invoke(cli, ["setup", client] + (["--daemon"] if daemon_mode else []))
+    assert result.exit_code == 1
+    assert result.output == f"Error: {message}\n"
+    assert isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("settings,reason", _INVALID_CLAUDE_HOOKS)
+@pytest.mark.parametrize(
+    "installer",
+    [
+        install_session_start_hook,
+        install_user_prompt_submit_hook,
+        install_pre_tool_use_hook,
+        install_session_end_hook,
+        install_post_compact_hook,
+        remove_legacy_hooks,
+    ],
+)
+def test_claude_hook_writers_refuse_invalid_shapes(tmp_path, settings, reason, installer):
+    path = tmp_path / "settings.json"
+    original = json.dumps(settings).encode()
+    path.write_bytes(original)
+
+    with pytest.raises(CorruptConfigError) as exc:
+        installer(tmp_path)
+
+    assert str(path) in str(exc.value)
+    assert reason in str(exc.value)
+    assert {p: p.read_bytes() for p in tmp_path.iterdir()} == {path: original}
+
+
+@pytest.mark.parametrize("installer", [install_cursor_hooks, install_codex_hooks])
+@pytest.mark.parametrize("original", [b'{"hooks": []}', b"\xff\xfe"])
+def test_native_hook_writers_refuse_invalid_configs(tmp_path, installer, original):
+    path = tmp_path / "hooks.json"
+    path.write_bytes(original)
+
+    with pytest.raises(CorruptConfigError) as exc:
+        installer(tmp_path)
+
+    assert str(path) in str(exc.value)
+    assert "Refusing to overwrite" in str(exc.value)
+    assert {p: p.read_bytes() for p in tmp_path.iterdir()} == {path: original}
+
+
+@pytest.mark.parametrize("original", [b"{malformed", b"[]", b'{"hooks":{"preToolUse":{}}}'])
+def test_cursor_setup_keeps_intentional_backup_and_reset(tmp_path, monkeypatch, original):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cursor_home = tmp_path / ".cursor"
+    cursor_home.mkdir()
+    path = cursor_home / "hooks.json"
+    path.write_bytes(original)
+
+    result = CliRunner().invoke(cli, ["setup", "cursor"])
+
+    assert result.exit_code == 0, result.output
+    assert path.with_suffix(".json.bak").read_bytes() == original
+    assert is_cursor_hooks_installed(cursor_home)
+
+
+@pytest.mark.parametrize("status", [is_hook_installed, is_cursor_hooks_installed, is_codex_hooks_installed])
+def test_hook_status_tolerates_non_utf8(tmp_path, status):
+    (tmp_path / "settings.json").write_bytes(b"\xff\xfe")
+    (tmp_path / "hooks.json").write_bytes(b"\xff\xfe")
+
+    assert not status(tmp_path)
+
+
 def test_install_preserves_user_settings(tmp_path):
     user_hook = {"matcher": "custom", "hooks": [{"type": "command", "command": "user-hook"}]}
     original = {

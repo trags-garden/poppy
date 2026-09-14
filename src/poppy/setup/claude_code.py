@@ -237,7 +237,7 @@ def _client_settings_path(client: str, claude_dir: Path) -> Path:
 
 
 class CorruptConfigError(Exception):
-    """A client config file exists but is not parseable JSON or TOML.
+    """A client config file is unparseable or structurally invalid.
 
     Raised (in strict mode) instead of silently returning `{}`, so a write path
     that would overwrite the whole file aborts rather than truncating a config
@@ -254,7 +254,7 @@ def _read_json(path: Path, *, strict: bool = False) -> dict:
     if path.exists():
         try:
             return json.loads(path.read_text())
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if strict:
                 raise CorruptConfigError(
                     f"Refusing to overwrite unparseable config at {path}. Fix or remove it, then re-run `poppy setup`."
@@ -362,7 +362,7 @@ def _read_codex_toml(path: Path, *, strict: bool = False):
     if path.exists():
         try:
             return tomlkit.parse(path.read_text())
-        except (OSError, TOMLKitError) as exc:
+        except (OSError, TOMLKitError, UnicodeDecodeError) as exc:
             if strict:
                 raise CorruptConfigError(
                     f"Refusing to overwrite unparseable config at {path}. Fix or remove it, then re-run `poppy setup`."
@@ -653,45 +653,84 @@ assert _CURSOR_HOOK_DEFS.keys() <= CURSOR_DOCUMENTED_HOOK_EVENTS
 _ALL_POPPY_HOOK_COMMANDS = {command for _matcher, command in (*_HOOK_DEFS.values(), *_CODEX_HOOK_DEFS.values())}
 
 
+def _invalid_hooks_config(path: Path, reason: str) -> CorruptConfigError:
+    return CorruptConfigError(
+        f"Refusing to overwrite invalid hooks config at {path}: {reason}. Fix or remove it, then re-run `poppy setup`."
+    )
+
+
+def _validate_hooks_object(settings: object, path: Path, *, allow_null: bool = False) -> dict:
+    """Check the root and hooks mapping shared by the hook writers."""
+    if not isinstance(settings, dict):
+        raise _invalid_hooks_config(path, "config root must be an object")
+    hooks = settings.get("hooks", {})
+    if hooks is None and allow_null:
+        return {}
+    if not isinstance(hooks, dict):
+        raise _invalid_hooks_config(path, '"hooks" must be an object')
+    return hooks
+
+
+def _validate_claude_hooks_config(settings: object, path: Path) -> None:
+    hooks = _validate_hooks_object(settings, path)
+    for event, groups in hooks.items():
+        event_key = f"hooks.{event}"
+        if not isinstance(groups, list):
+            raise _invalid_hooks_config(path, f'"{event_key}" must be a list')
+        for index, group in enumerate(groups):
+            group_key = f"{event_key}[{index}]"
+            if not isinstance(group, dict):
+                raise _invalid_hooks_config(path, f'"{group_key}" must be an object')
+            commands = group.get("hooks", [])
+            if not isinstance(commands, list):
+                raise _invalid_hooks_config(path, f'"{group_key}.hooks" must be a list')
+            for command_index, command in enumerate(commands):
+                if not isinstance(command, dict):
+                    raise _invalid_hooks_config(path, f'"{group_key}.hooks[{command_index}]" must be an object')
+
+
+def _validate_cursor_hooks_config(settings: object, path: Path) -> str | None:
+    """Reject refused shapes; return a reason for Cursor's existing reset cases."""
+    if not isinstance(settings, dict):
+        return "malformed hooks config (hooks config root is not an object)"
+    hooks = _validate_hooks_object(settings, path, allow_null=True)
+    invalid_owned_events = sorted(
+        event for event in _CURSOR_HOOK_DEFS if event in hooks and not isinstance(hooks[event], list)
+    )
+    if invalid_owned_events:
+        return "non-list values for Poppy-owned hook events: " + ", ".join(invalid_owned_events)
+    return None
+
+
+def _read_cursor_hooks_config(path: Path) -> tuple[dict, str | None]:
+    if not path.exists():
+        return {}, None
+    try:
+        settings = json.loads(path.read_text())
+    except UnicodeDecodeError as exc:
+        raise CorruptConfigError(
+            f"Refusing to overwrite unparseable config at {path}. Fix or remove it, then re-run `poppy setup`."
+        ) from exc
+    except (OSError, ValueError) as exc:
+        return {}, f"malformed hooks config ({exc})"
+    reset_reason = _validate_cursor_hooks_config(settings, path)
+    return ({} if reset_reason else settings), reset_reason
+
+
 def install_cursor_hooks(cursor_home: Path | None = None) -> Path:
     """Merge Poppy's hooks into Cursor's native global ``hooks.json``."""
     hooks_path = (cursor_home or get_cursor_home()) / "hooks.json"
-    settings: dict = {}
-    reset_reason: str | None = None
-    if hooks_path.exists():
-        try:
-            parsed = json.loads(hooks_path.read_text())
-            if not isinstance(parsed, dict):
-                raise ValueError("hooks config root is not an object")
-            settings = parsed
-            parsed_hooks = settings.get("hooks")
-            if isinstance(parsed_hooks, dict):
-                invalid_owned_events = sorted(
-                    event
-                    for event in _CURSOR_HOOK_DEFS
-                    if event in parsed_hooks and not isinstance(parsed_hooks[event], list)
-                )
-                if invalid_owned_events:
-                    reset_reason = "non-list values for Poppy-owned hook events: " + ", ".join(invalid_owned_events)
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
-            reset_reason = f"malformed hooks config ({exc})"
-
-        if reset_reason is not None:
-            backup = _backup_once(hooks_path, ".bak")
-            settings = {}
-            sys.stderr.write(
-                f"poppy setup cursor: found {reset_reason}; backed up {hooks_path} to {backup} "
-                "and wrote a fresh valid hooks file\n"
-            )
+    settings, reset_reason = _read_cursor_hooks_config(hooks_path)
+    if reset_reason is not None:
+        backup = _backup_once(hooks_path, ".bak")
+        sys.stderr.write(
+            f"poppy setup cursor: found {reset_reason}; backed up {hooks_path} to {backup} "
+            "and wrote a fresh valid hooks file\n"
+        )
 
     hooks = settings.get("hooks")
     if hooks is None:
         hooks = {}
-    if not isinstance(hooks, dict):
-        raise CorruptConfigError(
-            f"Refusing to overwrite invalid hooks config at {hooks_path}. "
-            "Fix or remove it, then re-run `poppy setup cursor`."
-        )
 
     # Only touch Poppy command entries under events Poppy owns. Every other
     # event key and entry is retained exactly as parsed, including unknown keys.
@@ -756,14 +795,7 @@ def install_codex_hooks(codex_home: Path | None = None) -> Path:
     """
     hooks_path = (codex_home or get_codex_home()) / "hooks.json"
     settings = _read_json(hooks_path, strict=True)
-    hooks = settings.get("hooks")
-    if hooks is None:
-        hooks = {}
-    if not isinstance(hooks, dict):
-        raise CorruptConfigError(
-            f"Refusing to overwrite invalid hooks config at {hooks_path}. "
-            "Fix or remove it, then re-run `poppy setup codex`."
-        )
+    hooks = _validate_hooks_object(settings, hooks_path, allow_null=True)
 
     # Preserve verbatim any shape the merger does not positively recognize as a
     # poppy-command group; only entries it identifies as poppy commands are
@@ -883,6 +915,7 @@ def has_any_codex_poppy_hook(codex_home: Path | None = None) -> bool:
 def _install_hook(claude_dir: Path, event: str) -> Path:
     settings_path = claude_dir / "settings.json"
     settings = _read_json(settings_path, strict=True)
+    _validate_claude_hooks_config(settings, settings_path)
     settings.setdefault("hooks", {})
     settings["hooks"].setdefault(event, [])
 
@@ -943,6 +976,7 @@ def remove_legacy_hooks(claude_config_dir: Path | None = None) -> list[str]:
     claude_dir = claude_config_dir or get_claude_config_dir()
     settings_path = claude_dir / "settings.json"
     settings = _read_json(settings_path, strict=True)
+    _validate_claude_hooks_config(settings, settings_path)
     hooks = settings.get("hooks", {})
     removed: list[str] = []
 
@@ -1092,25 +1126,31 @@ def validate_client_config(
     claude_config_dir: Path | None = None,
     install_hooks: bool = True,
 ) -> None:
-    """Reject unparseable configs before setup makes any changes."""
+    """Reject unparseable or structurally invalid configs before any changes."""
     claude_dir = claude_config_dir or get_claude_config_dir()
     config_path = _client_settings_path(client, claude_dir)
     if client == "codex":
         _read_codex_toml(config_path, strict=True)
         json_paths = [config_path.with_suffix(".json")]
-        if install_hooks:
-            json_paths.append(get_codex_home() / "hooks.json")
     else:
         json_paths = [config_path]
-        if client == "claude-code" and install_hooks:
-            json_paths.append(claude_dir / "settings.json")
         if client == "claude-desktop":
             msix_path = get_claude_desktop_msix_config_path()
             if msix_path is not None and msix_path != config_path:
                 json_paths.append(msix_path)
-    # Cursor hooks intentionally back up malformed JSON and replace it.
     for path in json_paths:
         _read_json(path, strict=True)
+
+    if install_hooks:
+        if client == "claude-code":
+            path = claude_dir / "settings.json"
+            _validate_claude_hooks_config(_read_json(path, strict=True), path)
+        elif client == "codex":
+            path = get_codex_home() / "hooks.json"
+            _validate_hooks_object(_read_json(path, strict=True), path, allow_null=True)
+        elif client == "cursor":
+            # Validate without performing the writer's intentional backup/reset.
+            _read_cursor_hooks_config(get_cursor_home() / "hooks.json")
 
 
 def install_for_client(
