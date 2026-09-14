@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import tomllib
 
 import pytest
@@ -1141,6 +1143,98 @@ def test_write_json_leaves_no_temp_file(tmp_path):
     install_mcp_config(claude_config_dir=tmp_path, client="claude-code")
     # Atomic write must clean up its same-dir temp file.
     assert not list(tmp_path.glob(".claude.json.poppy-tmp-*"))
+
+
+def _link_to_dotfiles(tmp_path, link, content):
+    """Place ``content`` in a dotfiles directory and symlink ``link`` to it."""
+    target = tmp_path / "dots" / link.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    os.chmod(target, 0o640)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(os.path.relpath(target, link.parent))
+    return target
+
+
+@pytest.mark.parametrize(
+    ("client", "relative_path", "original"),
+    [
+        ("claude-code", ".claude.json", '{"userField": "keep-me"}'),
+        ("claude-code", ".claude/settings.json", '{"model": "keep-me"}'),
+        ("cursor", ".cursor/mcp.json", '{"userField": "keep-me"}'),
+        ("cursor", ".cursor/hooks.json", '{"version": 1, "hooks": {"stop": [{"command": "keep-me"}]}}'),
+        ("codex", ".codex/config.toml", 'model = "keep-me"\n'),
+        ("codex", ".codex/hooks.json", '{"hooks": {}, "userField": "keep-me"}'),
+    ],
+    ids=["claude-json", "claude-settings", "cursor-mcp", "cursor-hooks", "codex-toml", "codex-hooks"],
+)
+def test_install_writes_through_symlinked_client_config(tmp_path, monkeypatch, client, relative_path, original):
+    """A dotfiles-managed config stays a symlink and the change lands in its target."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("CURSOR_HOME", str(home / ".cursor"))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    link = home / relative_path
+    target = _link_to_dotfiles(tmp_path, link, original)
+    link_text = os.readlink(link)
+
+    install_for_client(client=client, claude_config_dir=home / ".claude", install_claude_md=False)
+
+    assert link.is_symlink()
+    assert os.readlink(link) == link_text
+    content = target.read_text()
+    assert "poppy" in content
+    assert "keep-me" in content
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+    assert not list(tmp_path.rglob("*.poppy-tmp-*"))
+
+
+def test_install_writes_through_chained_symlink(tmp_path):
+    config = tmp_path / "claude" / ".claude.json"
+    target = _link_to_dotfiles(tmp_path, tmp_path / "stow" / ".claude.json", '{"userField": 7}')
+    config.parent.mkdir()
+    config.symlink_to(tmp_path / "stow" / ".claude.json")
+
+    install_mcp_config(claude_config_dir=tmp_path / "claude", client="claude-code")
+
+    assert config.is_symlink()
+    assert (tmp_path / "stow" / ".claude.json").is_symlink()
+    settings = json.loads(target.read_text())
+    assert "poppy" in settings["mcpServers"]
+    assert settings["userField"] == 7
+
+
+def test_install_writes_through_dangling_symlink_into_existing_directory(tmp_path):
+    config = tmp_path / "claude" / ".claude.json"
+    target = tmp_path / "dots" / ".claude.json"
+    target.parent.mkdir()
+    config.parent.mkdir()
+    config.symlink_to("../dots/.claude.json")
+
+    install_mcp_config(claude_config_dir=tmp_path / "claude", client="claude-code")
+
+    assert config.is_symlink()
+    assert "poppy" in json.loads(target.read_text())["mcpServers"]
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("broken", ["missing-directory", "loop"])
+def test_install_refuses_unfollowable_symlink_before_changing_files(tmp_path, broken):
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    settings = claude_dir / "settings.json"
+    if broken == "missing-directory":
+        settings.symlink_to(tmp_path / "unmounted" / "settings.json")
+    else:
+        settings.symlink_to(claude_dir / "loop.json")
+        (claude_dir / "loop.json").symlink_to(settings)
+    before = {path: os.readlink(path) for path in claude_dir.iterdir()}
+
+    with pytest.raises(CorruptConfigError, match="Refusing to write through"):
+        install_for_client(client="claude-code", claude_config_dir=claude_dir)
+
+    assert {path: os.readlink(path) for path in claude_dir.iterdir()} == before
+    assert not (tmp_path / ".claude.json").exists()
+    assert not (tmp_path / "unmounted").exists()
 
 
 def test_install_codex_hooks_preserves_group_without_hooks_key(tmp_path):

@@ -251,6 +251,9 @@ def _read_json(path: Path, *, strict: bool = False) -> dict:
     # swallowing an unreadable file and returning {} would truncate the user's
     # real config on the next write (data loss). Read-only callers
     # that must tolerate an unreadable config (doctor) catch OSError themselves.
+    if strict:
+        # Surface a symlink the writer cannot follow before any file changes.
+        _resolve_write_target(path)
     if path.exists():
         try:
             return json.loads(path.read_text())
@@ -267,9 +270,40 @@ def _write_json(path: Path, data: dict) -> None:
     _write_text(path, json.dumps(data, indent=2))
 
 
+def _resolve_write_target(path: Path) -> Path:
+    """Return the file a write to ``path`` must replace.
+
+    Users who manage client configs with a dotfiles tool (stow, chezmoi, yadm)
+    keep them as symlinks. ``os.replace`` onto the link would swap the link for
+    a plain file and silently detach the config, so writes go to the link's
+    final target instead (relative and chained links included). A dangling
+    link is written through like a shell redirect would, creating its target,
+    provided the target's directory exists. A link loop or a target directory
+    that is missing is refused rather than guessed at.
+    """
+    if not path.is_symlink():
+        return path
+    try:
+        return Path(os.path.realpath(path, strict=True))
+    except FileNotFoundError:
+        target = Path(os.path.realpath(path))
+    except OSError as exc:
+        raise CorruptConfigError(
+            f"Refusing to write through unresolvable symlink at {path} ({exc.strerror}). "
+            "Fix or remove it, then re-run `poppy setup`."
+        ) from exc
+    if not target.parent.is_dir():
+        raise CorruptConfigError(
+            f"Refusing to write through dangling symlink at {path}: {target.parent} does not exist. "
+            "Fix or remove it, then re-run `poppy setup`."
+        )
+    return target
+
+
 def _write_text(path: Path, content: str) -> None:
     """Atomically replace a text file using a same-directory temporary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    path = _resolve_write_target(path)
     # Preserve client config permissions; new configs may contain a bearer token.
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
     # Atomic write: render to a temp file in the same directory, then os.replace
@@ -359,6 +393,8 @@ def _backup_once(path: Path, suffix: str) -> Path | None:
 
 
 def _read_codex_toml(path: Path, *, strict: bool = False):
+    if strict:
+        _resolve_write_target(path)
     if path.exists():
         try:
             return tomlkit.parse(path.read_text())
@@ -703,6 +739,7 @@ def _validate_cursor_hooks_config(settings: object, path: Path) -> str | None:
 
 
 def _read_cursor_hooks_config(path: Path) -> tuple[dict, str | None]:
+    _resolve_write_target(path)
     if not path.exists():
         return {}, None
     try:
