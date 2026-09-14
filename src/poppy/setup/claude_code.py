@@ -287,6 +287,12 @@ def _resolve_write_target(path: Path) -> Path:
         # realpath collapses ".." textually; only trust the result when it is
         # the same file the operating system opens through the link.
         same_file = os.path.samefile(path, target)
+    except FileNotFoundError as exc:
+        raise CorruptConfigError(
+            f"Refusing to write through symlink at {path}: the file it points to ({os.readlink(path)}) does not exist. "
+            "Create that file (containing `{}` for a JSON config, or empty for TOML) or remove the link, "
+            "then re-run `poppy setup`."
+        ) from exc
     except OSError as exc:
         raise CorruptConfigError(
             f"Refusing to write through symlink at {path}: its target cannot be opened ({exc.strerror}). "
@@ -310,8 +316,9 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
 
     ``target`` is the file the caller resolved ``path`` to when it read the
     config. If ``path`` now resolves elsewhere (a symlink was retargeted in
-    between), nothing is written, so content read from one file never lands
-    in another.
+    between), the write is refused. This is a best-effort guard: the check runs
+    before the temp file is written, so a retarget in the moments between the
+    check and the final rename is not detected.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     resolved = _resolve_write_target(path)
@@ -320,9 +327,17 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
             f"Refusing to write {path}: it was repointed from {target} to {resolved} "
             "while `poppy setup` was running. Re-run `poppy setup`."
         )
+    symlinked = resolved != path
     path = resolved
+    existing = path.stat() if path.exists() else None
     # Preserve client config permissions; new configs may contain a bearer token.
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    mode = stat.S_IMODE(existing.st_mode) if existing is not None else 0o600
+    if symlinked and existing is not None and existing.st_uid != os.geteuid():
+        # The replacement would be owned by us, not the file's owner.
+        raise CorruptConfigError(
+            f"Refusing to replace {path}: it is owned by another user. "
+            "Run `poppy setup` as that user or fix the file's owner."
+        )
     # Atomic write: render to a temp file in the same directory, then os.replace
     # onto the target so a crash mid-write can't leave a half-written config.
     # Same-dir tmp keeps the rename on one filesystem (os.replace requirement).
@@ -334,6 +349,16 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         try:
             os.fchmod(fd, mode)
+            if symlinked and existing is not None and os.fstat(fd).st_gid != existing.st_gid:
+                # A dotfiles target may use a narrower group than the one a
+                # new file gets; keep it so the mode grants the same access.
+                try:
+                    os.fchown(fd, -1, existing.st_gid)
+                except PermissionError as exc:
+                    raise CorruptConfigError(
+                        f"Refusing to replace {path}: its group cannot be kept on the new file. "
+                        "Fix the file's group, then re-run `poppy setup`."
+                    ) from exc
         except BaseException:
             os.close(fd)
             raise

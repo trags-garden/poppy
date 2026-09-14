@@ -1280,6 +1280,92 @@ def test_install_hook_refuses_symlink_retargeted_between_read_and_write(tmp_path
     assert first.read_bytes() == original_first
 
 
+def _assign_other_group(target):
+    """Give ``target`` a group a fresh file beside it would not get, or return None."""
+    probe = target.with_name("group-probe")
+    probe.touch()
+    new_file_gid = probe.stat().st_gid
+    probe.unlink()
+    for gid in sorted(set(os.getgroups()) | {os.getegid()}):
+        if gid == new_file_gid:
+            continue
+        try:
+            os.chown(target, -1, gid)
+        except OSError:
+            continue
+        return gid
+    return None
+
+
+def test_install_keeps_group_of_symlinked_config(tmp_path):
+    claude_dir = tmp_path / ".claude"
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
+    gid = _assign_other_group(target)
+    if gid is None:
+        pytest.skip("needs a second group the test user can assign")
+
+    install_session_start_hook(claude_dir)
+
+    assert (claude_dir / "settings.json").is_symlink()
+    assert "poppy" in target.read_text()
+    assert target.stat().st_gid == gid
+    assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("chown", ["allowed", "denied"])
+def test_install_matches_group_of_symlinked_config_before_replacing(tmp_path, monkeypatch, chown):
+    from poppy.setup import claude_code
+
+    claude_dir = tmp_path / ".claude"
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
+    original = target.read_bytes()
+    target_gid = target.stat().st_gid
+    real_fstat = os.fstat
+    calls = []
+
+    def fstat_with_other_group(fd):
+        # Simulate a temp file created with a different group than the target.
+        fields = list(real_fstat(fd))
+        fields[stat.ST_GID] = target_gid + 1
+        return os.stat_result(fields)
+
+    def fake_fchown(fd, uid, gid):
+        calls.append((uid, gid))
+        if chown == "denied":
+            raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(claude_code.os, "fstat", fstat_with_other_group)
+    monkeypatch.setattr(claude_code.os, "fchown", fake_fchown)
+
+    if chown == "allowed":
+        install_session_start_hook(claude_dir)
+        assert "poppy" in target.read_text()
+    else:
+        with pytest.raises(CorruptConfigError, match="group cannot be kept"):
+            install_session_start_hook(claude_dir)
+        assert target.read_bytes() == original
+
+    assert calls == [(-1, target_gid)]
+    assert (claude_dir / "settings.json").is_symlink()
+    assert not list(tmp_path.rglob("*.poppy-tmp-*"))
+
+
+def test_install_refuses_symlinked_config_owned_by_another_user(tmp_path, monkeypatch):
+    from poppy.setup import claude_code
+
+    claude_dir = tmp_path / ".claude"
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
+    original = target.read_bytes()
+    other_uid = target.stat().st_uid + 1
+    monkeypatch.setattr(claude_code.os, "geteuid", lambda: other_uid)
+
+    with pytest.raises(CorruptConfigError, match="owned by another user"):
+        install_session_start_hook(claude_dir)
+
+    assert target.read_bytes() == original
+    assert not list(tmp_path.rglob("*.poppy-tmp-*"))
+
+
 def test_install_backs_up_symlinked_config_next_to_the_link(tmp_path):
     from poppy.setup.claude_code import CONFIG_BACKUP_SUFFIX
 
