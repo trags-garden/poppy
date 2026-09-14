@@ -632,7 +632,14 @@ def test_percent_in_poppy_dir_opens(tmp_path, monkeypatch):
     conn.close()
 
 
-@pytest.mark.parametrize("dirname", ["dir?x", "dir#x", "dir%41x"])
+@pytest.mark.parametrize(
+    "dirname",
+    [
+        pytest.param("dir?x", marks=pytest.mark.skipif(os.name == "nt", reason="'?' is not allowed in Windows paths")),
+        "dir#x",
+        "dir%41x",
+    ],
+)
 def test_plaintext_probe_escapes_uri_characters_in_path(tmp_path, dirname):
     # Repair deletes a key on the strength of this probe. Unescaped, '?' and '#'
     # truncate the URI path so SQLite creates and opens an empty database beside
