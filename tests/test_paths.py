@@ -8,13 +8,16 @@ world-readable on a shared host.
 
 from __future__ import annotations
 
+import errno
+import os
 import stat
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from poppy.paths import ensure_poppy_dir, write_text_atomic
+from poppy.paths import _DIR_FSYNC_UNSUPPORTED, ensure_poppy_dir, write_text_atomic
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX dir modes")
 
@@ -95,4 +98,110 @@ def test_write_text_atomic_replaces_a_loose_file_with_an_owner_only_one(tmp_path
     write_text_atomic(target, "new")
     assert target.read_text() == "new"
     assert _mode(target) == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+
+def _watch_dir_fsync(monkeypatch, target: Path, *, fail_with: int | None = None) -> dict[str, list[int]]:
+    """Record the descriptors opened on ``target``'s directory and fsynced; optionally fail the directory fsync."""
+    seen: dict[str, list[int]] = {"opened": [], "fsynced": []}
+    real_open, real_fsync = os.open, os.fsync
+
+    def recording_open(file, *args, **kwargs):
+        fd = real_open(file, *args, **kwargs)
+        if Path(file) == target.parent:
+            seen["opened"].append(fd)
+        return fd
+
+    def recording_fsync(fd):
+        if fd in seen["opened"]:
+            seen["fsynced"].append(fd)
+            if fail_with is not None:
+                raise OSError(fail_with, os.strerror(fail_with))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    return seen
+
+
+def _is_closed(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError as exc:
+        return exc.errno == errno.EBADF
+    return False
+
+
+def test_write_text_atomic_flushes_and_closes_the_directory(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    seen = _watch_dir_fsync(monkeypatch, target)
+    write_text_atomic(target, "new")
+    assert len(seen["opened"]) == 1
+    assert seen["fsynced"] == seen["opened"]
+    assert _is_closed(seen["opened"][0])
+
+
+def test_write_text_atomic_propagates_a_directory_fsync_io_error(tmp_path, monkeypatch):
+    """EIO means the rename may not be on disk: the caller must hear about it.
+
+    The rename itself has already happened, so the target holds the new text.
+    """
+    target = tmp_path / "state.json"
+    target.write_text("old")
+    seen = _watch_dir_fsync(monkeypatch, target, fail_with=errno.EIO)
+    with pytest.raises(OSError) as raised:
+        write_text_atomic(target, "new")
+    assert raised.value.errno == errno.EIO
+    assert _is_closed(seen["opened"][0])
+    assert target.read_text() == "new"
+    assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+
+@pytest.mark.parametrize("code", sorted(_DIR_FSYNC_UNSUPPORTED))
+def test_write_text_atomic_ignores_an_unsupported_directory_fsync(tmp_path, monkeypatch, code):
+    target = tmp_path / "state.json"
+    seen = _watch_dir_fsync(monkeypatch, target, fail_with=code)
+    write_text_atomic(target, "new")
+    assert seen["fsynced"] == seen["opened"]
+    assert _is_closed(seen["opened"][0])
+    assert target.read_text() == "new"
+
+
+def test_write_text_atomic_skips_a_directory_it_cannot_open(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    real_open = os.open
+
+    def no_directory_handles(file, *args, **kwargs):
+        if Path(file) == tmp_path:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", no_directory_handles)
+    write_text_atomic(target, "new")
+    assert target.read_text() == "new"
+
+
+def test_write_text_atomic_closes_the_temp_descriptor_when_the_write_fails(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    target.write_text("old")
+    created: list[int] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        created.append(fd)
+        return fd, name
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tempfile, "mkstemp", recording_mkstemp)
+    # Fail at the first step after mkstemp, however the descriptor is written to.
+    monkeypatch.setattr(os, "write", interrupted)
+    monkeypatch.setattr(os, "fdopen", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        write_text_atomic(target, "new")
+    monkeypatch.undo()
+    assert len(created) == 1 and _is_closed(created[0])
+    assert target.read_text() == "old"
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"]

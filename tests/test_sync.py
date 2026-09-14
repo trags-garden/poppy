@@ -9,7 +9,6 @@ traceback or a silent 32x retry storm.
 from __future__ import annotations
 
 import errno
-import io
 import json
 import os
 import re
@@ -933,27 +932,6 @@ def test_a_state_save_that_never_lands_leaves_the_watermark_pass_owed(tmp_path, 
     assert {u["id"] for u in again.upserts} == {"stranded"}
 
 
-class _DiskFullMidWrite:
-    """A writable file that stores the first half of what it is given, then fails as a full disk would."""
-
-    def __init__(self, handle):
-        self._handle = handle
-
-    def write(self, text):
-        self._handle.write(text[: len(text) // 2])
-        self._handle.flush()
-        raise OSError(errno.ENOSPC, "No space left on device")
-
-    def __getattr__(self, name):
-        return getattr(self._handle, name)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self._handle.close()
-
-
 @pytest.mark.parametrize("failure", ["write", "replace"])
 def test_an_interrupted_state_save_keeps_the_previous_state(tmp_path, monkeypatch, failure):
     """A save that dies part way must leave the last good state readable.
@@ -971,13 +949,13 @@ def test_an_interrupted_state_save_keeps_the_previous_state(tmp_path, monkeypatc
     )
 
     if failure == "write":
-        real_open = io.open
+        real_write = os.write
 
-        def disk_fills(file, mode="r", *args, **kwargs):
-            handle = real_open(file, mode, *args, **kwargs)
-            return _DiskFullMidWrite(handle) if "w" in mode else handle
+        def disk_fills(fd, data):
+            real_write(fd, data[: len(data) // 2])
+            raise OSError(errno.ENOSPC, "No space left on device")
 
-        monkeypatch.setattr(io, "open", disk_fills)
+        monkeypatch.setattr(os, "write", disk_fills)
     else:
 
         def killed_before_rename(*_args, **_kwargs):
