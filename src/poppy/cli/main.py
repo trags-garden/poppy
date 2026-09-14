@@ -1617,11 +1617,18 @@ def _warn_if_poppy_unresolved() -> None:
         )
 
 
-def _install_or_abort(**kwargs) -> dict:
+def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
     """Run install_for_client, turning a corrupt-config abort into a clean CLI error."""
-    from poppy.setup.claude_code import CorruptConfigError, install_for_client
+    from poppy.setup.claude_code import CorruptConfigError, install_for_client, validate_client_config
 
     try:
+        if daemon_mode:
+            validate_client_config(
+                client=kwargs["client"],
+                claude_config_dir=kwargs.get("claude_config_dir"),
+                install_hooks=kwargs.get("install_hooks", True),
+            )
+            kwargs.update(_daemon_setup_kwargs())
         return install_for_client(**kwargs)
     except CorruptConfigError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1674,8 +1681,7 @@ def _daemon_setup_kwargs() -> dict:
 
 def _install_simple_client(client: str, *, daemon_mode: bool = False) -> None:
     """Install Poppy MCP server and the client's global primer when applicable."""
-    daemon_kwargs = _daemon_setup_kwargs() if daemon_mode else {}
-    paths = _install_or_abort(client=client, **daemon_kwargs)
+    paths = _install_or_abort(client=client, daemon_mode=daemon_mode)
     _print_install_paths(paths, client)
     _record_agent_setup(client)
     if client == "pi":
@@ -1704,14 +1710,12 @@ def setup_claude_code(hooks: bool, claude_md: bool, yes: bool, daemon_mode: bool
     """Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer)."""
     claude_dir = Path(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else None
 
-    daemon_kwargs = _daemon_setup_kwargs() if daemon_mode else {}
-
     paths = _install_or_abort(
         client="claude-code",
         claude_config_dir=claude_dir,
         install_hooks=hooks,
         install_claude_md=claude_md,
-        **daemon_kwargs,
+        daemon_mode=daemon_mode,
     )
     _print_install_paths(paths, "claude-code")
     _record_agent_setup("claude-code")
@@ -1742,8 +1746,7 @@ def setup_pi():
 @click.option("--daemon", "daemon_mode", is_flag=True, help="Use the shared authenticated HTTP daemon.")
 def setup_cursor(hooks: bool, daemon_mode: bool):
     """Install Poppy into Cursor (MCP + hooks)."""
-    daemon_kwargs = _daemon_setup_kwargs() if daemon_mode else {}
-    paths = _install_or_abort(client="cursor", install_hooks=hooks, **daemon_kwargs)
+    paths = _install_or_abort(client="cursor", install_hooks=hooks, daemon_mode=daemon_mode)
     _print_install_paths(paths, "cursor")
     _record_agent_setup("cursor")
     if hooks:
@@ -1778,8 +1781,7 @@ def setup_windsurf():
 @click.option("--daemon", "daemon_mode", is_flag=True, help="Use the shared authenticated HTTP daemon.")
 def setup_codex(hooks: bool, daemon_mode: bool):
     """Install Poppy into Codex (MCP + hooks + AGENTS.md primer)."""
-    daemon_kwargs = _daemon_setup_kwargs() if daemon_mode else {}
-    paths = _install_or_abort(client="codex", install_hooks=hooks, **daemon_kwargs)
+    paths = _install_or_abort(client="codex", install_hooks=hooks, daemon_mode=daemon_mode)
     _print_install_paths(paths, "codex")
     _record_agent_setup("codex")
     if hooks:

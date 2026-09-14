@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy setup` now refuses unparseable or structurally invalid client configs
+  before changing files or starting the daemon, preserving Claude Code settings
+  instead of silently replacing user permissions, environment, model and hooks
+  with Poppy's hooks.
+  Cursor's existing hooks backup and replacement behavior is preserved for
+  malformed JSON; non-UTF-8 configs are refused without changes.
 - `poppy telemetry off` now also disables the daily PyPI update check in
   `poppy doctor`, honoring the persistent telemetry opt-out.
 - Trags API keys stay in config.json as a fallback unless an OS keychain write
