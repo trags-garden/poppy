@@ -1,6 +1,10 @@
+import errno
 import json
 import os
+import shutil
 import stat
+import subprocess
+import sys
 import tomllib
 
 import pytest
@@ -1236,24 +1240,42 @@ def test_install_refuses_unfollowable_symlink_before_changing_files(tmp_path, br
     assert not (tmp_path / "unmounted").exists()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to read-only directories")
-def test_install_refuses_symlink_into_read_only_directory_before_changing_files(tmp_path):
+_RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+@pytest.mark.skipif(_RUNNING_AS_ROOT, reason="root can write to read-only files")
+def test_install_refuses_read_only_symlink_target_before_changing_files(tmp_path):
     claude_dir = tmp_path / ".claude"
     target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
     original = target.read_bytes()
-    target.parent.chmod(0o555)
+    target.chmod(0o444)
     try:
         with pytest.raises(CorruptConfigError, match="is not writable"):
             install_for_client(client="claude-code", claude_config_dir=claude_dir)
     finally:
-        target.parent.chmod(0o755)
+        target.chmod(0o640)
 
     assert (claude_dir / "settings.json").is_symlink()
     assert target.read_bytes() == original
     assert not (tmp_path / ".claude.json").exists()
 
 
-def test_install_hook_refuses_symlink_retargeted_between_read_and_write(tmp_path, monkeypatch):
+@pytest.mark.skipif(_RUNNING_AS_ROOT, reason="root can write to read-only directories")
+def test_install_writes_symlink_target_inside_read_only_directory(tmp_path):
+    claude_dir = tmp_path / ".claude"
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
+    target.parent.chmod(0o555)
+    try:
+        install_session_start_hook(claude_dir)
+    finally:
+        target.parent.chmod(0o755)
+
+    assert "poppy" in target.read_text()
+    assert list(target.parent.iterdir()) == [target]
+
+
+@pytest.mark.parametrize("when", ["after-read", "during-backup"])
+def test_install_hook_refuses_symlink_retargeted_between_read_and_write(tmp_path, monkeypatch, when):
     from poppy.setup import claude_code
 
     claude_dir = tmp_path / ".claude"
@@ -1264,14 +1286,28 @@ def test_install_hook_refuses_symlink_retargeted_between_read_and_write(tmp_path
     second.write_text('{"permissions": {"deny": ["Bash(rm:*)"]}}')
     original_first = first.read_bytes()
     original_second = second.read_bytes()
-    validate = claude_code._validate_claude_hooks_config
 
-    def retarget_after_read(config, path):
+    def retarget():
         settings.unlink()
         settings.symlink_to(second)
-        return validate(config, path)
 
-    monkeypatch.setattr(claude_code, "_validate_claude_hooks_config", retarget_after_read)
+    if when == "after-read":
+        validate = claude_code._validate_claude_hooks_config
+
+        def hook(config, path):
+            retarget()
+            return validate(config, path)
+
+        monkeypatch.setattr(claude_code, "_validate_claude_hooks_config", hook)
+    else:
+        backup_once = claude_code._backup_once
+
+        def hook(path, suffix):
+            result = backup_once(path, suffix)
+            retarget()
+            return result
+
+        monkeypatch.setattr(claude_code, "_backup_once", hook)
 
     with pytest.raises(CorruptConfigError, match="while `poppy setup` was running"):
         install_session_start_hook(claude_dir)
@@ -1281,7 +1317,7 @@ def test_install_hook_refuses_symlink_retargeted_between_read_and_write(tmp_path
 
 
 def _assign_other_group(target):
-    """Give ``target`` a group a fresh file beside it would not get, or return None."""
+    """Give ``target`` a group a fresh file beside it would not get, if one is available."""
     probe = target.with_name("group-probe")
     probe.touch()
     new_file_gid = probe.stat().st_gid
@@ -1293,77 +1329,86 @@ def _assign_other_group(target):
             os.chown(target, -1, gid)
         except OSError:
             continue
-        return gid
-    return None
+        return
 
 
-def test_install_keeps_group_of_symlinked_config(tmp_path):
+def test_install_rewrites_symlink_target_in_place(tmp_path):
+    """The target keeps its inode, owner, group and mode, and nothing is created beside it."""
     claude_dir = tmp_path / ".claude"
-    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
-    gid = _assign_other_group(target)
-    if gid is None:
-        pytest.skip("needs a second group the test user can assign")
+    # Padding makes the new content shorter, so a missing truncate leaves invalid JSON.
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"' + " " * 4096 + "}")
+    if hasattr(os, "getgroups"):
+        _assign_other_group(target)
+    before = target.stat()
 
     install_session_start_hook(claude_dir)
 
+    after = target.stat()
+    assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_uid,
+        before.st_gid,
+    )
+    assert stat.S_IMODE(after.st_mode) == 0o640
+    settings = json.loads(target.read_text())
+    assert settings["model"] == "keep-me"
+    assert "SessionStart" in settings["hooks"]
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_install_leaves_planted_temp_symlink_beside_target_alone(tmp_path):
+    claude_dir = tmp_path / ".claude"
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
+    victim = tmp_path / "unrelated.txt"
+    victim.write_text("unrelated content")
+    planted = target.with_name(f"{target.name}.poppy-tmp-{os.getpid()}")
+    planted.symlink_to(victim)
+
+    install_session_start_hook(claude_dir)
+
+    assert victim.read_text() == "unrelated content"
+    assert planted.is_symlink()
+    assert os.readlink(planted) == str(victim)
     assert (claude_dir / "settings.json").is_symlink()
     assert "poppy" in target.read_text()
-    assert target.stat().st_gid == gid
-    assert stat.S_IMODE(target.stat().st_mode) == 0o640
 
 
-@pytest.mark.parametrize("chown", ["allowed", "denied"])
-def test_install_matches_group_of_symlinked_config_before_replacing(tmp_path, monkeypatch, chown):
+def test_install_backs_up_symlink_target_before_rewriting_it(tmp_path, monkeypatch):
     from poppy.setup import claude_code
+    from poppy.setup.claude_code import CONFIG_BACKUP_SUFFIX
 
     claude_dir = tmp_path / ".claude"
-    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
+    link = claude_dir / "settings.json"
+    target = _link_to_dotfiles(tmp_path, link, '{"model": "keep-me"}')
     original = target.read_bytes()
-    target_gid = target.stat().st_gid
-    real_fstat = os.fstat
-    calls = []
 
-    def fstat_with_other_group(fd):
-        # Simulate a temp file created with a different group than the target.
-        fields = list(real_fstat(fd))
-        fields[stat.ST_GID] = target_gid + 1
-        return os.stat_result(fields)
+    def failing_fsync(fd):
+        raise OSError(errno.EIO, "simulated write failure")
 
-    def fake_fchown(fd, uid, gid):
-        calls.append((uid, gid))
-        if chown == "denied":
-            raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(claude_code.os, "fsync", failing_fsync)
 
-    monkeypatch.setattr(claude_code.os, "fstat", fstat_with_other_group)
-    monkeypatch.setattr(claude_code.os, "fchown", fake_fchown)
-
-    if chown == "allowed":
-        install_session_start_hook(claude_dir)
-        assert "poppy" in target.read_text()
-    else:
-        with pytest.raises(CorruptConfigError, match="group cannot be kept"):
-            install_session_start_hook(claude_dir)
-        assert target.read_bytes() == original
-
-    assert calls == [(-1, target_gid)]
-    assert (claude_dir / "settings.json").is_symlink()
-    assert not list(tmp_path.rglob("*.poppy-tmp-*"))
-
-
-def test_install_refuses_symlinked_config_owned_by_another_user(tmp_path, monkeypatch):
-    from poppy.setup import claude_code
-
-    claude_dir = tmp_path / ".claude"
-    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
-    original = target.read_bytes()
-    other_uid = target.stat().st_uid + 1
-    monkeypatch.setattr(claude_code.os, "geteuid", lambda: other_uid)
-
-    with pytest.raises(CorruptConfigError, match="owned by another user"):
+    with pytest.raises(OSError, match="simulated write failure"):
         install_session_start_hook(claude_dir)
 
+    backup = link.with_name(link.name + CONFIG_BACKUP_SUFFIX)
+    assert backup.read_bytes() == original
+    shutil.copyfile(backup, link)
+    assert link.is_symlink()
     assert target.read_bytes() == original
-    assert not list(tmp_path.rglob("*.poppy-tmp-*"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="uses macOS `chmod +a` ACLs")
+def test_install_keeps_acl_on_symlink_target(tmp_path):
+    claude_dir = tmp_path / ".claude"
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
+    subprocess.run(["chmod", "+a", "nobody deny read", str(target)], check=True)
+
+    install_session_start_hook(claude_dir)
+
+    listing = subprocess.run(["ls", "-le", str(target)], capture_output=True, text=True, check=True).stdout
+    assert "nobody deny read" in listing
+    assert "poppy" in target.read_text()
 
 
 def test_install_backs_up_symlinked_config_next_to_the_link(tmp_path):
