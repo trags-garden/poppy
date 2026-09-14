@@ -882,7 +882,7 @@ def has_any_codex_poppy_hook(codex_home: Path | None = None) -> bool:
 
 def _install_hook(claude_dir: Path, event: str) -> Path:
     settings_path = claude_dir / "settings.json"
-    settings = _read_json(settings_path)
+    settings = _read_json(settings_path, strict=True)
     settings.setdefault("hooks", {})
     settings["hooks"].setdefault(event, [])
 
@@ -942,7 +942,7 @@ def remove_legacy_hooks(claude_config_dir: Path | None = None) -> list[str]:
     """
     claude_dir = claude_config_dir or get_claude_config_dir()
     settings_path = claude_dir / "settings.json"
-    settings = _read_json(settings_path)
+    settings = _read_json(settings_path, strict=True)
     hooks = settings.get("hooks", {})
     removed: list[str] = []
 
@@ -1086,6 +1086,33 @@ def _client_primer_path(client: str) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+def validate_client_config(
+    *,
+    client: str = "claude-code",
+    claude_config_dir: Path | None = None,
+    install_hooks: bool = True,
+) -> None:
+    """Reject unparseable configs before setup makes any changes."""
+    claude_dir = claude_config_dir or get_claude_config_dir()
+    config_path = _client_settings_path(client, claude_dir)
+    if client == "codex":
+        _read_codex_toml(config_path, strict=True)
+        json_paths = [config_path.with_suffix(".json")]
+        if install_hooks:
+            json_paths.append(get_codex_home() / "hooks.json")
+    else:
+        json_paths = [config_path]
+        if client == "claude-code" and install_hooks:
+            json_paths.append(claude_dir / "settings.json")
+        if client == "claude-desktop":
+            msix_path = get_claude_desktop_msix_config_path()
+            if msix_path is not None and msix_path != config_path:
+                json_paths.append(msix_path)
+    # Cursor hooks intentionally back up malformed JSON and replace it.
+    for path in json_paths:
+        _read_json(path, strict=True)
+
+
 def install_for_client(
     *,
     client: str = "claude-code",
@@ -1097,6 +1124,7 @@ def install_for_client(
     daemon_token: str | None = None,
 ) -> dict[str, Path]:
     """Install Poppy into the given client. Returns a {label: path} map."""
+    validate_client_config(client=client, claude_config_dir=claude_config_dir, install_hooks=install_hooks)
     paths: dict[str, Path] = {}
 
     if client == "claude-desktop":

@@ -2,11 +2,14 @@ import json
 import tomllib
 
 import pytest
+from click.testing import CliRunner
 
+from poppy.cli.main import cli
 from poppy.setup.claude_code import (
     CLAUDE_MD_BEGIN,
     CLAUDE_MD_END,
     CURSOR_DOCUMENTED_HOOK_EVENTS,
+    CorruptConfigError,
     get_poppy_executable,
     install_claude_md_block,
     install_codex_hooks,
@@ -835,6 +838,117 @@ def test_install_aborts_on_corrupt_config_without_overwriting(tmp_path):
         install_mcp_config(claude_config_dir=tmp_path, client="claude-code")
     # The corrupt file is left byte-for-byte intact — not truncated to a stub.
     assert config.read_text() == garbage
+
+
+@pytest.mark.parametrize(
+    "installer",
+    [
+        install_session_start_hook,
+        install_user_prompt_submit_hook,
+        install_pre_tool_use_hook,
+        install_session_end_hook,
+        install_post_compact_hook,
+        remove_legacy_hooks,
+    ],
+)
+def test_hook_writers_refuse_malformed_settings(tmp_path, installer):
+    settings_path = tmp_path / "settings.json"
+    original = b'{"permissions": {"allow": []},\r\n'
+    settings_path.write_bytes(original)
+
+    with pytest.raises(CorruptConfigError, match="Refusing to overwrite unparseable config") as exc:
+        installer(tmp_path)
+
+    assert str(settings_path) in str(exc.value)
+    assert settings_path.read_bytes() == original
+    assert not is_hook_installed(tmp_path)
+
+
+@pytest.mark.parametrize("client", ["claude-code", "codex"])
+@pytest.mark.parametrize("daemon_mode", [False, True])
+def test_setup_refuses_malformed_hooks_before_any_changes(tmp_path, monkeypatch, client, daemon_mode):
+    client_dir = tmp_path / (".claude" if client == "claude-code" else ".codex")
+    client_dir.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(client_dir))
+    monkeypatch.setenv("CODEX_HOME", str(client_dir))
+    settings_path = client_dir / ("settings.json" if client == "claude-code" else "hooks.json")
+    settings_path.write_bytes(b'{"hooks": {},\r\n')
+    mcp_path = tmp_path / ".claude.json" if client == "claude-code" else client_dir / "config.toml"
+    mcp_path.write_text(
+        '{"mcpServers": {"other": {"command": "keep"}}}' if client == "claude-code" else 'model = "keep"\n'
+    )
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    def unexpected_daemon_setup():
+        pytest.fail("Daemon bootstrap must not run with malformed client config")
+
+    monkeypatch.setattr("poppy.cli.main._daemon_setup_kwargs", unexpected_daemon_setup)
+    message = (
+        f"Refusing to overwrite unparseable config at {settings_path}. Fix or remove it, then re-run `poppy setup`."
+    )
+    with pytest.raises(CorruptConfigError) as exc:
+        install_for_client(client=client)
+    assert str(exc.value) == message
+
+    args = ["setup", client] + (["--daemon"] if daemon_mode else [])
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 1
+    assert result.output == f"Error: {message}\n"
+    assert isinstance(result.exception, SystemExit)
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_install_preserves_user_settings(tmp_path):
+    user_hook = {"matcher": "custom", "hooks": [{"type": "command", "command": "user-hook"}]}
+    original = {
+        "permissions": {"allow": ["Bash(ls)"]},
+        "env": {"USER_SETTING": "keep"},
+        "model": "user-model",
+        "custom": {"keep": True},
+        "hooks": {"SessionStart": [user_hook], "CustomEvent": [user_hook]},
+    }
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(original))
+
+    install_for_client(claude_config_dir=tmp_path)
+
+    final = json.loads(settings_path.read_text())
+    for key in ("permissions", "env", "model", "custom"):
+        assert final[key] == original[key]
+    assert final["hooks"]["CustomEvent"] == [user_hook]
+    assert user_hook in final["hooks"]["SessionStart"]
+    for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd", "PostCompact"):
+        assert is_hook_installed(tmp_path, event)
+
+
+def test_install_without_hooks_leaves_malformed_settings_alone(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    original = b'{"permissions":\r\n'
+    settings_path.write_bytes(original)
+
+    install_for_client(claude_config_dir=tmp_path, install_hooks=False)
+
+    assert settings_path.read_bytes() == original
+    assert is_mcp_installed(tmp_path)
+
+
+def test_desktop_refuses_malformed_msix_config_before_any_changes(tmp_path, monkeypatch):
+    config = tmp_path / "desktop.json"
+    original = b'{"mcpServers": {"other": {"command": "keep"}}}'
+    config.write_bytes(original)
+    msix_config = tmp_path / "msix.json"
+    malformed = b'{"mcpServers":\r\n'
+    msix_config.write_bytes(malformed)
+    monkeypatch.setenv("POPPY_CLAUDE_DESKTOP_CONFIG", str(config))
+    monkeypatch.setattr("poppy.setup.claude_code.get_claude_desktop_msix_config_path", lambda: msix_config)
+
+    with pytest.raises(CorruptConfigError, match="Refusing to overwrite unparseable config"):
+        install_for_client(client="claude-desktop")
+
+    assert config.read_bytes() == original
+    assert msix_config.read_bytes() == malformed
+    assert set(tmp_path.iterdir()) == {config, msix_config}
 
 
 def test_install_backs_up_existing_config_for_non_desktop_client(tmp_path):
