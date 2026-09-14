@@ -1207,7 +1207,9 @@ def test_install_writes_through_chained_symlink(tmp_path):
     assert settings["userField"] == 7
 
 
-@pytest.mark.parametrize("broken", ["dangling", "missing-directory", "dot-dot-through-missing-directory", "loop"])
+@pytest.mark.parametrize(
+    "broken", ["dangling", "missing-directory", "dot-dot-through-missing-directory", "loop", "directory"]
+)
 def test_install_refuses_unfollowable_symlink_before_changing_files(tmp_path, broken):
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
@@ -1225,6 +1227,8 @@ def test_install_refuses_unfollowable_symlink_before_changing_files(tmp_path, br
         # The OS cannot open this link, but collapsing ".." as text would land
         # on the real sibling file.
         settings.symlink_to(dots / "missing" / ".." / "settings.json")
+    elif broken == "directory":
+        settings.symlink_to(dots)
     else:
         settings.symlink_to(claude_dir / "loop.json")
         (claude_dir / "loop.json").symlink_to(settings)
@@ -1374,40 +1378,100 @@ def test_install_leaves_planted_temp_symlink_beside_target_alone(tmp_path):
     assert "poppy" in target.read_text()
 
 
-def test_install_backs_up_symlink_target_before_rewriting_it(tmp_path, monkeypatch):
+def test_install_saves_latest_content_before_each_in_place_write(tmp_path, monkeypatch):
     from poppy.setup import claude_code
-    from poppy.setup.claude_code import CONFIG_BACKUP_SUFFIX
+    from poppy.setup.claude_code import CONFIG_BACKUP_SUFFIX, PREVIOUS_CONTENT_BACKUP_SUFFIX
+
+    claude_dir = tmp_path / ".claude"
+    link = claude_dir / "settings.json"
+    target = _link_to_dotfiles(tmp_path, link, "{}")
+    install_session_start_hook(claude_dir)
+    edited = '{"hooks": {}, "recent": "IRREPLACEABLE"}'
+    target.write_text(edited)
+    real_write = os.write
+    target_inode = target.stat().st_ino
+
+    def write_then_fail(fd, data):
+        if os.fstat(fd).st_ino != target_inode:
+            return real_write(fd, data)
+        real_write(fd, bytes(data[:80]))
+        raise OSError(errno.ENOSPC, "simulated write failure")
+
+    monkeypatch.setattr(claude_code.os, "write", write_then_fail)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        install_session_start_hook(claude_dir)
+    monkeypatch.undo()
+
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(target.read_text())
+    assert link.with_name(link.name + CONFIG_BACKUP_SUFFIX).read_text() == "{}"
+    previous = link.with_name(link.name + PREVIOUS_CONTENT_BACKUP_SUFFIX)
+    assert previous.read_text() == edited
+    assert stat.S_IMODE(previous.stat().st_mode) == 0o600
+    shutil.copyfile(previous, link)
+    assert link.is_symlink()
+    assert json.loads(target.read_text())["recent"] == "IRREPLACEABLE"
+
+
+def test_install_refuses_in_place_write_when_content_cannot_be_saved(tmp_path, monkeypatch):
+    from poppy.setup import claude_code
+    from poppy.setup.claude_code import PREVIOUS_CONTENT_BACKUP_SUFFIX
 
     claude_dir = tmp_path / ".claude"
     link = claude_dir / "settings.json"
     target = _link_to_dotfiles(tmp_path, link, '{"model": "keep-me"}')
     original = target.read_bytes()
 
-    def failing_fsync(fd):
-        raise OSError(errno.EIO, "simulated write failure")
+    def no_space(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(claude_code.os, "fsync", failing_fsync)
+    monkeypatch.setattr(claude_code.tempfile, "mkstemp", no_space)
 
-    with pytest.raises(OSError, match="simulated write failure"):
+    with pytest.raises(CorruptConfigError, match="could not save its current content"):
         install_session_start_hook(claude_dir)
 
-    backup = link.with_name(link.name + CONFIG_BACKUP_SUFFIX)
-    assert backup.read_bytes() == original
-    shutil.copyfile(backup, link)
-    assert link.is_symlink()
     assert target.read_bytes() == original
+    assert not link.with_name(link.name + PREVIOUS_CONTENT_BACKUP_SUFFIX).exists()
+
+
+def test_install_never_exposes_stale_tail_when_content_shrinks(tmp_path, monkeypatch):
+    from poppy.setup import claude_code
+
+    claude_dir = tmp_path / ".claude"
+    target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"' + " " * 4096 + "}")
+    real_ftruncate = os.ftruncate
+    seen_before_truncate = []
+
+    def parse_then_truncate(fd, length):
+        seen_before_truncate.append(json.loads(target.read_text()))
+        return real_ftruncate(fd, length)
+
+    monkeypatch.setattr(claude_code.os, "ftruncate", parse_then_truncate)
+
+    install_session_start_hook(claude_dir)
+
+    assert len(seen_before_truncate) == 1
+    assert "SessionStart" in seen_before_truncate[0]["hooks"]
+    assert json.loads(target.read_text()) == seen_before_truncate[0]
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="uses macOS `chmod +a` ACLs")
 def test_install_keeps_acl_on_symlink_target(tmp_path):
     claude_dir = tmp_path / ".claude"
     target = _link_to_dotfiles(tmp_path, claude_dir / "settings.json", '{"model": "keep-me"}')
-    subprocess.run(["chmod", "+a", "nobody deny read", str(target)], check=True)
+    subprocess.run(["chmod", "+a", "everyone deny delete", str(target)], check=True)
+
+    def acl_entries():
+        listing = subprocess.run(["ls", "-le", str(target)], capture_output=True, text=True, check=True).stdout
+        return listing.splitlines()[1:]
+
+    before = acl_entries()
+    assert before
 
     install_session_start_hook(claude_dir)
 
-    listing = subprocess.run(["ls", "-le", str(target)], capture_output=True, text=True, check=True).stdout
-    assert "nobody deny read" in listing
+    assert acl_entries() == before
     assert "poppy" in target.read_text()
 
 

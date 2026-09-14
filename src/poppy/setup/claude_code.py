@@ -13,10 +13,12 @@ Poppy MVP wires:
 """
 
 import json
+import locale
 import os
 import shutil
 import stat
 import sys
+import tempfile
 from collections.abc import MutableMapping
 from pathlib import Path
 
@@ -307,6 +309,11 @@ def _resolve_write_target(path: Path) -> Path:
             f"Refusing to write through symlink at {path}: it does not resolve to {target}. "
             "Fix or remove the link, then re-run `poppy setup`."
         )
+    if not os.path.isfile(target):
+        raise CorruptConfigError(
+            f"Refusing to write through symlink at {path}: {target} is not a regular file. "
+            "Fix or remove the link, then re-run `poppy setup`."
+        )
     if not os.access(target, os.W_OK):
         raise CorruptConfigError(
             f"Refusing to write through symlink at {path}: {target} is not writable. "
@@ -371,13 +378,15 @@ def _write_in_place(link: Path, content: str, *, target: Path) -> None:
     Writing into the same file keeps its owner, group, mode, ACLs, extended
     attributes and hard links exactly as the user set them, and creates
     nothing in the dotfiles directory. The trade-off is that this write is not
-    atomic: a crash part-way can leave the target half-written. A
-    ``.pre-poppy.bak`` copy next to the link is ensured before the target is
-    touched, so the config can be restored from it.
+    atomic: a crash part-way can leave the target half-written. Right before
+    each write, the target's current content is saved to ``.poppy-prev.bak``
+    next to the link, so it can be restored from there; ``.pre-poppy.bak``
+    keeps the content from before Poppy first changed the file.
     """
     if not link.with_name(link.name + CONFIG_BACKUP_SUFFIX).exists():
         _backup_once(link, CONFIG_BACKUP_SUFFIX)
     resolved = _check_write_target(link, target)
+    _save_previous_content(link, resolved)
     try:
         # No O_CREAT: only an existing file is changed. No O_TRUNC: the file is
         # cut to the new length only after the new content is written.
@@ -387,11 +396,41 @@ def _write_in_place(link: Path, content: str, *, target: Path) -> None:
             f"Refusing to write through symlink at {link}: {resolved} cannot be opened for writing "
             f"({exc.strerror}). Fix or remove the link, then re-run `poppy setup`."
         ) from exc
-    with os.fdopen(fd, "w") as fh:
-        fh.write(content)
-        fh.flush()
-        os.ftruncate(fd, os.lseek(fd, 0, os.SEEK_CUR))
+    try:
+        data = content.encode(locale.getpreferredencoding(False))
+        # Pad shorter content with trailing whitespace up to the old size, so
+        # the file never reads as new content followed by a stale old tail.
+        padded = data.ljust(os.fstat(fd).st_size, b" ")
+        view = memoryview(padded)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.ftruncate(fd, len(data))
         os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _save_previous_content(link: Path, resolved: Path) -> None:
+    """Atomically copy ``resolved``'s current bytes to ``.poppy-prev.bak`` beside ``link``."""
+    backup = link.with_name(link.name + PREVIOUS_CONTENT_BACKUP_SUFFIX)
+    try:
+        data = resolved.read_bytes()
+        # mkstemp creates a unique 0600 file, so a planted name cannot redirect the copy.
+        fd, tmp = tempfile.mkstemp(dir=link.parent, prefix=f".{backup.name}.")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, backup)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    except OSError as exc:
+        raise CorruptConfigError(
+            f"Refusing to write through symlink at {link}: could not save its current content to {backup} "
+            f"({exc.strerror}). Nothing was changed."
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +466,8 @@ def _mcp_entry(source: str = "mcp", *, daemon: bool = False, port: int = 7679, t
 CONFIG_BACKUP_SUFFIX = ".pre-poppy.bak"
 # Back-compat alias for callers/tests that reference the old desktop-only name.
 CLAUDE_DESKTOP_BACKUP_SUFFIX = CONFIG_BACKUP_SUFFIX
+# Copy of a symlinked config's content taken right before each in-place write.
+PREVIOUS_CONTENT_BACKUP_SUFFIX = ".poppy-prev.bak"
 
 
 def _backup_once(path: Path, suffix: str) -> Path | None:
