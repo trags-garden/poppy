@@ -8,8 +8,11 @@ deterministic state of `~/.poppy/analytics.json` and `~/.poppy/config.json`.
 
 from __future__ import annotations
 
+import errno
 import json
 import multiprocessing
+import os
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -79,6 +82,41 @@ def test_first_run_creates_analytics_with_device_id(tmp_path: Path, telemetry_on
     assert data["telemetry"] == "on"
     assert len(data["device_id"]) >= 16
     assert "created_at" in data
+
+
+def test_an_interrupted_analytics_save_keeps_the_previous_file(tmp_path: Path, monkeypatch) -> None:
+    """A torn analytics.json reads as empty, minting a new device id; a failed save must leave the old file."""
+    telemetry._save(tmp_path, {"device_id": "kept", "first_run_notice_shown": True})
+
+    def killed_before_rename(*_args, **_kwargs):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(os, "replace", killed_before_rename)
+    with pytest.raises(OSError):
+        telemetry._save(tmp_path, {"device_id": "new"})
+    monkeypatch.undo()
+
+    assert telemetry._load(tmp_path) == {"device_id": "kept", "first_run_notice_shown": True}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["analytics.json"]
+
+
+def test_an_unpersisted_analytics_save_stays_silent(
+    tmp_path: Path, telemetry_on, fresh_client_state, monkeypatch
+) -> None:
+    """A disk error while saving analytics.json never reaches the CLI; the milestone just reports not emitted."""
+    real_fsync = os.fsync
+
+    def failing_directory_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "Input/output error")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", failing_directory_fsync)
+    with patch("posthog.Posthog", FakeClient):
+        assert telemetry.capture_once(tmp_path, "closed_loop") is False
+        telemetry.capture(tmp_path, "memory_write")
+
+    assert all(not client.captured for client in FakeClient.instances)
 
 
 def test_telemetry_off_writes_nothing(tmp_path: Path, telemetry_on, fresh_client_state) -> None:

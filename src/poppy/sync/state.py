@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 from poppy.engine._closet_marker import utc_iso
-from poppy.paths import ensure_poppy_dir
+from poppy.paths import ensure_poppy_dir, write_text_atomic
 
 try:
     import fcntl
@@ -246,7 +246,9 @@ def save(poppy_dir: Path, state: SyncState) -> None:
     path = _state_path(poppy_dir)
     ensure_poppy_dir(path.parent)
     payload = {"remotes": {url: asdict(rs) for url, rs in state.remotes.items()}}
-    path.write_text(json.dumps(payload, indent=2))
+    # Atomic: a torn file reads as "no state" to the lenient ``load``, which would
+    # silently reset every remote's watermarks on the next sync.
+    write_text_atomic(path, json.dumps(payload, indent=2))
 
 
 def get_remote(state: SyncState, url: str) -> RemoteState:
