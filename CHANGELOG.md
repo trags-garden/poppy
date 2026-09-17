@@ -142,6 +142,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `poppy sync status` on an unconfigured store now offers `poppy setup trags`
   first, and the `poppy setup trags` success line prints the config file it
   actually wrote, which matters when `POPPY_DIR` moves the store.
+- `poppy encrypt repair` now escapes the store path in the read-only plaintext
+  check it runs before deleting a key. A `?` or `#` in the data directory could
+  make a corrupt store pass that check (and leave a stray empty database next to
+  it), and a `%` could make a healthy store fail it.
+- `sync_state.json` and `analytics.json` are now written atomically (temp file,
+  fsync, rename) and created owner-only. A crash, kill or full disk mid-save
+  used to leave a truncated file that loaded as empty state, silently resetting
+  every remote's sync watermarks and the telemetry device id.
 
 ### Upgrading
 
