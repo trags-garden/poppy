@@ -632,6 +632,29 @@ def test_percent_in_poppy_dir_opens(tmp_path, monkeypatch):
     conn.close()
 
 
+@pytest.mark.parametrize(
+    "dirname",
+    [
+        pytest.param("dir?x", marks=pytest.mark.skipif(os.name == "nt", reason="'?' is not allowed in Windows paths")),
+        "dir#x",
+        "dir%41x",
+    ],
+)
+def test_plaintext_probe_escapes_uri_characters_in_path(tmp_path, dirname):
+    # Repair deletes a key on the strength of this probe. Unescaped, '?' and '#'
+    # truncate the URI path so SQLite creates and opens an empty database beside
+    # the store (a corrupt store "passes"), and '%41' decodes to a missing path.
+    d = tmp_path / dirname
+    d.mkdir()
+    good = _seed(d, "x")
+    corrupt = d / "corrupt.db"
+    corrupt.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4080)
+
+    assert encryption._opens_as_plaintext(good) is True
+    assert encryption._opens_as_plaintext(corrupt) is False
+    assert [p.name for p in tmp_path.iterdir()] == [dirname]  # no stray database created
+
+
 def test_leaked_connection_releases_gate(tmp_path):
     pytest.importorskip("fcntl")
     import gc
