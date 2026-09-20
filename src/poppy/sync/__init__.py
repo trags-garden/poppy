@@ -969,6 +969,27 @@ def _apply_pulled_row(
     if tombstones.local_deletion_wins(incoming.id, incoming.updated_at):  # type: ignore[attr-defined]
         return "stale"
 
+    # Newer than the record, but is it really someone reclaiming the id? A device
+    # still on the older release goes on deriving these copies and publishing
+    # them, and each publication carries a fresher stamp than the row this store
+    # removed, so the record's own timestamp cannot tell the two apart. Taken at
+    # face value the speaker text comes back as an ordinary memory, drops the
+    # record, and is pushed up again.
+    #
+    # So it is graded against the live parent, the same conjunctive test used
+    # everywhere else: provably the same derived copy is still ours to refuse,
+    # and the record moves up to the stamp just seen so the next publication of
+    # it is covered without grading again. Anything else is a real memory at that
+    # id and takes the ordinary path below, which clears the record as it lands.
+    if (
+        not is_tombstone(row)
+        and tombstones.local_deletion_at(incoming.id) is not None  # type: ignore[attr-defined]
+        and tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN  # type: ignore[arg-type]
+    ):
+        if not dry_run:
+            tombstones.record_local_deletion(incoming.id, incoming.updated_at)  # type: ignore[attr-defined]
+        return "redacted"
+
     # A marked closet is LOCAL-ONLY derived data: bloom re-derives it from
     # the parent on this device, so sync never applies an incoming row for
     # one, live or tombstone. A live row would overwrite the marker and turn

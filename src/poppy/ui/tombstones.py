@@ -532,6 +532,13 @@ class TombstoneStore:
         with self._lock:
             record_local_deletion(self._conn, memory_id, deleted_at)
 
+    def local_deletion_at(self, memory_id: str) -> datetime | None:
+        """When this store deleted ``memory_id`` locally, or None if it never did."""
+        from poppy.sync.state import local_deletion_at
+
+        with self._lock:
+            return local_deletion_at(self._conn, memory_id)
+
     def clear_local_deletion(self, memory_id: str) -> None:
         """Forget the deletion record for an id a real memory has taken back."""
         from poppy.sync.state import clear_local_deletion

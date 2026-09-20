@@ -515,6 +515,94 @@ def test_migration_marks_closets_it_can_re_derive_from_a_live_parent(tmp_path: P
     assert [m.id for m in _bloom(db).list_all()] == ["sess-2026-01"]
 
 
+def test_a_still_derived_cloud_copy_is_not_ingested_after_cleanup(tmp_path: Path) -> None:
+    """A device on the older release keeps publishing the copy we just removed.
+
+    Its publication carries a FRESHER stamp than the row this store removed, so
+    the deletion record does not cover it. Taken at face value that looks like
+    someone reclaiming the id, and the speaker text comes back as an ordinary
+    memory, drops the suppression, and is pushed up again.
+    """
+    db = tmp_path / "memories.db"
+    writer = _bloom(db)
+    writer.ingest(_memory("sess-2026-01", _turns()))
+    copy = writer.get("sess-2026-01_closet_alice")
+    assert copy is not None and SECRET in copy.content
+    writer._conn.close()
+
+    engine = _bloom(db)  # the upgrade: the copy goes, recorded at its own stamp
+    assert engine.get("sess-2026-01_closet_alice") is None
+    store = TombstoneStore(db)
+
+    later = copy.updated_at + timedelta(days=1)
+    row = _cloud_row("sess-2026-01_closet_alice", copy.content, when=later)
+    row["related_to"] = ["sess-2026-01"]
+    row["created_at"] = copy.created_at.isoformat()
+    pull(engine=engine, tombstones=store, client=_RecordingClient([row]), state=SyncState(), poppy_dir=tmp_path)
+
+    assert engine.get("sess-2026-01_closet_alice") is None  # not resurrected
+    assert "sess-2026-01_closet_alice" not in {m.id for m in engine.list_all()}
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    # The parent is a real memory and still goes up; the copy of it does not.
+    assert {r["id"] for r in client.upserts} == {"sess-2026-01"}
+    # ... and the record has moved up to the stamp just seen, so the next
+    # publication of the same copy is covered without re-grading it.
+    assert _local_deletion_time(db, "sess-2026-01_closet_alice") == later
+
+
+def test_a_genuine_recreation_after_cleanup_still_lands(tmp_path: Path) -> None:
+    """The guard above must not swallow a real memory written at a copy's id."""
+    db = tmp_path / "memories.db"
+    writer = _bloom(db)
+    writer.ingest(_memory("sess-2026-01", _turns()))
+    copy_updated = writer.get("sess-2026-01_closet_alice").updated_at
+    writer._conn.close()
+
+    engine = _bloom(db)
+    store = TombstoneStore(db)
+
+    later = copy_updated + timedelta(days=1)
+    note = _cloud_row("sess-2026-01_closet_alice", "an independent note of my own", when=later)
+    pull(engine=engine, tombstones=store, client=_RecordingClient([note]), state=SyncState(), poppy_dir=tmp_path)
+
+    assert engine.get("sess-2026-01_closet_alice").content == "an independent note of my own"
+    assert _local_deletion_time(db, "sess-2026-01_closet_alice") is None  # reclaimed
+
+
+def test_marking_and_removing_legacy_copies_commit_as_one(tmp_path: Path) -> None:
+    """A crash between the two must not leave rows marked and queued.
+
+    The marks and the upload entries the migration writes are only correct
+    together with the removal that consumes them. Committed on their own they
+    are an upload this version never drains and an older client sharing the
+    store does.
+    """
+    db = _legacy_store(tmp_path)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TRIGGER refuse_cleanup BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT, 'cleanup interrupted'); END"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(sqlite3.IntegrityError, match="cleanup interrupted"):
+        _bloom(db)
+
+    assert MARKER_COLUMN not in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
+    assert _rows(db, "SELECT id FROM legacy_closet_ids") == []
+
+    conn = sqlite3.connect(str(db))
+    conn.execute("DROP TRIGGER refuse_cleanup")
+    conn.commit()
+    conn.close()
+
+    engine = _bloom(db)  # the retry does both
+    assert _marked_ids(db) == []
+    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
+    assert _pending_ids(TombstoneStore(db)) == []
+
+
 def test_a_pre_marker_store_is_cleaned_on_the_first_open(tmp_path: Path) -> None:
     """One open, not two.
 

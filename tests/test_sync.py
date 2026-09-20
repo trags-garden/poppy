@@ -4027,6 +4027,44 @@ def test_cleanup_records_the_rows_own_time_not_the_upgrade_clock(tmp_path):
     assert engine.get("derived").content == "An independent note another device wrote"
 
 
+def test_an_unreadable_stamp_falls_back_to_the_past_not_to_now(tmp_path):
+    """A record it cannot date must not silently outrank every earlier version.
+
+    Dated now, the record sits above every version of the id written before the
+    upgrade, and a legitimate older recreation is refused for good. Dated from
+    what the row does carry, or from the earliest instant when it carries
+    nothing readable, the record can only let something through, and what it
+    would let through is caught by the grading on the pull side.
+    """
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    created = _NOW - timedelta(days=300)
+    engine.ingest(_memory("derived", updated=_NOW - timedelta(days=299)))
+    with engine._conn:
+        engine._conn.execute(
+            "UPDATE memories SET is_closet = 1, updated_at = 'not-a-timestamp', created_at = ?",
+            (created.isoformat(),),
+        )
+    engine._conn.close()
+
+    engine = SeedEngine(tmp_path / "memories.db")
+    stamp = engine._conn.execute("SELECT deleted_at FROM sync_local_deletions").fetchone()[0]
+    assert datetime.fromisoformat(stamp) == created
+
+    # An older, genuinely different memory at that id still lands.
+    older = _memory("derived", updated=created + timedelta(seconds=1))
+    older.content = "An independent note written before the upgrade"
+    result = pull(
+        engine=engine,
+        tombstones=tombstones,
+        client=_FakeClient(rows=[memory_to_wire(older)]),
+        state=SyncState(),
+        poppy_dir=tmp_path,
+    )
+
+    assert result.errors == 0
+    assert engine.get("derived").content == "An independent note written before the upgrade"
+
+
 def test_cleanup_retires_the_upload_queue_including_orphans(tmp_path):
     """Nothing here drains that queue, but an older client sharing the store would."""
     engine, tombstones = _engine_and_tombstones(tmp_path)

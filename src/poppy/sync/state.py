@@ -23,7 +23,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -377,11 +377,31 @@ _RECORD_LOCAL_DELETION_SQL = (
 )
 
 
+# Sorts below every real timestamp as text and as an instant. Used for a row
+# whose own timestamps are unreadable, so the record exists without claiming an
+# instant it cannot support.
+_MIN_STAMP = datetime.min.replace(tzinfo=timezone.utc).isoformat()
+
+
+def _first_readable(*values: str | None) -> str | None:
+    """The first of these stored timestamps that parses, in canonical UTC."""
+    for value in values:
+        stamp = utc_iso(value)
+        if stamp is None:
+            continue
+        try:
+            datetime.fromisoformat(stamp)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        return stamp
+    return None
+
+
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
 
 
-def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path) -> None:
+def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path, *, gate_held: bool = False) -> None:
     """Remove stored derived duplicates without creating an upload or Trash entry.
 
     Keep a durable deletion record carrying no text: a cloud copy of one of these
@@ -402,43 +422,49 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path) -> None:
     )
     if not has_marked and not has_queue:
         return
-    with write_gate(poppy_dir), write_txn(conn):
+    # ``gate_held`` is for the engine, which takes the gate once around the
+    # marker migration and this, so the two commit as one. Taking it again here
+    # would be a second flock on the same file from the same process, which
+    # blocks until the attempt loop gives up.
+    gate = nullcontext() if gate_held else write_gate(poppy_dir)
+    with gate, write_txn(conn):
         now_iso = utc_iso(datetime.now(timezone.utc))
         if _table_exists(conn, "legacy_closet_ids"):
-            # Marked answered rather than deleted: the entry doubles as the record
-            # that this id was once proved to be a derived copy, which pull still
-            # reads to keep a republished copy out. Clearing the pending flag is
-            # what stops an older client uploading it.
+            # Answered, not deleted, for every id EXCEPT the ones removed below:
+            # those lose their entry along with the row. That is fine, because
+            # what keeps a republished copy out is no longer this table but the
+            # deletion record plus the grading pull does against the live parent.
+            # Clearing the pending flag is what stops an older client sharing
+            # this store from uploading the entry in the retired format.
             conn.execute(
                 "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE announce_pending = 1",
                 (now_iso,),
             )
         rows = conn.execute(
-            "SELECT m.id, COALESCE(l.legacy_updated_at, m.updated_at) FROM memories m "
+            "SELECT m.id, COALESCE(l.legacy_updated_at, m.updated_at), m.created_at FROM memories m "
             "LEFT JOIN legacy_closet_ids l ON l.id = m.id WHERE m.is_closet = 1"
             if _table_exists(conn, "legacy_closet_ids")
-            else "SELECT id, updated_at FROM memories WHERE is_closet = 1"
+            else "SELECT id, updated_at, created_at FROM memories WHERE is_closet = 1"
         ).fetchall()
         if not rows:
             return
         conn.execute(LOCAL_DELETIONS_DDL)
         deletions = []
-        for memory_id, updated_at in rows:
+        for memory_id, updated_at, created_at in rows:
             # The ROW'S OWN time, never this upgrade's clock. A record stamped now
             # sits above every version of this id written before the upgrade, so a
             # real memory another device wrote at the id months ago would be
             # refused on the next pull and the watermark would move past it: the
             # remote version would be lost here for good. Stamped with what the
             # row actually carried, the record covers exactly the copy that was
-            # removed and anything newer is applied as usual.
-            stamp = utc_iso(updated_at)
-            try:
-                datetime.fromisoformat(stamp)
-            except (TypeError, ValueError, OverflowError):
-                # A row whose time cannot be read at all: nothing can be compared
-                # with it, so fall back to now and accept over-suppression at that
-                # one id rather than letting a redacted copy return.
-                stamp = now_iso
+            # removed and anything newer is graded rather than refused.
+            #
+            # A row whose times cannot be read at all falls back to the earliest
+            # representable instant, never to now: a record in the past can only
+            # let something through, and what it would let through is caught by
+            # the grading on the pull side instead. A record dated now would
+            # silently refuse a legitimate older version of the id for good.
+            stamp = _first_readable(updated_at, created_at) or _MIN_STAMP
             deletions.append((memory_id, stamp))
         conn.executemany(_RECORD_LOCAL_DELETION_SQL, deletions)
         # No pre-image is kept, deliberately. Only rows marked as DERIVED are
@@ -473,21 +499,27 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path) -> None:
         conn.execute("DELETE FROM memories WHERE is_closet = 1")
 
 
-def local_deletion_wins(conn: sqlite3.Connection | None, memory_id: str, updated_at: datetime) -> bool:
-    """Whether a durable local deletion supersedes this incoming version."""
-    if (
-        conn is None
-        or not conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_local_deletions'"
-        ).fetchone()
-    ):
-        return False
+def local_deletion_at(conn: sqlite3.Connection | None, memory_id: str) -> datetime | None:
+    """When this store deleted ``memory_id`` locally, or None if it never did."""
+    if conn is None or not _table_exists(conn, "sync_local_deletions"):
+        return None
     row = conn.execute("SELECT deleted_at FROM sync_local_deletions WHERE id = ?", (memory_id,)).fetchone()
     if row is None:
+        return None
+    try:
+        return datetime.fromisoformat(row[0])
+    except (TypeError, ValueError, OverflowError):  # pragma: no cover - both writers spell it
+        return None
+
+
+def local_deletion_wins(conn: sqlite3.Connection | None, memory_id: str, updated_at: datetime) -> bool:
+    """Whether a durable local deletion supersedes this incoming version."""
+    deleted_at = local_deletion_at(conn, memory_id)
+    if deleted_at is None:
         return False
     if updated_at.tzinfo is None:
         updated_at = updated_at.replace(tzinfo=timezone.utc)
-    return datetime.fromisoformat(row[0]) >= updated_at
+    return deleted_at >= updated_at
 
 
 def clear_local_deletion(conn: sqlite3.Connection, memory_id: str) -> None:
