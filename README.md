@@ -259,7 +259,6 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy sync status` | | Show watermarks and last-sync time. |
 | `poppy import claude-memories` | `--dry-run`, `--projects-dir` | Import auto-memory files from `~/.claude/projects/<slug>/memory/`. |
 | `poppy import hermes-memories` | `--dry-run`, `--memories-dir` | Import paragraphs from `~/.hermes/memories/{MEMORY,USER}.md`. |
-| `poppy build mcpb` | `--output-dir` | Build a Claude Desktop Extension bundle (.mcpb). |
 | `poppy hook ...` | | Claude Code, Cursor, and Codex hook entrypoints (`session-start`, `user-prompt-submit`, `pre-tool-use`, `post-compact`, `session-end`, `stop`, `replay-compact`, `replay-session-end`). Invoked by Poppy-installed hooks. |
 | `poppy doctor` | | Verify the installation: engine, storage, MCP config, hooks. |
 
