@@ -80,8 +80,8 @@ class PoppyConfig:
     # Retrieval engine for recall/remember on the runtime surface. Validated
     # against the registry in the engine key's parser. See `poppy engines`.
     engine: str = "bloom"
-    # Anonymous usage telemetry. Tri-state: None = unset (defaults to
-    # on), True/False = explicit user choice via `poppy telemetry on|off`.
+    # Anonymous usage telemetry. None = unanswered (off); True/False = an
+    # explicit choice from the first-run prompt or `poppy telemetry on|off`.
     # POPPY_TELEMETRY_OFF=1 in the environment overrides this at read time;
     # see poppy.telemetry.is_enabled() for the full precedence.
     telemetry_enabled: bool | None = None

@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Anonymous usage telemetry is off until you turn it on. Poppy asks once, on
+  the first run in a terminal, and the default is no; `poppy telemetry on|off`
+  answers it too. Nothing is sent, and the daily PyPI update check does not
+  run either, while the question is unanswered, so a fresh install makes no
+  network request until you say yes. Hooks, the MCP server, daemon commands,
+  detached workers, `--help` and any piped or redirected run are never
+  interrupted by the question. `poppy telemetry status` reports "not answered
+  yet" separately from a choice you made.
 - Removed experimental local ONNX model-file overrides. Bloom always uses its
   pinned models, including cached models when offline.
 - The local web UI now runs the same design system as the trags.ai dashboard

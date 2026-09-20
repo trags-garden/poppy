@@ -379,10 +379,15 @@ poppy ui    # opens a local web UI at http://127.0.0.1:7800
 
 ## Telemetry
 
-Poppy sends a small number of anonymous usage events to PostHog (EU region)
-so we can see which features get used. The distinct ID is a random UUID
-generated on your machine and stored in `~/.poppy/analytics.json`; it is not
-derived from hardware, accounts, or anything identifying.
+Telemetry is off until you turn it on. The first time you run Poppy in a
+terminal it asks once whether to send anonymous usage events; the default is
+no, so pressing Enter declines. Until you answer yes, Poppy sends nothing.
+
+Saying yes sends a small number of events to PostHog (EU region) so we can see
+which features get used. The distinct ID is a random UUID generated on your
+machine then and stored in `~/.poppy/analytics.json`; it is not derived from
+hardware, accounts, or anything identifying. Decline and no ID is generated at
+all.
 
 This is the complete list of events and the properties they carry. Every event
 Poppy can emit is in this table; there are no others.
@@ -409,12 +414,19 @@ If you onboard to Trags with `poppy setup trags`, the random device UUID is
 shared with the Trags server so it can link this machine's telemetry to your
 account.
 
-The first time the CLI runs with telemetry on, it prints a one-line notice to
-stderr. Turn telemetry off any time; the choice persists in
-`~/.poppy/config.json`:
+The question is asked on stderr, and only when stdin, stdout and stderr are
+all a terminal. Hooks, the MCP server (`poppy serve`), daemon commands,
+detached workers, `--help` output and any piped or redirected run are never
+interrupted by it, and they send nothing while the question is unanswered.
+
+Your answer persists in `~/.poppy/config.json`, and either answer counts, so
+you are asked once. Change your mind at any time, or answer without waiting
+to be asked:
 
 ```bash
-poppy telemetry off       # or: poppy telemetry status | on
+poppy telemetry status    # on, off, or not answered yet
+poppy telemetry on
+poppy telemetry off
 ```
 
 Setting `POPPY_TELEMETRY_OFF=1` in the environment also turns telemetry off
@@ -430,6 +442,9 @@ never make this request; they can only show a once-per-version hint already
 stored in the local cache. Disable the check with `POPPY_UPDATE_CHECK_OFF=1` or
 `poppy config set update_check off`. Turning telemetry off, with
 `poppy telemetry off` or `POPPY_TELEMETRY_OFF=1`, also turns it off.
+
+So does leaving the telemetry question unanswered. A fresh install makes no
+network request of any kind, to PyPI or to PostHog, until you have said yes.
 
 ## Hacking on it
 

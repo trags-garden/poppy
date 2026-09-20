@@ -3,6 +3,7 @@ import datetime
 import errno
 import json
 import os
+import sys
 from pathlib import Path
 
 import click
@@ -103,16 +104,38 @@ def _parse_since_option(since: str | None) -> datetime.datetime | None:
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
 
+# Commands that must never stop to ask the telemetry question. Hooks, the MCP
+# server, the daemon and the sync group's detached worker all run with nobody
+# watching, and they can inherit the terminal of whatever started them, so the
+# TTY check alone would not hold. `telemetry` is excluded because the user is
+# already standing at the switch. `sync` defers to its own group callback,
+# which can see whether the detached worker is the target.
+_NO_CONSENT_PROMPT_COMMANDS = frozenset({"daemon", "hook", "serve", "sync", "telemetry"})
+# Argv tokens that mean "do not stop to ask me": help output has to stay
+# scriptable, and `--yes` is how an unattended install says it will not be
+# answering questions. Read from argv because click leaves the subcommand's
+# arguments unparsed while a group callback runs.
+_NO_CONSENT_PROMPT_FLAGS = frozenset({"-h", "--help", "--yes"})
+
+
+def _maybe_ask_about_telemetry() -> None:
+    """Ask the one-time telemetry question unless this invocation must not block.
+
+    Callers exclude their own background subcommands first; this adds the
+    argv-level exclusions, which the click context does not expose in time.
+    """
+    if _NO_CONSENT_PROMPT_FLAGS.intersection(sys.argv[1:]):
+        return
+    telemetry.maybe_prompt_for_consent(_get_poppy_dir())
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, "-v", "--version", prog_name="poppy")
 @click.pass_context
 def cli(ctx: click.Context):
     """Poppy -- remember what matters."""
-    # One-time telemetry disclosure (stderr only, never when telemetry is off,
-    # never twice, never raises). Skipped for `poppy telemetry ...` itself:
-    # the user is already looking at the switch.
-    if ctx.invoked_subcommand != "telemetry":
-        telemetry.maybe_print_first_run_notice(_get_poppy_dir())
+    if ctx.invoked_subcommand not in _NO_CONSENT_PROMPT_COMMANDS:
+        _maybe_ask_about_telemetry()
 
 
 @cli.result_callback()
@@ -1001,11 +1024,14 @@ def telemetry_group(ctx: click.Context):
 @telemetry_group.command("status")
 def telemetry_status():
     """Show whether telemetry is on, and why."""
-    enabled, reason = telemetry.status(_get_poppy_dir())
+    poppy_dir = _get_poppy_dir()
+    enabled, reason = telemetry.status(poppy_dir)
     click.echo(f"Telemetry: {'on' if enabled else 'off'} ({reason})")
     if enabled:
         click.echo("Anonymous usage events only. Memory content, queries, and project names are never sent.")
         click.echo("Turn off with: poppy telemetry off")
+    elif telemetry.is_unanswered(poppy_dir):
+        click.echo("Nothing is sent until you answer. Turn it on with: poppy telemetry on")
 
 
 @telemetry_group.command("on")
@@ -2063,9 +2089,13 @@ def import_hermes_memories_cmd(dry_run: bool, memories_dir: Path | None):
 
 
 @cli.group("sync")
-def sync_group():
+@click.pass_context
+def sync_group(ctx: click.Context):
     """Sync memories to/from a Trags instance."""
-    pass
+    # The top-level callback skips `sync` wholesale so the detached worker is
+    # never asked; the subcommands a person types get the question here.
+    if ctx.invoked_subcommand != "_auto-worker":
+        _maybe_ask_about_telemetry()
 
 
 def _sync_client():

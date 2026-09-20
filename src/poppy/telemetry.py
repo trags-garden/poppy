@@ -5,15 +5,16 @@ surfaces failures to the user. Off means truly off — no network calls.
 
 Enablement precedence (first match wins):
 1. ``POPPY_TELEMETRY_OFF=1`` in the environment → off, always.
-2. ``telemetry_enabled`` in ``~/.poppy/config.json`` (set via
-   ``poppy telemetry on|off``) → that value.
-3. Legacy ``"telemetry": "off"`` in ``~/.poppy/analytics.json`` → off.
-4. Default → on.
+2. An unusable ``POPPY_TELEMETRY_HOST`` override → off.
+3. ``telemetry_enabled`` in ``~/.poppy/config.json`` (set by the prompt
+   or ``poppy telemetry on|off``) → that value.
+4. Legacy ``"telemetry": "off"`` in ``~/.poppy/analytics.json`` → off.
+5. No recorded answer → off.
 
 Design rules:
-- One `~/.poppy/analytics.json` per machine: stores `device_id`, a
-  `created_at`, and the one-time first-run-notice flag. Generated on first
-  invocation.
+- One `~/.poppy/analytics.json` per machine stores `device_id`, `created_at`,
+  milestone state, and a legacy notice flag for older versions. Consent is
+  stored in config.json; the notice flag alone never enables telemetry.
 - Events use `device_id` as the PostHog `distinct_id` until the server
   aliases it to a user_id during `poppy setup trags`.
 - Event properties never contain memory content, recall query text, or
@@ -101,7 +102,7 @@ def _save(poppy_dir: Path, data: dict) -> None:
     p = _analytics_path(poppy_dir)
     ensure_poppy_dir(p.parent)
     # Atomic: a torn file reads as empty, which would mint a new device id and
-    # replay the first-run notice and milestone events.
+    # replay milestone events.
     write_text_atomic(p, json.dumps(data, indent=2))
 
 
@@ -142,11 +143,11 @@ def _config_flag(poppy_dir: Path) -> bool | None:
 
 
 def status(poppy_dir: Path) -> tuple[bool, str]:
-    """Return (enabled, reason). Precedence: env var, host override, config flag, legacy file, default on."""
+    """Return (enabled, reason). Precedence: env var, host override, config flag, legacy file, off until answered."""
     if os.environ.get("POPPY_TELEMETRY_OFF") == "1":
         return False, "POPPY_TELEMETRY_OFF=1 set in the environment"
     # A set-but-unusable host override disables telemetry outright, so status,
-    # the first-run notice and the capture path all agree it is off rather than
+    # the consent prompt and the capture path all agree it is off rather than
     # printing "on" while every event is silently dropped.
     if os.environ.get(_HOST_ENV) is not None and _host() is None:
         return False, f"{_HOST_ENV} is set but not a usable loopback URL"
@@ -155,7 +156,7 @@ def status(poppy_dir: Path) -> tuple[bool, str]:
         return flag, f"set in {poppy_dir / 'config.json'}"
     if _load(poppy_dir).get("telemetry") == "off":
         return False, f"legacy opt-out in {_analytics_path(poppy_dir)}"
-    return True, "default"
+    return False, _UNANSWERED_REASON
 
 
 def is_enabled(poppy_dir: Path) -> bool:
@@ -163,13 +164,25 @@ def is_enabled(poppy_dir: Path) -> bool:
     return enabled
 
 
+def is_unanswered(poppy_dir: Path) -> bool:
+    """True when nothing has decided telemetry yet: no override, no stored choice.
+
+    Distinct from plain "off": an unanswered install has never been asked, so
+    it is the only state the first-run question may act on.
+    """
+    return status(poppy_dir) == (False, _UNANSWERED_REASON)
+
+
 def set_enabled(poppy_dir: Path, enabled: bool) -> None:
     """Persist the telemetry choice.
 
     Writes the first-class `telemetry_enabled` flag to config.json and mirrors
-    it into analytics.json for older readers. An explicit choice also counts
-    as having seen the first-run notice, so the disclosure never fires after
-    the user has already engaged with the switch.
+    it into analytics.json for older readers. The legacy notice flag prevents
+    older versions from displaying a disclosure after an explicit choice.
+
+    Turning telemetry on mints the device id here, so `poppy setup trags` can
+    link this machine to an account before any event has been sent. Declining
+    mints nothing: a machine that says no never gets an identifier at all.
     """
     from poppy.config import load_config, save_config
 
@@ -183,33 +196,61 @@ def set_enabled(poppy_dir: Path, enabled: bool) -> None:
     if "device_id" not in data and enabled:
         data["device_id"] = str(uuid.uuid4())
         data["created_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+        data[_INSTALL_PENDING_KEY] = True
     _save(poppy_dir, data)
 
 
 _NOTICE_KEY = "first_run_notice_shown"
-_FIRST_RUN_NOTICE = (
-    "poppy: anonymous usage telemetry is on (no memory content is ever sent). Disable: poppy telemetry off"
-)
+# Set when a device id is minted, cleared once `cli_install` has been emitted.
+# The install event used to be inferred from "analytics.json holds no device id
+# yet", which goes silent as soon as anything mints the id before the first
+# event, as answering the consent question does. A missing key means an install
+# from before the key existed: already counted, so never re-emit for it.
+_INSTALL_PENDING_KEY = "cli_install_pending"
+_UNANSWERED_REASON = "not answered yet"
+_CONSENT_PROMPT = """
+Poppy can send anonymous usage events so we can see which features get used.
+Events carry counts, lengths and a fixed set of event names. Memory content,
+recall queries and project names are never sent. You can change this later
+with poppy telemetry on, or poppy telemetry off.
+
+Send anonymous usage events?""".strip()
 
 
-def maybe_print_first_run_notice(poppy_dir: Path) -> None:
-    """Print the telemetry disclosure to stderr, exactly once ever.
+def _streams_are_a_terminal() -> bool:
+    """True when stdin, stdout and stderr are all a terminal."""
+    return all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
 
-    Never fires when telemetry is off, never prints to stdout, and never
-    raises — scripted use (hooks, MCP stdio, pipelines) must not break on a
-    notice. The seen-flag persists in analytics.json before printing.
+
+def maybe_prompt_for_consent(poppy_dir: Path) -> None:
+    """Ask the one-time telemetry question, on a terminal, at most once.
+
+    Requires all three standard streams to be terminals: stdin so the question
+    cannot swallow piped input, stdout and stderr so it cannot land in
+    redirected output that something else is parsing. Callers exclude their own
+    background commands on top of that, because a hook, the MCP server, the
+    daemon or a detached worker can inherit a terminal from whoever started it,
+    and a question there would hang the caller or corrupt its stdio protocol.
+
+    Ctrl-C or a closed stdin leaves the question unanswered rather than
+    recording a decline: an answer nobody gave should not be stored, telemetry
+    stays off either way, and the next interactive run asks again. The command
+    the user actually typed always continues.
     """
+    import click
+
     try:
-        if not is_enabled(poppy_dir):
+        if not _streams_are_a_terminal():
             return
-        data = _load(poppy_dir)
-        if data.get(_NOTICE_KEY):
+        if not is_unanswered(poppy_dir):
             return
-        data[_NOTICE_KEY] = True
-        _save(poppy_dir, data)
-        print(_FIRST_RUN_NOTICE, file=sys.stderr)
+        answer = click.confirm(_CONSENT_PROMPT, default=False, err=True)
+        set_enabled(poppy_dir, answer)
+    except click.Abort:
+        return  # Ctrl-C or EOF: no answer recorded, so ask again next time.
     except Exception:
-        pass
+        # The question must never stop the command the user asked for.
+        return
 
 
 def _ensure_client(poppy_dir: Path) -> tuple[Any, str, bool] | None:
@@ -226,13 +267,19 @@ def _ensure_client(poppy_dir: Path) -> tuple[Any, str, bool] | None:
 
     with _lock:
         data = _load(poppy_dir)
-        is_first_run = "device_id" not in data
-        if is_first_run:
+        if "device_id" not in data:
             # Merge, don't replace: analytics.json may already hold the
-            # first-run-notice flag from maybe_print_first_run_notice().
+            # legacy notice flag or milestone state.
             data["device_id"] = str(uuid.uuid4())
             data.setdefault("telemetry", "on")
             data["created_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+            data[_INSTALL_PENDING_KEY] = True
+            _save(poppy_dir, data)
+        # Latch before the emit, like the milestone events: an install counted
+        # but not delivered beats one re-counted on every command.
+        is_first_run = bool(data.get(_INSTALL_PENDING_KEY))
+        if is_first_run:
+            data[_INSTALL_PENDING_KEY] = False
             _save(poppy_dir, data)
 
         # Rebuild if the resolved host changed under a cached client (the override

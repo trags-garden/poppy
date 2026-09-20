@@ -1,4 +1,4 @@
-"""Unit tests for poppy.telemetry — file mutations, opt-out semantics, notice.
+"""Unit tests for poppy.telemetry: file mutations, consent, and precedence.
 
 Network is never hit because we never call `capture()` with a working SDK
 (the PostHog import is shimmed out per test) and the autouse conftest fixture
@@ -24,9 +24,19 @@ from poppy import telemetry
 
 
 @pytest.fixture
-def telemetry_on(monkeypatch: pytest.MonkeyPatch) -> None:
+def telemetry_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove the suite-wide POPPY_TELEMETRY_OFF=1 guard for telemetry-on tests."""
     monkeypatch.delenv("POPPY_TELEMETRY_OFF", raising=False)
+
+
+@pytest.fixture
+def telemetry_on(tmp_path: Path, telemetry_allowed) -> None:
+    """Record opt-in without creating analytics state before capture tests."""
+    from poppy.config import load_config, save_config
+
+    cfg = load_config(tmp_path)
+    cfg.telemetry_enabled = True
+    save_config(cfg)
 
 
 class FakeClient:
@@ -224,14 +234,14 @@ def test_set_enabled_preserves_device_id(tmp_path: Path, telemetry_on) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config.json flag, precedence, status, first-run notice
+# Config.json flag, precedence, status, first-run consent
 # ---------------------------------------------------------------------------
 
 
-def test_default_is_on(tmp_path: Path, telemetry_on) -> None:
+def test_default_is_off_until_answered(tmp_path: Path, telemetry_allowed) -> None:
     enabled, reason = telemetry.status(tmp_path)
-    assert enabled is True
-    assert reason == "default"
+    assert enabled is False
+    assert reason == "not answered yet"
 
 
 def test_env_var_always_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,7 +267,7 @@ def test_set_enabled_persists_flag_in_config_json(tmp_path: Path, telemetry_on) 
     assert telemetry.is_enabled(tmp_path) is True
 
 
-def test_legacy_analytics_opt_out_still_respected(tmp_path: Path, telemetry_on) -> None:
+def test_legacy_analytics_opt_out_still_respected(tmp_path: Path, telemetry_allowed) -> None:
     # Older installs persisted only {"telemetry": "off"} in analytics.json.
     (tmp_path / "analytics.json").write_text(json.dumps({"telemetry": "off"}))
     enabled, reason = telemetry.status(tmp_path)
@@ -265,73 +275,32 @@ def test_legacy_analytics_opt_out_still_respected(tmp_path: Path, telemetry_on) 
     assert "analytics.json" in reason
 
 
-def test_corrupt_config_json_falls_back_to_default_on(tmp_path: Path, telemetry_on) -> None:
+def test_corrupt_config_json_falls_back_to_off(tmp_path: Path, telemetry_allowed) -> None:
     (tmp_path / "config.json").write_text("{not json")
-    assert telemetry.is_enabled(tmp_path) is True
+    assert telemetry.is_enabled(tmp_path) is False
 
 
-def test_notice_prints_exactly_once(tmp_path: Path, telemetry_on, capsys: pytest.CaptureFixture) -> None:
-    telemetry.maybe_print_first_run_notice(tmp_path)
+@pytest.mark.parametrize("legacy_data", [{}, {"telemetry": "on", "device_id": "old", "first_run_notice_shown": True}])
+def test_unanswered_consent_never_initializes_client_or_latches_events(
+    tmp_path, telemetry_allowed, fresh_client_state, legacy_data, capsys
+):
+    if legacy_data:
+        telemetry._save(tmp_path, legacy_data)
+    with patch("posthog.Posthog") as client:
+        telemetry.capture(tmp_path, "memory_write")
+        assert telemetry.capture_once(tmp_path, "closed_loop") is False
+    client.assert_not_called()
+    assert telemetry.get_device_id(tmp_path) is None
+    assert telemetry._load(tmp_path) == legacy_data
     captured = capsys.readouterr()
-    assert "anonymous usage telemetry is on" in captured.err
-    assert "poppy telemetry off" in captured.err
-    assert captured.out == ""  # never stdout
-
-    telemetry.maybe_print_first_run_notice(tmp_path)
-    captured = capsys.readouterr()
-    assert captured.err == ""
-    assert captured.out == ""
-
-    data = json.loads((tmp_path / "analytics.json").read_text())
-    assert data["first_run_notice_shown"] is True
+    assert captured.out == captured.err == ""
 
 
-def test_notice_never_fires_when_off_via_env(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-    # conftest sets POPPY_TELEMETRY_OFF=1.
-    telemetry.maybe_print_first_run_notice(tmp_path)
-    captured = capsys.readouterr()
-    assert captured.err == ""
-    assert captured.out == ""
-    # Off means no analytics.json mutation either.
-    assert not (tmp_path / "analytics.json").exists()
-
-
-def test_notice_never_fires_when_off_via_config(tmp_path: Path, telemetry_on, capsys: pytest.CaptureFixture) -> None:
-    telemetry.set_enabled(tmp_path, False)
-    telemetry.maybe_print_first_run_notice(tmp_path)
-    assert capsys.readouterr().err == ""
-
-
-def test_notice_never_raises(tmp_path: Path, telemetry_on, monkeypatch: pytest.MonkeyPatch) -> None:
-    def _boom(*args, **kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(telemetry, "_save", _boom)
-    # Must not raise even when persistence is impossible.
-    telemetry.maybe_print_first_run_notice(tmp_path)
-
-
-def test_notice_flag_survives_first_capture(
-    tmp_path: Path, telemetry_on, fresh_client_state, capsys: pytest.CaptureFixture
-) -> None:
-    """Regression: _ensure_client's first-run write must merge, not replace,
-    analytics.json — otherwise the seen-flag is wiped and the notice repeats."""
-    telemetry.maybe_print_first_run_notice(tmp_path)
-    assert "telemetry is on" in capsys.readouterr().err
-
-    with patch("posthog.Posthog", FakeClient):
-        telemetry.capture(tmp_path, "memory_write", {"memory_type": "fact"})
-
-    data = json.loads((tmp_path / "analytics.json").read_text())
-    assert data["first_run_notice_shown"] is True
-    telemetry.maybe_print_first_run_notice(tmp_path)
-    assert capsys.readouterr().err == ""
-
-
-def test_explicit_choice_counts_as_notice_seen(tmp_path: Path, telemetry_on, capsys: pytest.CaptureFixture) -> None:
-    telemetry.set_enabled(tmp_path, True)
-    telemetry.maybe_print_first_run_notice(tmp_path)
-    assert capsys.readouterr().err == ""
+def test_prompt_persistence_failure_stays_off(tmp_path, telemetry_allowed, monkeypatch):
+    monkeypatch.setattr(telemetry, "_streams_are_a_terminal", lambda: True)
+    with patch("click.confirm", return_value=True), patch("poppy.config.save_config", side_effect=OSError("disk full")):
+        telemetry.maybe_prompt_for_consent(tmp_path)
+    assert telemetry.status(tmp_path) == (False, "not answered yet")
 
 
 def test_cli_install_reports_resolved_version(tmp_path: Path, telemetry_on, fresh_client_state) -> None:
@@ -344,6 +313,31 @@ def test_cli_install_reports_resolved_version(tmp_path: Path, telemetry_on, fres
     assert len(install_events) == 1
     props = install_events[0][2]
     assert props["version"] == poppy.__version__
+
+
+def test_answering_the_question_still_reports_the_install(
+    tmp_path: Path, telemetry_allowed, fresh_client_state
+) -> None:
+    """Saying yes mints the device id, which must not swallow the install event."""
+    telemetry.set_enabled(tmp_path, True)
+
+    with patch("posthog.Posthog", FakeClient):
+        telemetry.capture(tmp_path, "recall_call", {"query_length": 3})
+        telemetry.capture(tmp_path, "recall_call", {"query_length": 4})
+
+    events = [event for (event, _, _) in FakeClient.instances[0].captured]
+    assert events.count("cli_install") == 1
+
+
+def test_an_install_from_before_the_latch_is_not_recounted(tmp_path: Path, telemetry_on, fresh_client_state) -> None:
+    """Upgrades carry a device id and no latch: their install was already reported."""
+    telemetry._save(tmp_path, {"device_id": "existing", "telemetry": "on"})
+
+    with patch("posthog.Posthog", FakeClient):
+        telemetry.capture(tmp_path, "recall_call", {"query_length": 3})
+
+    events = [event for (event, _, _) in FakeClient.instances[0].captured]
+    assert "cli_install" not in events
 
 
 class _ExplodingShutdownClient(FakeClient):
@@ -460,7 +454,7 @@ def test_clean_loopback_override_is_accepted(monkeypatch, value) -> None:
 def test_bad_host_override_reports_off_everywhere(
     tmp_path: Path, telemetry_on, fresh_client_state, monkeypatch, value
 ) -> None:
-    """A set-but-unusable override disables telemetry in status, the notice and capture."""
+    """A set-but-unusable override disables telemetry in status, the prompt and capture."""
     import io
     from contextlib import redirect_stderr
 
@@ -469,7 +463,7 @@ def test_bad_host_override_reports_off_everywhere(
     assert enabled is False and telemetry._HOST_ENV in reason
     buf = io.StringIO()
     with redirect_stderr(buf):
-        telemetry.maybe_print_first_run_notice(tmp_path)
+        telemetry.maybe_prompt_for_consent(tmp_path)
     assert buf.getvalue() == ""
     with patch("posthog.Posthog", FakeClient):
         telemetry.capture(tmp_path, "cli_remember")
