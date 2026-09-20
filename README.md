@@ -44,6 +44,26 @@ poppy recall "python package manager"
 #     preference | 2026-05-25 | score: 0.91
 ```
 
+## Supported clients
+
+`poppy setup <client>` wires Poppy into a coding agent. Eleven clients have an
+integration today:
+
+- **MCP server plus zero-touch capture hooks**: Claude Code, Cursor, Codex.
+- **MCP server**: Claude Desktop, VS Code, Windsurf, Gemini CLI, GitHub Copilot
+  CLI, Pi, Goose. Most also get a short primer file so the agent knows the
+  memory tools are there.
+- **Memory provider plugin** that calls the Poppy CLI: Hermes Agent.
+
+What supported means here: each integration is verified against its client at
+release time, and maintained best-effort between releases. These clients change
+on their own schedule, so when one of them breaks Poppy, that is a bug worth
+reporting as a
+[GitHub issue](https://github.com/trags-garden/poppy/issues/new/choose) rather
+than something that holds the next release back.
+
+`poppy doctor` checks the integrations installed on your machine.
+
 ## Zero-touch capture
 
 With the Claude Code, Cursor, or Codex hooks installed, Poppy can also extract durable
