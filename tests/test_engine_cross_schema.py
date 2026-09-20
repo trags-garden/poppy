@@ -265,6 +265,7 @@ def test_seed_metadata_only_edit_preserves_bloom_derived_data(tmp_path: Path) ->
     without one is invisible to both.
     """
     db = tmp_path / "memories.db"
+    seed = SeedEngine(db_path=db)
     _bloom(db).ingest(_multi_speaker("m1", "hello"))
     closets_before = _closet_ids(db, "m1")
     embeddings_before = _embedding_ids(db)
@@ -272,7 +273,6 @@ def test_seed_metadata_only_edit_preserves_bloom_derived_data(tmp_path: Path) ->
     assert len(closets_before) == 2
     assert len(embeddings_before) == 3
 
-    seed = SeedEngine(db_path=db)
     same_content = seed.get("m1").content
     edited = _memory("m1", same_content, project="p2")  # project changes, content does not
     seed.ingest(edited)
@@ -532,11 +532,11 @@ def test_seed_list_all_hides_closets_so_they_never_reach_sync(tmp_path: Path) ->
 def test_seed_metadata_only_edit_still_preserves_the_speaker_copies(tmp_path: Path) -> None:
     """Only a CHANGED body is a redaction. A project edit must keep the closets."""
     db = tmp_path / "memories.db"
+    seed = SeedEngine(db_path=db)
     _bloom(db).ingest(_multi_speaker("m1", "hello"))
     closets_before = _closet_ids(db, "m1")
     assert len(closets_before) == 2
 
-    seed = SeedEngine(db_path=db)
     same_content = seed.get("m1").content
     seed.ingest(_memory("m1", same_content, project="p2"))
 

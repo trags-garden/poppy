@@ -1816,15 +1816,30 @@ def migrate_closet_marker(conn: sqlite3.Connection, *, had_bloom_schema: bool) -
     if has_marker(conn):
         return
 
-    conn.execute("BEGIN IMMEDIATE")
+    # The caller may already hold a transaction, so that what this marks and what
+    # the caller does with those marks commit together. Joining it rather than
+    # refusing is what lets the copy cleanup run in the same breath: a crash
+    # between the two would otherwise leave rows marked and queued for an upload
+    # lane this version no longer drains.
+    own_txn = not conn.in_transaction
+    if own_txn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if "within a transaction" not in str(exc):
+                raise
+            own_txn = False
     try:
         if has_marker(conn):
-            conn.rollback()
+            if own_txn:
+                conn.rollback()
             return
         conn.execute(f"ALTER TABLE memories ADD COLUMN {MARKER_COLUMN} INTEGER NOT NULL DEFAULT 0")
         if had_bloom_schema:
             _apply_backfill(conn, _plan_backfill(conn))
-        conn.commit()
+        if own_txn:
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if own_txn:
+            conn.rollback()
         raise

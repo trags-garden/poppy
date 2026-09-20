@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from poppy.db import apply_row_factory, rollback_and_close, write_txn
+from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
 from poppy.engine._closet_marker import (
     NOT_CLOSET_SQL,
@@ -280,7 +280,18 @@ class SeedEngine(RetrievalEngine):
             # A store bloom created before the marker existed still holds
             # unmarked closets; seed must know which rows those are to keep them
             # out of list_all/sync and to clear them on a redaction.
-            migrate_closet_marker(self._conn, had_bloom_schema=had_bloom_schema)
+            # ONE gate and ONE transaction around the pair. The migration marks
+            # the copies a store written before the marker still holds, and the
+            # cleanup removes exactly what it marked, so running the cleanup
+            # first would find nothing and leave them stored and recallable for
+            # the whole session. Committing separately would leave a window
+            # where a crash had marked them and queued an upload that this
+            # version never drains but an older client sharing the store would.
+            from poppy.sync.state import remove_derived_rows
+
+            with write_gate(db_path.parent), write_txn(self._conn):
+                migrate_closet_marker(self._conn, had_bloom_schema=had_bloom_schema)
+                remove_derived_rows(self._conn, db_path.parent, gate_held=True)
             # After the marker migration, whose backfill copies a parent's
             # timestamps onto its copies verbatim: this then puts the whole store
             # — those rows included — into one spelling.

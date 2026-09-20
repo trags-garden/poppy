@@ -46,9 +46,8 @@ from poppy.sync.client import (
     TragsTransportError,
 )
 from poppy.sync.serializer import (
-    closet_tombstone_to_wire,
     deletion_time,
-    is_closet_tombstone,
+    is_redacted_deletion,
     is_tombstone,
     memory_to_wire,
     tombstone_to_wire,
@@ -124,12 +123,6 @@ class SyncResult:
 # `sync.lock` + its `writers.registered` entry (which blocks `poppy encrypt`) the
 # entire time. Bounds the lock hold to ~K x timeout; the worker then backs off.
 MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3
-
-# Most legacy-copy announcements to send in one sync round. A store migrated from
-# a large pre-marker database can queue thousands, and each is a separate upsert
-# holding `sync.lock` (which also blocks `poppy encrypt`). The queue is drained
-# over rounds instead: what is left stays pending and goes next time.
-MAX_LEGACY_ANNOUNCEMENTS_PER_SYNC = 200
 
 logger = logging.getLogger(__name__)
 
@@ -686,87 +679,6 @@ def push(
         ]
         new_watermark = max(below) if below else watermark
 
-    # Leaked per-speaker copies: ids that predate the marker migration and so may
-    # sit in the cloud as ordinary memories. Announced OUTSIDE the watermark
-    # ordering above, deliberately.
-    #
-    # They are not local writes, so they have no place on the updated_at
-    # timeline: their local deletion time can be months old and on another
-    # device, which would put them below the watermark and mean they were never
-    # sent at all. The wire timestamp is the leaked row's own updated_at (the
-    # claim recorded with the id), so the server's freshness gate applies the
-    # delete over that row and over nothing written at the id since.
-    #
-    # Marked announced only on a 2xx: a failure, or an offline device, leaves the
-    # id pending for the next sync rather than dropping the announcement.
-    #
-    # Stamped with the row's OWN pre-migration updated_at, never with now. Local
-    # migration provenance says this id was a copy HERE; it does not establish
-    # that we still own the row in the cloud. Another device can have reclaimed
-    # the id for a real memory and uploaded it while this one was offline, and a
-    # now-stamped delete would win the server's freshness gate and destroy that
-    # memory everywhere. Stamped with what the leaking client actually wrote, the
-    # server decides: equal timestamp on the untouched leak means the delete
-    # applies, anything newer means the row is not ours and the write is ignored.
-    #
-    # Bounded three ways, because a migrated store can queue thousands of these
-    # and every one is a full request holding `sync.lock`:
-    #   - not attempted at all if the main loop already found the host dead;
-    #   - the same consecutive-transport-failure breaker as the main loop;
-    #   - a per-round cap, so a big backlog drains over rounds instead of
-    #     blocking sync and `poppy encrypt` for hours in one go.
-    announced: list[tuple[str, str | None]] = []
-    if not dry_run and auth_exc is None and not transport_failed:
-        pending = tombstones.pending_legacy_announcements()[:MAX_LEGACY_ANNOUNCEMENTS_PER_SYNC]
-        consecutive_announce_transport = 0
-        for memory_id, legacy_updated_at in pending:
-            try:
-                requests_made += 1
-                client.upsert(closet_tombstone_to_wire(memory_id, legacy_updated_at))
-                announced.append((memory_id, legacy_updated_at))
-                sent_tombstones += 1
-                consecutive_announce_transport = 0
-            except TragsAuthError as exc:
-                errors += 1
-                auth_exc = exc
-                break
-            except TragsError as exc:
-                errors += 1
-                last_soft_error = str(exc)
-                if isinstance(exc, TragsTransportError):
-                    # A dead host, not a refusal: bounded by the same
-                    # breaker as the untyped transport failures below, and put in
-                    # the same slot the main loop uses so an announcement-only
-                    # dead host also raises and gets the one-line offline message
-                    # instead of the generic `sync incomplete — push:` line.
-                    transport_exc = exc
-                    transport_failed = True
-                    unknown_outcome = unknown_outcome or exc.outcome_unknown
-                    consecutive_announce_transport += 1
-                    logger.warning("legacy copy announcement failed for %s: %s", memory_id, exc)
-                    if consecutive_announce_transport >= MAX_CONSECUTIVE_TRANSPORT_FAILURES:
-                        break
-                    continue
-                # A server response, not a transport fault: this id is refused
-                # but the host is alive, so keep going through the rest.
-                consecutive_announce_transport = 0
-                logger.warning("legacy copy announcement refused for %s: %s", memory_id, exc)
-            except Exception as exc:
-                errors += 1
-                last_soft_error = str(exc)
-                transport_failed = True
-                # Same reasoning as the main loop's untyped branch: a 201 whose
-                # body will not parse fails HERE, after the server accepted the
-                # deletion, so this announcement may well have landed. Nothing
-                # downstream may report the run as having sent nothing.
-                unknown_outcome = True
-                consecutive_announce_transport += 1
-                logger.warning("legacy copy announcement failed for %s: %s", memory_id, exc)
-                if consecutive_announce_transport >= MAX_CONSECUTIVE_TRANSPORT_FAILURES:
-                    break
-        if announced:
-            tombstones.mark_legacy_announced(announced)
-
     # Nothing above the watermark, nothing to announce: this push has not spoken
     # to the server at all, and without a probe it reports `0 live, 0 tombstones,
     # N skipped, 0 errors` and exits 0 against a revoked key or a deleted account.
@@ -1015,11 +927,69 @@ def _apply_pulled_row(
 
     Returns ``"closet"`` (skipped: local derived data or a copy deletion wins),
     ``"stale"`` (skipped: local state is newer), ``"echo"`` (skipped: this store
-    already holds exactly this deletion), ``"tombstone"`` or ``"live"`` (applied).
+    already holds exactly this deletion), ``"redacted"`` (a non-restorable
+    deletion), ``"tombstone"`` or ``"live"`` (applied).
     Every local read here happens under
     the same gate as the write it leads to, so no concurrent forget, restore or
     edit can invalidate a decision between the two.
     """
+    # A deletion in the retired format, for an id this device holds nothing live
+    # at. Recorded as what it is: filing it in ``ui_tombstones`` would put a
+    # restorable Trash entry in front of the user whose body is the placeholder,
+    # and restoring that would create junk and push it back up.
+    #
+    # The live-row check is what keeps this safe, and it is not optional. The
+    # shape match is a strong hint, not proof: a real memory that happened to
+    # match would otherwise be deleted here with no Trash entry and its id
+    # suppressed for good. With a live row present the ordinary tombstone branch
+    # below runs instead, freshness checks and all.
+    if is_redacted_deletion(row):
+        local_live = engine.get(incoming.id)  # type: ignore[attr-defined]
+        # Applied to a LIVE row only on proof that the row really is a derived
+        # copy. The shape match says the deletion came from an older client; it
+        # says nothing about what this device holds at the id. A real memory
+        # whose body happened to match would otherwise be destroyed here with no
+        # Trash entry and its id suppressed for good, so proof is the local
+        # conjunctive test against the live parent, never the body.
+        if local_live is None or tombstones.is_proven_unmarked_copy(incoming.id):  # type: ignore[attr-defined]
+            if local_live is not None and local_live.updated_at > incoming.updated_at:
+                return "stale"
+            if not dry_run:
+                # The DELETION's timestamp, not this device's clock, so a
+                # recreation of the id written after it is not refused.
+                deleted_at = deletion_time(row) or incoming.updated_at  # type: ignore[attr-defined]
+                tombstones.record_local_deletion(incoming.id, deleted_at)  # type: ignore[attr-defined]
+                if local_live is not None:
+                    engine.delete(incoming.id, **_remote_kwargs(engine, deleted_at))  # type: ignore[attr-defined]
+                previous = tombstones.get(incoming.id)  # type: ignore[attr-defined]
+                if previous is not None and previous.tombstoned_at <= deleted_at:
+                    tombstones.remove(incoming.id, token=previous.token)  # type: ignore[attr-defined]
+            return "redacted"
+
+    if tombstones.local_deletion_wins(incoming.id, incoming.updated_at):  # type: ignore[attr-defined]
+        return "stale"
+
+    # Newer than the record, but is it really someone reclaiming the id? A device
+    # still on the older release goes on deriving these copies and publishing
+    # them, and each publication carries a fresher stamp than the row this store
+    # removed, so the record's own timestamp cannot tell the two apart. Taken at
+    # face value the speaker text comes back as an ordinary memory, drops the
+    # record, and is pushed up again.
+    #
+    # So it is graded against the live parent, the same conjunctive test used
+    # everywhere else: provably the same derived copy is still ours to refuse,
+    # and the record moves up to the stamp just seen so the next publication of
+    # it is covered without grading again. Anything else is a real memory at that
+    # id and takes the ordinary path below, which clears the record as it lands.
+    if (
+        not is_tombstone(row)
+        and tombstones.local_deletion_at(incoming.id) is not None  # type: ignore[attr-defined]
+        and tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN  # type: ignore[arg-type]
+    ):
+        if not dry_run:
+            tombstones.record_local_deletion(incoming.id, incoming.updated_at)  # type: ignore[attr-defined]
+        return "redacted"
+
     # A marked closet is LOCAL-ONLY derived data: bloom re-derives it from
     # the parent on this device, so sync never applies an incoming row for
     # one, live or tombstone. A live row would overwrite the marker and turn
@@ -1051,37 +1021,6 @@ def _apply_pulled_row(
             # conjunctive test, so a real memory another device wrote at that
             # id is never announced.
             _note_leaked_copy(engine, incoming)
-        return "closet"
-
-    # One of our own content-free closet deletions, coming back from another
-    # device, for an id this device holds nothing live at. Record it as what
-    # it is: filing it in ``ui_tombstones`` would put a restorable Trash
-    # entry in front of the user whose body is the placeholder, and restoring
-    # that would create junk and push it back up.
-    #
-    # The live-row check is what keeps this safe. Matching on our own
-    # constants is a strong hint, not proof: a real memory whose body
-    # happened to equal the placeholder would otherwise have its deletion
-    # swallowed here and never applied. With a live row present the ordinary
-    # tombstone branch below runs instead, freshness checks and all.
-    if is_closet_tombstone(row) and engine.get(incoming.id) is None:  # type: ignore[attr-defined]
-        if not dry_run:
-            # The DELETION's timestamp, not this device's clock. Receipt time
-            # would make the record look newer than a recreation of the id
-            # that actually came after it, and would refresh on every pull so
-            # the record never expired and was re-pushed every cycle. And the
-            # deletion's own field, as the ordinary branch reads it: a cleanup
-            # row whose updated_at was bumped after its deleted_at would
-            # otherwise suppress a recreation written between the two.
-            tombstones.add_closets(
-                [incoming.id],  # type: ignore[attr-defined]
-                now=deletion_time(row) or incoming.updated_at,  # type: ignore[attr-defined]
-                # A cleanup of a leaked copy is its own event, not another
-                # sighting of one, so it may RAISE an older record rather than
-                # lose to it — a record still saying t1 after a cleanup at t3
-                # let the cloud's t2 copy through a watermark reset.
-                authoritative=True,
-            )
         return "closet"
 
     if is_tombstone(row):
@@ -1130,14 +1069,6 @@ def _apply_pulled_row(
                 sent_remotes={remote_url},
             )
             return "tombstone"
-        # Decided BEFORE the row goes: is the live row an unmarked copy of its
-        # live parent, on full proof? (A store that never ran bloom holds a
-        # pulled leaked copy exactly like that.) Content equality with the
-        # placeholder is a hint, not proof: a real memory whose body happens
-        # to be the placeholder keeps its ordinary Trash entry below.
-        live_copy = (
-            local_live is not None and is_closet_tombstone(row) and tombstones.is_proven_unmarked_copy(incoming.id)  # type: ignore[attr-defined]
-        )
         if local_live is not None:
             # engine.delete clears the parent's derived copies and
             # records their content-free tombstones itself, so a
@@ -1151,19 +1082,6 @@ def _apply_pulled_row(
             # freshness rule would then skip it for good.
             deletion_ts = deletion_time(row) or incoming.updated_at  # type: ignore[attr-defined]
             engine.delete(incoming.id, **_remote_kwargs(engine, deletion_ts))  # type: ignore[attr-defined]
-        if live_copy:
-            # A cleanup deletion of a copy that this device held LIVE and
-            # unmarked. The row is gone above; what must not happen is a Trash
-            # entry whose body is the placeholder: restoring that writes the
-            # placeholder back as a real memory with a fresh stamp, and the
-            # next push overwrites the cloud's cleanup with it. Record it as
-            # what it is, content-free, dated from the deletion.
-            tombstones.add_closets(
-                [incoming.id],  # type: ignore[attr-defined]
-                now=deletion_time(row) or incoming.updated_at,  # type: ignore[attr-defined]
-                authoritative=True,  # a cleanup, so it may raise an older record
-            )
-            return "tombstone"
         # A soft-delete carrying a COPY's text. Only a 0.2.4 client deleting a
         # copy row by hand produces one, and with no local row at the id the
         # branch below filed it as an ordinary Trash entry: the user was offered
@@ -1239,6 +1157,9 @@ def _apply_pulled_row(
     # between, so the note is skipped and the watermark advances
     # past it for good.
     engine.ingest(incoming, **_remote_kwargs(engine, incoming.updated_at))  # type: ignore[arg-type]
+    # This id now holds a real memory that beat any deletion recorded for it, so
+    # the record has done its job and must not outlive the thing it described.
+    tombstones.clear_local_deletion(incoming.id)  # type: ignore[attr-defined]
     if local_tomb is not None:
         # The live row won over an older local tombstone: a restore
         # (or re-create) that happened elsewhere. Drop the stale
@@ -1365,11 +1286,11 @@ def pull(
             )
         # Even a stale row proves this ID exists. Pulled deletions are marked
         # sent at creation, so their sightings add no pending work.
-        if outcome != "closet":
+        if outcome not in {"closet", "redacted"}:
             known_ids.add(incoming.id)
         if outcome == "closet":
             skipped_closets += 1
-        elif outcome == "echo":
+        elif outcome in {"echo", "redacted"}:
             skipped_echoes += 1
         elif outcome == "stale":
             skipped_stale += 1
