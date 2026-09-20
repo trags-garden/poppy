@@ -11,9 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Conversation transcripts now remain one memory. Bloom no longer creates
-  per-speaker copies when ingesting multi-speaker JSON content.
-
 - Anonymous usage telemetry is off until you turn it on. Poppy asks once, on
   the first run in a terminal, and the default is no; `poppy telemetry on|off`
   answers it too. Nothing is sent, and the daily PyPI update check does not
@@ -34,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The facet rail is reachable on a phone: a Filters sheet opens it, and
   picking a memory opens the detail over the list with a way back.
 - The chrome link now points at trags.ai instead of the source repository.
+- A conversation transcript is now stored as one memory. Earlier versions also
+  derived a separate hidden copy of each speaker's turns; nothing derives those
+  any more.
 - Opening a store with this version removes the per speaker copies that an
   earlier version derived from memories whose text was a conversation
   transcript, along with their search entries. The memory each copy came from
