@@ -37,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only by its owner (mode 0600), even when it was group- or world-readable
   before, so no other user on the machine can read the token and talk to the
   memory daemon. Symlinked dotfiles configs and rotated backups are covered too.
-  Setup reports the change when it makes one, and refuses to write the token at
+  Setup also narrows backups left behind by earlier versions, which copied the
+  config's own permissions and so can still hold a working token in a readable
+  file. Setup reports each change it makes, and refuses to write the token at
   all to a file whose permissions it cannot narrow. Configs that carry no token
   keep the permissions you gave them.
 - `poppy setup` now refuses unparseable or structurally invalid client configs

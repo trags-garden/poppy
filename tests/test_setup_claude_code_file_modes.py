@@ -3,7 +3,9 @@
 import json
 import os
 import stat
+from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -229,3 +231,131 @@ def test_token_write_refused_when_mode_cannot_be_tightened(tmp_path, monkeypatch
     assert "test-token" not in target.read_text()
     assert "keep" in target.read_text()
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def _token_config(token: str) -> str:
+    entry = {"url": "http://127.0.0.1:7679/mcp", "headers": {"Authorization": f"Bearer {token}"}}
+    return json.dumps({"mcpServers": {"poppy": entry}})
+
+
+def _cursor_config_path(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path / "cursor"))
+    path = claude_code_module._client_settings_path("cursor", tmp_path / "claude")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+@pytest.mark.parametrize("symlink", [False, True], ids=["regular", "symlink"])
+def test_setup_tightens_older_token_bearing_backups(tmp_path, monkeypatch, capsys, symlink):
+    """A backup left behind by an older version holds a token that still works."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json" if symlink else path
+    target.write_text('{"marker": "keep"}\n')
+    target.chmod(0o644)
+    if symlink:
+        path.symlink_to(target)
+
+    # Written before the fix: the backup inherited the config's own mode.
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o644)
+    # A backup with no token keeps whatever mode the user gave it.
+    innocuous = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX + "-1")
+    innocuous.write_text('{"mcpServers": {"other": {"command": "x"}}}')
+    innocuous.chmod(0o644)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    err = capsys.readouterr().err
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o600
+    assert "stale-token" in stale.read_text(), "tightening must not rewrite the backup"
+    assert stat.S_IMODE(innocuous.stat().st_mode) == 0o644
+    assert str(stale) in err
+    assert "stale-token" not in err
+    assert "new-token" not in err
+
+
+def test_untightenable_backup_is_reported_without_failing_setup(tmp_path, monkeypatch, capsys):
+    """A backup Poppy cannot chmod is named, but setup still finishes."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text('{"marker": "keep"}\n')
+    path.chmod(0o644)
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o644)
+    original_chmod = Path.chmod
+
+    def refuse_chmod(self, mode, **kwargs):
+        if self == stale:
+            raise PermissionError(1, "Operation not permitted")
+        return original_chmod(self, mode, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", refuse_chmod)
+
+    written = claude_code_module.install_mcp_config(
+        tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token"
+    )
+
+    err = capsys.readouterr().err
+    assert "Could not narrow permissions on the older backup" in err
+    assert str(stale) in err
+    assert "stale-token" not in err
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o644
+    # Setup itself completed.
+    assert "new-token" in written.read_text()
+    assert stat.S_IMODE(written.stat().st_mode) == 0o600
+
+
+def test_regular_config_write_reports_a_chmod_failure_cleanly(tmp_path, monkeypatch):
+    """The temp-file writer must not let a raw PermissionError escape."""
+    config = tmp_path / "mcp.json"
+    config.write_text("{}\n")
+    config.chmod(0o644)
+
+    def refuse_fchmod(fd, mode):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(claude_code_module.os, "fchmod", refuse_fchmod)
+
+    with pytest.raises(claude_code_module.CorruptConfigError) as excinfo:
+        claude_code_module._write_text(config, _token_config("test-token"), target=config)
+
+    assert "Operation not permitted" in str(excinfo.value)
+    assert "test-token" not in str(excinfo.value)
+    # Nothing reached disk, and the temp file was still cleaned up.
+    assert "test-token" not in config.read_text()
+    assert list(tmp_path.glob("*.poppy-tmp-*")) == []
+
+
+def test_backup_write_reports_a_chmod_failure_cleanly(tmp_path, monkeypatch):
+    """Same for the backup writer, and it leaves no half-made rotation slot."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("stale-token"))
+    source.chmod(0o644)
+
+    def refuse_fchmod(fd, mode):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(claude_code_module.os, "fchmod", refuse_fchmod)
+
+    with pytest.raises(claude_code_module.CorruptConfigError) as excinfo:
+        claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert "Operation not permitted" in str(excinfo.value)
+    assert list(tmp_path.glob("*.pre-poppy.bak*")) == []
+
+
+def test_cli_turns_a_permission_failure_into_a_plain_error(monkeypatch):
+    """`poppy setup` reports the reason instead of printing a stack trace."""
+    from poppy.cli import main as cli_main
+
+    def boom(**kwargs):
+        raise claude_code_module.CorruptConfigError("its permissions could not be set to 0o600")
+
+    monkeypatch.setattr(claude_code_module, "install_for_client", boom)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        cli_main._install_or_abort(client="cursor")
+
+    assert "permissions could not be set" in str(excinfo.value)
