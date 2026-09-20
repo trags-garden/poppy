@@ -355,7 +355,7 @@ function renderToday() {
 
 function renderFeed(feed) {
   if (!feed || !feed.length) {
-    return `<div class="empty" style="display:flex; padding: 40px 0;">
+    return `<div class="empty feed-empty">
       <div class="empty-mark">∅</div>
       <h3>Nothing yet today.</h3>
       <p>Memories captured today will appear here, on a timeline.</p>
