@@ -3,7 +3,7 @@
 Two built-in engines, hardcoded:
 
   - bloom — the default. Hybrid (FTS5 + bge-small embeddings + RRF) into a
-            cross-encoder rerank, with per-speaker content expansion at ingest.
+            cross-encoder rerank.
             Runs on fastembed's ONNX runtime, so it works on the plain
             ``pip install poppy-memory`` with no extra.
   - seed  — FTS5 only. No ML deps, no model downloads. The universal floor and
@@ -67,7 +67,7 @@ def canonical_name(name: str) -> str:
 
 
 _DESCRIPTIONS = {
-    "bloom": "Default: hybrid retrieval + cross-encoder rerank + per-speaker expansion (local ONNX models).",
+    "bloom": "Default: hybrid retrieval + cross-encoder rerank (local ONNX models).",
     "seed": "FTS5 only — no ML deps, no model downloads.",
 }
 

@@ -6,20 +6,9 @@ from pathlib import Path
 
 from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
-from poppy.engine._closet_marker import (
-    NOT_CLOSET_SQL,
-    STALE_VECTOR_MODEL_ID,
-    chunked,
-    clear_closet_tombstones,
-    delete_marked_closets,
-    ensure_closet_side_tables,
-    is_marked_closet_row,
-    is_proven_unmarked_copy,
-    migrate_closet_marker,
-    note_leaked_cloud_copy,
-    utc_iso,
-)
-from poppy.engine._timestamps import expiry_passed, normalise_stored_timestamps
+from poppy.engine._closet_marker import clear_retired_records, ensure_closet_side_tables
+from poppy.engine._legacy_copies import mark_legacy_copies_for_cleanup
+from poppy.engine._timestamps import chunked, expiry_passed, normalise_stored_timestamps, utc_iso
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
 from poppy.models import Filters, Memory, ScoredMemory, Source
 
@@ -37,9 +26,7 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     expires_at TEXT,
-    -- Provenance marker for bloom's synthetic per-speaker rows. Seed never sets
-    -- it, but it declares the column so a seed-created store the default engine
-    -- later opens already has the shape.
+    -- Retained for cleanup of stores written by older releases.
     is_closet INTEGER NOT NULL DEFAULT 0
 );
 
@@ -175,8 +162,7 @@ def _has_enriched_content(conn: sqlite3.Connection) -> bool:
 # Written into memory_embeddings.model_id when a seed write replaces the text a
 # vector was computed from. Any value that is not a live engine's model_id would
 # do; a named sentinel makes the reason legible in the table and in doctor output.
-# Defined beside the closet marker, which retags rebuilt closets the same way.
-SEED_INVALIDATED_MODEL_ID = STALE_VECTOR_MODEL_ID
+SEED_INVALIDATED_MODEL_ID = "seed-invalidated"
 
 
 def _has_memory_embeddings(conn: sqlite3.Connection) -> bool:
@@ -191,12 +177,7 @@ def _has_memory_embeddings(conn: sqlite3.Connection) -> bool:
 # enriched pair targets a store bloom created (NOT NULL enriched_content, FTS
 # triggers indexing it), the plain pair a seed-only store.
 #
-# Every one of them writes ``is_closet = 0`` as a literal. Seed has no speaker
-# expansion, so a row it writes is by definition a real memory — including a
-# write that lands on an id a marked closet used to occupy. Leaving the marker
-# set there would hide the user's note from every list and then destroy it when
-# the unrelated parent memory was deleted. The marker is only ever set
-# by bloom's closet synthesis; every other write of a row clears it.
+# Writes always leave a normal memory, including an id used by an older release.
 _INSERT_SQL = """INSERT INTO memories (id, content, memory_type, project, source_type,
     source_session_id, source_timestamp, confidence, related_to, created_at, updated_at, expires_at,
     is_closet)
@@ -207,20 +188,8 @@ _INSERT_SQL_ENRICHED = """INSERT INTO memories (id, content, memory_type, projec
     enriched_content, is_closet)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)"""
 
-# Metadata-only: the text is unchanged, so `is_closet` is left exactly as it is.
-# Clearing it here would strip the marker off a row that still holds the parent's
-# speaker turns — it would then list, push live, and survive the parent's
-# redaction. A `poppy edit <closet id> --project x` is the reachable case
-# (lifecycle.edit_memory refuses it outright; this is the second line).
 _UPDATE_SQL = """UPDATE memories SET content=?, memory_type=?, project=?, source_type=?,
-    source_session_id=?, source_timestamp=?, confidence=?, related_to=?, updated_at=?, expires_at=?
-    WHERE id=?"""
-
-# Content write: the row now holds text seed put there, so it is a real memory
-# whatever occupied the id before.
-_UPDATE_SQL_NEW_CONTENT = """UPDATE memories SET content=?, memory_type=?, project=?, source_type=?,
-    source_session_id=?, source_timestamp=?, confidence=?, related_to=?, updated_at=?, expires_at=?,
-    is_closet=0
+    source_session_id=?, source_timestamp=?, confidence=?, related_to=?, updated_at=?, expires_at=?, is_closet=0
     WHERE id=?"""
 
 _UPDATE_SQL_ENRICHED = """UPDATE memories SET content=?, memory_type=?, project=?, source_type=?,
@@ -274,81 +243,19 @@ class SeedEngine(RetrievalEngine):
             # seed cannot hold a per-speaker copy, whatever its ids look like.
             had_bloom_schema = _has_memory_embeddings(self._conn) or _has_enriched_content(self._conn)
             self._conn.executescript(SCHEMA)
-            # Before the migration: its backfill writes to both side tables.
+            # Retained while older caller surfaces still read these tables.
             ensure_closet_side_tables(self._conn)
             _migrate_expires_at(self._conn)
-            # A store bloom created before the marker existed still holds
-            # unmarked closets; seed must know which rows those are to keep them
-            # out of list_all/sync and to clear them on a redaction.
-            # ONE gate and ONE transaction around the pair. The migration marks
-            # the copies a store written before the marker still holds, and the
-            # cleanup removes exactly what it marked, so running the cleanup
-            # first would find nothing and leave them stored and recallable for
-            # the whole session. Committing separately would leave a window
-            # where a crash had marked them and queued an upload that this
-            # version never drains but an older client sharing the store would.
             from poppy.sync.state import remove_derived_rows
 
+            # Classification and removal must commit together on the first open.
             with write_gate(db_path.parent), write_txn(self._conn):
-                migrate_closet_marker(self._conn, had_bloom_schema=had_bloom_schema)
+                mark_legacy_copies_for_cleanup(self._conn, had_bloom_schema=had_bloom_schema)
                 remove_derived_rows(self._conn, db_path.parent, gate_held=True)
-            # After the marker migration, whose backfill copies a parent's
-            # timestamps onto its copies verbatim: this then puts the whole store
-            # — those rows included — into one spelling.
             normalise_stored_timestamps(self._conn)
         except Exception:
             rollback_and_close(self._conn)
             raise
-
-    def note_leaked_cloud_copy(self, memory: Memory) -> bool:
-        """Queue a cleanup announcement for an incoming row that is a leaked copy.
-
-        Under the write transaction: called from sync's pull outside any write of
-        ours, so an uncommitted insert would be invisible to the TombstoneStore's
-        own connection and lost when this one closes.
-        """
-        with self._lock, write_txn(self._conn):
-            return note_leaked_cloud_copy(
-                self._conn,
-                memory.id,
-                content=memory.content,
-                related_to=memory.related_to,
-                created_at=memory.created_at.isoformat(),
-                updated_at=memory.updated_at.isoformat(),
-            )
-
-    def is_closet_row(self, memory_id: str) -> bool:
-        """Whether ``memory_id`` names a derived copy the default engine wrote."""
-        with self._lock:
-            return is_marked_closet_row(self._conn, memory_id)
-
-    def is_proven_copy_row(self, memory_id: str) -> bool:
-        """Whether an UNMARKED row at ``memory_id`` is, on full proof, a copy of its live parent."""
-        with self._lock:
-            return is_proven_unmarked_copy(self._conn, memory_id)
-
-    def _clear_closets(self, memory_id: str, *, event_ts: datetime | None = None) -> None:
-        """Remove the marked per-speaker copies bloom derived from ``memory_id``.
-
-        Seed has no speaker expansion, so it cannot rebuild them — but leaving
-        them is the redaction hole: after a fallback-engine edit or delete the
-        copies keep the OLD text and stay recallable the moment the user switches
-        back to the default engine. Clearing is lossless, because closets are
-        derived data that bloom regenerates from the parent on its next ingest,
-        and because they are excluded from ``list_all`` so no cloud copy of a
-        locally-cleared closet can resurrect through pull.
-
-        Scoped to rows carrying the provenance marker, so a real memory whose id
-        happens to sit under this parent's prefix is never touched.
-
-        Both marker states go, including copies adopted on inference: this runs
-        only when the memory's text has CHANGED or the memory is being deleted,
-        and no copy of text that is being redacted may survive. Adopted rows are
-        snapshotted first, inside ``delete_marked_closets``.
-        """
-        delete_marked_closets(
-            self._conn, memory_id, has_embeddings=_has_memory_embeddings(self._conn), event_ts=event_ts
-        )
 
     def _invalidate_parent_embedding(self, memory_id: str) -> None:
         """Retag ``memory_id``'s vector as stale instead of deleting it.
@@ -362,10 +269,6 @@ class SeedEngine(RetrievalEngine):
         active``, so the sentinel makes it a migrate-engine target and a doctor
         stale count, while retrieve's model_id filter already keeps the stale
         vector out of cosine scoring in the meantime.
-
-        Scope is this row's own vector; the closets bloom derived from it are
-        cleared outright by ``_clear_closets``, not retagged, because their text
-        is a copy of the text this write is removing.
 
         No-op when the store has no memory_embeddings table, no model_id column
         (those rows already count as unknown and are migrate targets anyway),
@@ -433,32 +336,8 @@ class SeedEngine(RetrievalEngine):
                 # or column, and a store that has ``memory_embeddings`` but not
                 # ``enriched_content`` (bloom construction died mid-migration)
                 # still holds a vector for the old text that must be invalidated.
-                # The marked per-speaker copies bloom derived
-                # from this memory hold the OLD text verbatim, so the edit clears
-                # them too: leaving them is what let a redaction on the fallback
-                # engine stay recallable under the default one.
                 self._invalidate_parent_embedding(memory.id)
-                self._clear_closets(memory.id, event_ts=remote_event_ts)
             if existing is not None:
-                # A same-text write onto a marked copy keeps the marker, so it
-                # has to keep the copy's back-reference to its parent as well:
-                # that link is what the parent's redaction reads to find its own
-                # copies (``_owned_by``). The caller's Memory usually arrives
-                # with an empty related_to, and writing it verbatim would leave
-                # a marked copy no parent can reach. Bloom does the
-                # same on its marker-keeping path.
-                #
-                # An UNMARKED row that GRADES as a copy keeps it too. A store
-                # that never ran bloom never adopts the copy it pulled, so the
-                # link is the only thing identifying it — and erasing it on a
-                # same-text re-ingest (an external writer replaying the row with
-                # no related_to) made the parent's forget grade it a stranger and
-                # leave the speaker text live. Graded before the write,
-                # while the stored row is still the evidence.
-                keeps_link = not content_changed and (
-                    self.is_closet_row(memory.id) or is_proven_unmarked_copy(self._conn, memory.id)
-                )
-                related_to = existing.related_to if keeps_link else memory.related_to
                 params = (
                     memory.content,
                     memory.memory_type,
@@ -467,7 +346,7 @@ class SeedEngine(RetrievalEngine):
                     memory.source.session_id,
                     source_iso,
                     memory.confidence,
-                    json.dumps(related_to),
+                    json.dumps(memory.related_to),
                     updated_iso,
                     expires_iso,
                 )
@@ -476,16 +355,8 @@ class SeedEngine(RetrievalEngine):
                     # only replaces bloom's when the old one described text
                     # this write is removing.
                     self._conn.execute(_UPDATE_SQL_ENRICHED, (*params, memory.content, memory.id))
-                elif content_changed:
-                    self._conn.execute(_UPDATE_SQL_NEW_CONTENT, (*params, memory.id))
                 else:
-                    # Metadata only: leave the marker alone.
                     self._conn.execute(_UPDATE_SQL, (*params, memory.id))
-                if content_changed:
-                    # The id now holds text this engine wrote, so it is a real
-                    # memory again: any record of it having been deleted as a
-                    # derived copy is stale and must not make pull skip it.
-                    clear_closet_tombstones(self._conn, [memory.id])
             else:
                 params = (
                     memory.id,
@@ -505,8 +376,7 @@ class SeedEngine(RetrievalEngine):
                     self._conn.execute(_INSERT_SQL_ENRICHED, (*params, memory.content))
                 else:
                     self._conn.execute(_INSERT_SQL, params)
-                # A fresh row reclaims the id for a real memory (see above).
-                clear_closet_tombstones(self._conn, [memory.id])
+            clear_retired_records(self._conn, memory.id)
             return memory.id
 
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
@@ -553,18 +423,19 @@ class SeedEngine(RetrievalEngine):
             return None
         return self._row_to_memory(row)
 
+    def is_proven_copy_row(self, memory_id: str) -> bool:
+        """Compatibility check for lifecycle callers inspecting old copies."""
+        from poppy.engine._closet_marker import is_proven_unmarked_copy
+
+        with self._lock:
+            return is_proven_unmarked_copy(self._conn, memory_id)
+
     def delete(self, memory_id: str, *, remote_event_ts: datetime | None = None) -> bool:
         with self._lock, write_txn(self._conn):
             # Delete the parent row. Its own ``memory_embeddings`` vector is
             # local-only (never synced, recomputed per engine), so it goes here:
             # leaving it lets a later seed insert of the same id silently inherit
             # a vector computed from the deleted text.
-            # Copies FIRST, and unconditionally: an unmarked one is graded
-            # against this parent's text, so the parent row has to still be here.
-            # Unconditional because a copy whose parent row is already gone is
-            # exactly the orphan that stays recallable while list_all merely
-            # hides it, so a repeat delete sweeps the marked ones.
-            self._clear_closets(memory_id, event_ts=remote_event_ts)
             cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             deleted = cursor.rowcount > 0
             if deleted and _has_memory_embeddings(self._conn):
@@ -572,13 +443,7 @@ class SeedEngine(RetrievalEngine):
         return deleted
 
     def list_all(self, filters: Filters | None = None, limit: int = 50) -> list[Memory]:
-        # On a store the default engine created, ``memories`` also holds its
-        # synthetic per-speaker rows. They are derived data, excluded here (by
-        # the provenance marker, so a real memory whose id merely contains
-        # ``_closet_`` is never hidden) so they never reach ``poppy list`` or
-        # sync push. Seed's retrieve() FTS-matches memories directly, so keyword
-        # recall is unaffected.
-        query = f"SELECT * FROM memories WHERE {NOT_CLOSET_SQL}"
+        query = "SELECT * FROM memories WHERE 1 = 1"
         params: list = []
         if filters:
             if filters.project:
@@ -608,57 +473,30 @@ class SeedEngine(RetrievalEngine):
         return [self._row_to_memory(row) for row in rows]
 
     def purge_expired(self) -> int:
-        """Hard-delete memories whose expires_at is in the past. Returns rowcount.
-
-        The count is memories, not rows: on a store the default engine wrote, an
-        expired parent's per-speaker copies expire with it and are swept in the
-        same pass, but they were never memories in their own right.
-        """
+        """Hard-delete expired memories and any stored embeddings atomically."""
         now = datetime.now(timezone.utc)
         with self._lock, write_txn(self._conn):
-            # Expiry is decided by PARSING the stored stamp, not by comparing it
-            # as text against ``now``. Writes normalise to UTC, but a row that
-            # reached the store another way can carry any offset, and as text
-            # ``2026-07-01T13:00:00-12:00`` (an hour in the future) sorts below
-            # noon UTC — which purged live memories on the spot. An
-            # unparseable stamp is left alone rather than treated as expired.
             expired = [
-                (row[0], row[1])
+                row[0]
                 for row in self._conn.execute(
-                    f"SELECT id, {NOT_CLOSET_SQL}, expires_at FROM memories WHERE expires_at IS NOT NULL"
+                    "SELECT id, expires_at FROM memories WHERE expires_at IS NOT NULL"
                 ).fetchall()
-                if expiry_passed(row[2], now)
+                if expiry_passed(row[1], now)
             ]
-            if not expired:
-                return 0
-            # Cascade to the marked copies of every expiring parent, mirroring
-            # the default engine. A parent whose expiry was moved by a
-            # fallback-engine edit outlives its copies' stored expires_at (or the
-            # reverse), so purging by timestamp alone can leave orphans standing
-            # — hidden from list_all but still recallable.
             has_embeddings = _has_memory_embeddings(self._conn)
-            for mid, is_memory in expired:
-                if is_memory:
-                    # No tombstones: expiry is not a redaction, and the cloud row
-                    # carries the same expires_at.
-                    delete_marked_closets(self._conn, mid, has_embeddings=has_embeddings, tombstone=False)
-            # Deleted BY ID, from the list the parse decided: a second text
-            # comparison here would remove exactly the rows the parse just
-            # spared.
-            for batch in chunked([mid for mid, _ in expired]):
+            for batch in chunked(expired):
                 placeholders = ",".join("?" * len(batch))
                 if has_embeddings:
                     self._conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)
                 self._conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", batch)
-            return sum(1 for _, is_memory in expired if is_memory)
+            return len(expired)
 
     def consolidate(self) -> ConsolidationResult:
         return ConsolidationResult(merged=0, removed=0, updated=0)
 
     def stats(self) -> EngineStats:
         with self._lock:
-            # Memories, not rows — see the note on the default engine's stats().
-            count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {NOT_CLOSET_SQL}").fetchone()[0]
+            count = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         storage = self._db_path.stat().st_size if self._db_path.exists() else 0
         return EngineStats(
             memory_count=count,

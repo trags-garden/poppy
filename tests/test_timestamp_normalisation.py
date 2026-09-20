@@ -285,20 +285,6 @@ def test_purge_expired_parses_a_stamp_that_never_went_through_a_write(tmp_path: 
     assert make_engine(db).get("sess-2026-01") is None
 
 
-def test_purge_expired_keeps_the_speaker_copies_of_a_surviving_parent(tmp_path: Path) -> None:
-    """The cascade follows the parent: a parent that is not expired keeps its copies."""
-    db = tmp_path / "memories.db"
-    engine = _bloom(db)
-    now = datetime.now(timezone.utc)
-    expires = (now + timedelta(hours=1)).astimezone(MINUS_TWELVE)
-    engine.ingest(_memory("sess-2026-01", when=now, expires_at=expires, content=_turns()))
-    copies = [r[0] for r in _rows(db, "SELECT id FROM memories WHERE is_closet >= 1")]
-    assert len(copies) == 2
-
-    assert engine.purge_expired() == 0
-    assert [r[0] for r in _rows(db, "SELECT id FROM memories WHERE is_closet >= 1")] == copies
-
-
 def test_purge_expired_leaves_an_unparseable_expiry_alone(tmp_path: Path) -> None:
     """A stamp no clock wrote is not evidence that a memory's life is over.
 

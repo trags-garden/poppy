@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-import poppy.engine._closet_engine as closet_module
+import poppy.engine._hybrid as hybrid_module
 import poppy.engine.bloom as bloom_module
 import poppy.engine.seed as seed_module
-from poppy.engine._closet_engine import ClosetHybridEngine
+from poppy.engine._hybrid import HybridEngine
 from poppy.engine.bloom import BloomEngine
 
 
@@ -58,7 +58,7 @@ def test_migration_failure_rolls_back_and_closes_connection(tmp_path: Path, monk
     db_path = tmp_path / "memories.db"
     _legacy_db_with_null_enrichment(db_path)
     opened_connections: list[sqlite3.Connection] = []
-    real_connect = closet_module.connect_db
+    real_connect = hybrid_module.connect_db
 
     def tracked_connect(*args, **kwargs):
         conn = real_connect(*args, **kwargs)
@@ -70,11 +70,11 @@ def test_migration_failure_rolls_back_and_closes_connection(tmp_path: Path, monk
         assert conn.in_transaction
         raise _InitFailure("migration exploded")
 
-    monkeypatch.setattr(closet_module, "connect_db", tracked_connect)
+    monkeypatch.setattr(hybrid_module, "connect_db", tracked_connect)
     monkeypatch.setattr(seed_module, "_migrate_enriched_content", fail_during_enrichment)
 
     with pytest.raises(_InitFailure, match="migration exploded"):
-        ClosetHybridEngine(db_path)
+        HybridEngine(db_path)
 
     assert len(opened_connections) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
@@ -85,7 +85,7 @@ def test_migration_failure_rolls_back_and_closes_connection(tmp_path: Path, monk
 def test_subclass_model_failure_closes_base_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "memories.db"
     opened_connections: list[sqlite3.Connection] = []
-    real_connect = closet_module.connect_db
+    real_connect = hybrid_module.connect_db
 
     def tracked_connect(*args, **kwargs):
         conn = real_connect(*args, **kwargs)
@@ -95,7 +95,7 @@ def test_subclass_model_failure_closes_base_connection(tmp_path: Path, monkeypat
     def fail_model_factory(*args, **kwargs):
         raise _InitFailure("model construction exploded")
 
-    monkeypatch.setattr(closet_module, "connect_db", tracked_connect)
+    monkeypatch.setattr(hybrid_module, "connect_db", tracked_connect)
     monkeypatch.setattr(bloom_module, "FastembedModels", fail_model_factory)
 
     with pytest.raises(_InitFailure, match="model construction exploded"):
@@ -119,7 +119,7 @@ def test_retry_after_partial_migration_rewires_stale_fts_triggers(tmp_path: Path
     db_path = tmp_path / "memories.db"
     _legacy_db_with_null_enrichment(db_path)
 
-    engine = ClosetHybridEngine(db_path)
+    engine = HybridEngine(db_path)
     try:
         triggers = dict(
             engine._conn.execute(

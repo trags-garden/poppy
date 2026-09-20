@@ -194,7 +194,7 @@ def write_txn(conn: sqlite3.Connection):
 
     No-ops when a transaction is already open, leaving commit/rollback to
     whoever began it — so these can nest, and a helper that claims the lock for
-    itself when called alone (``delete_marked_closets``) cooperates when called
+    itself when called alone cooperates when called
     from inside one.
 
     That branch is for SAME-THREAD nesting only, and every caller must hold its
@@ -202,7 +202,7 @@ def write_txn(conn: sqlite3.Connection):
     connection would otherwise mistake each other for nested callers: the second
     thread's write joins the first's transaction, reports success, and is rolled
     back when the FIRST one fails. Both engines take their own lock around this
-    (``seed.py``, ``_closet_engine.py``); a new caller must do the same.
+    (``seed.py``, ``_hybrid.py``); a new caller must do the same.
     """
     own_txn = not conn.in_transaction
     if own_txn:

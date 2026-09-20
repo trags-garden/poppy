@@ -1,12 +1,8 @@
 """Bloom — the local retrieval engine (ONNX / fastembed, no torch).
 
-Bloom is the closet-hybrid architecture
-(:class:`poppy.engine._closet_engine.ClosetHybridEngine`): two-stage retrieval
-(hybrid FTS5+embeddings -> cross-encoder rerank) with a per-speaker content
-expansion at ingest, served over fastembed's ONNX runtime. That keeps it
-installable from a plain ``pip install poppy-memory`` (fastembed + onnxruntime
-are ~200 MB total) and cheap to keep resident in the always-on capture / MCP
-process.
+Bloom uses two-stage retrieval: hybrid FTS5 and embeddings followed by a
+cross-encoder rerank, served by fastembed's ONNX runtime. Each ingest stores one
+memory and indexes its full content.
 
 Models (all local, no API):
   - Bi-encoder:    BAAI/bge-small-en-v1.5  (fastembed's quantized ONNX export)
@@ -26,13 +22,13 @@ from pathlib import Path
 import numpy as np
 
 from poppy.db import rollback_and_close
-from poppy.engine._closet_engine import ClosetHybridEngine
 from poppy.engine._fastembed_loader import MODEL_ID, FastembedModels
+from poppy.engine._hybrid import HybridEngine
 
 __all__ = ["BloomEngine"]
 
 
-class BloomEngine(ClosetHybridEngine):
+class BloomEngine(HybridEngine):
     """Retrieval over fastembed ONNX encoders."""
 
     # Unchanged across the 0.3.0 engine collapse: this is the same ONNX

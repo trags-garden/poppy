@@ -19,8 +19,7 @@ import numpy as np
 import pytest
 
 from poppy.engine import seed as seed_mod
-from poppy.engine._closet_engine import SCHEMA as BLOOM_SCHEMA
-from poppy.engine._closet_marker import _closet_like_pattern
+from poppy.engine._hybrid import SCHEMA as BLOOM_SCHEMA
 from poppy.engine.bloom import BloomEngine
 from poppy.engine.migration import MigrateFilters, count_targets, list_targets, stale_stats
 from poppy.engine.migration import migrate as run_migrate
@@ -172,18 +171,6 @@ def test_seed_store_still_upgrades_to_bloom(tmp_path: Path) -> None:
     assert engine.get("new") is not None
 
 
-def _closet_ids(db_path: Path, parent_id: str, table: str = "memories") -> list[str]:
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = conn.execute(
-            f"SELECT id FROM {table} WHERE id LIKE ? ESCAPE '\\'",  # noqa: S608 - table is a literal above
-            (_closet_like_pattern(parent_id),),
-        ).fetchall()
-        return [r[0] for r in rows]
-    finally:
-        conn.close()
-
-
 def _embedding_ids(db_path: Path) -> list[str]:
     conn = sqlite3.connect(str(db_path))
     try:
@@ -242,7 +229,7 @@ def test_migration_cannot_interleave_between_probe_and_write(tmp_path: Path) -> 
 
 
 def test_seed_delete_on_seed_only_store_still_works(tmp_path: Path) -> None:
-    """The closet cleanup must not touch a store with no memory_embeddings table."""
+    """Deletion also works on a store without a memory_embeddings table."""
     db = tmp_path / "memories.db"
     seed = SeedEngine(db_path=db)
     seed.ingest(_memory("m1", "plain body"))
@@ -259,7 +246,7 @@ def test_seed_metadata_only_edit_preserves_bloom_derived_data(tmp_path: Path) ->
     """A metadata-only re-ingest must not tear down bloom's derived data.
 
     `poppy edit m1 --project p2` replays the memory through ingest with
-    identical content. Clearing closets, the parent vector and the enrichment
+    identical content. Clearing the parent vector and the enrichment
     there destroys accurate data that nothing rebuilds: migrate-engine and
     doctor reach rows through a join on memory_embeddings, so a row left
     without one is invisible to both.
@@ -267,18 +254,15 @@ def test_seed_metadata_only_edit_preserves_bloom_derived_data(tmp_path: Path) ->
     db = tmp_path / "memories.db"
     seed = SeedEngine(db_path=db)
     _bloom(db).ingest(_multi_speaker("m1", "hello"))
-    closets_before = _closet_ids(db, "m1")
     embeddings_before = _embedding_ids(db)
     enriched_before = _enriched(db, "m1")
-    assert len(closets_before) == 2
-    assert len(embeddings_before) == 3
+    assert len(embeddings_before) == 1
 
     same_content = seed.get("m1").content
     edited = _memory("m1", same_content, project="p2")  # project changes, content does not
     seed.ingest(edited)
 
     assert seed.get("m1").project == "p2"  # the edit did land
-    assert _closet_ids(db, "m1") == closets_before
     assert _embedding_ids(db) == embeddings_before
     assert _enriched(db, "m1") == enriched_before
     assert "Conversation" in (enriched_before or "")
@@ -355,7 +339,7 @@ def test_seed_content_edit_retags_the_parent_vector_only(tmp_path: Path) -> None
 
 
 def test_bloom_reingest_rebuilds_everything_after_a_seed_edit(tmp_path: Path) -> None:
-    """Bloom's own ingest is the repair for closet staleness."""
+    """Bloom's ingest replaces a vector invalidated by a Seed content edit."""
     db = tmp_path / "memories.db"
     _bloom(db).ingest(_multi_speaker("m1", "obsoletephoenix"))
     SeedEngine(db_path=db).ingest(_memory("m1", "current replacement"))
@@ -363,7 +347,6 @@ def test_bloom_reingest_rebuilds_everything_after_a_seed_edit(tmp_path: Path) ->
     engine = _bloom(db)
     engine.ingest(_memory("m1", "current replacement"))
 
-    assert _closet_ids(db, "m1") == []  # plain text has no speakers to expand
     assert _model_ids(db) == {"m1": BloomEngine.model_id}
     assert not [r for r in engine.retrieve("obsoletephoenix", limit=10) if "obsoletephoenix" in r.memory.content]
 
@@ -470,75 +453,3 @@ def test_seed_delete_removes_the_parent_embedding_so_a_reinsert_cannot_inherit_i
     conn = sqlite3.connect(str(db))
     assert conn.execute("SELECT 1 FROM memory_embeddings WHERE id = ?", ("m1",)).fetchone() is None
     conn.close()
-
-
-def test_seed_content_edit_clears_the_bloom_speaker_copies(tmp_path: Path) -> None:
-    """A redaction on the fallback engine must not leave the old text in a closet.
-
-    Previously, seed rewrote only the parent row, so the
-    default engine's per-speaker copies kept the removed text and came back the
-    moment the user switched engines back.
-    """
-    db = tmp_path / "memories.db"
-    _bloom(db).ingest(_multi_speaker("m1", "obsoletephoenix"))
-    assert len(_closet_ids(db, "m1")) == 2
-
-    SeedEngine(db_path=db).ingest(_memory("m1", "current replacement"))
-
-    assert _closet_ids(db, "m1") == []
-    assert _closet_ids(db, "m1", table="memory_embeddings") == []
-    assert _model_ids(db)["m1"] == SEED_INVALIDATED_MODEL_ID
-    # Nothing left holding the redacted phrase, under either engine.
-    assert not _bloom(db).retrieve("obsoletephoenix", limit=10)
-    assert not SeedEngine(db_path=db).retrieve("obsoletephoenix", limit=10)
-
-
-def test_seed_delete_clears_the_bloom_speaker_copies(tmp_path: Path) -> None:
-    db = tmp_path / "memories.db"
-    _bloom(db).ingest(_multi_speaker("m1", "obsoletephoenix"))
-    assert len(_closet_ids(db, "m1")) == 2
-
-    assert SeedEngine(db_path=db).delete("m1") is True
-
-    assert _closet_ids(db, "m1") == []
-    assert _closet_ids(db, "m1", table="memory_embeddings") == []
-    assert not SeedEngine(db_path=db).retrieve("obsoletephoenix", limit=10)
-
-
-def test_seed_sweeps_an_orphaned_closet_on_a_repeat_delete(tmp_path: Path) -> None:
-    """A closet whose parent is already gone is still reachable by a delete of that id."""
-    db = tmp_path / "memories.db"
-    _bloom(db).ingest(_multi_speaker("m1", "obsoletephoenix"))
-    conn = sqlite3.connect(str(db))
-    conn.execute("DELETE FROM memories WHERE id = ?", ("m1",))  # parent lost, closets orphaned
-    conn.commit()
-    conn.close()
-    assert len(_closet_ids(db, "m1")) == 2
-
-    seed = SeedEngine(db_path=db)
-    assert seed.delete("m1") is False  # no parent row to remove
-    assert _closet_ids(db, "m1") == []  # but the orphans are swept
-
-
-def test_seed_list_all_hides_closets_so_they_never_reach_sync(tmp_path: Path) -> None:
-    db = tmp_path / "memories.db"
-    _bloom(db).ingest(_multi_speaker("m1", "hello"))
-    assert len(_closet_ids(db, "m1")) == 2
-
-    assert [m.id for m in SeedEngine(db_path=db).list_all()] == ["m1"]
-    assert [m.id for m in _bloom(db).list_all()] == ["m1"]
-
-
-def test_seed_metadata_only_edit_still_preserves_the_speaker_copies(tmp_path: Path) -> None:
-    """Only a CHANGED body is a redaction. A project edit must keep the closets."""
-    db = tmp_path / "memories.db"
-    seed = SeedEngine(db_path=db)
-    _bloom(db).ingest(_multi_speaker("m1", "hello"))
-    closets_before = _closet_ids(db, "m1")
-    assert len(closets_before) == 2
-
-    same_content = seed.get("m1").content
-    seed.ingest(_memory("m1", same_content, project="p2"))
-
-    assert seed.get("m1").project == "p2"
-    assert _closet_ids(db, "m1") == closets_before

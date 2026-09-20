@@ -3677,7 +3677,7 @@ def test_migration_in_memory_does_not_load_cwd_sync_state(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
 def test_open_removes_existing_derived_rows_without_upload(tmp_path, engine_kind):
-    from poppy.engine._closet_engine import ClosetHybridEngine
+    from poppy.engine._hybrid import HybridEngine
     from poppy.sync import sync
 
     engine, tombstones = _engine_and_tombstones(tmp_path)
@@ -3694,7 +3694,7 @@ def test_open_removes_existing_derived_rows_without_upload(tmp_path, engine_kind
     tombstones.add(engine.get("derived"))
     tombstones.note_remote_memories({"derived"}, "https://trags.test")
     engine._conn.close()
-    factory = SeedEngine if engine_kind == "seed" else ClosetHybridEngine
+    factory = SeedEngine if engine_kind == "seed" else HybridEngine
     engine = factory(tmp_path / "memories.db")
     assert engine.get("derived") is None
     assert engine.get("parent") is not None

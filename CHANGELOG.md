@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Conversation transcripts now remain one memory. Bloom no longer creates
+  per-speaker copies when ingesting multi-speaker JSON content.
+
 - Anonymous usage telemetry is off until you turn it on. Poppy asks once, on
   the first run in a terminal, and the default is no; `poppy telemetry on|off`
   answers it too. Nothing is sent, and the daily PyPI update check does not

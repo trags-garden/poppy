@@ -1,23 +1,4 @@
-"""Every bloom write is all-or-nothing, and the encoder runs outside it.
-
-The default engine's ingest is a read-decide-write sequence: it clears the
-per-speaker copies of the memory it is about to rewrite, writes the parent, then
-re-derives the copies. Embedding sits on that path, and it is the one step that
-routinely fails for reasons that have nothing to do with the database — the
-fastembed models load lazily, unload when idle, and raise
-``ModelUnavailableError`` on a cold cache with no network.
-
-Before the fix the sequence ran with no transaction guard: a failure left the
-write lock held on a connection that a long-lived ``poppy serve`` never closes
-(every other process then got ``database is locked``), and the NEXT successful
-write on that connection committed whatever the failed one had already deleted —
-a failed content edit reported as failed, whose speaker copies vanished minutes
-later while the parent kept its old text.
-
-These tests are written against the observable contract rather than the
-implementation: after any failed write the connection holds no transaction,
-another process can still write the store, and the rows are exactly as they were.
-"""
+"""Atomic memory, full-text index, and embedding writes on the Bloom engine."""
 
 from __future__ import annotations
 
@@ -31,7 +12,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from poppy.engine import _closet_engine
 from poppy.engine.bloom import BloomEngine
 from poppy.errors import ModelUnavailableError
 from poppy.models import Memory, Source
@@ -64,7 +44,7 @@ def _bloom(db_path: Path) -> BloomEngine:
 
 
 def _turns(text: str) -> str:
-    """A two-speaker session, which bloom expands into one copy per speaker."""
+    """A two-speaker session stored as one memory."""
     return json.dumps(
         [
             {"speaker": "Alice", "dia_id": "D1", "text": text},
@@ -97,20 +77,20 @@ def _rows(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
 
 
 def _family(db_path: Path, parent_id: str) -> list[tuple]:
-    """The parent row and every per-speaker copy of it, id + text + marker."""
+    """The stored memory, its index text, and its retained schema marker."""
     return _rows(
         db_path,
-        "SELECT id, content, enriched_content, is_closet FROM memories WHERE id = ? OR id LIKE ? ORDER BY id",
-        (parent_id, parent_id + "_closet_%"),
+        "SELECT id, content, enriched_content, is_closet FROM memories WHERE id = ? ORDER BY id",
+        (parent_id,),
     )
 
 
 def _embedding_ids(db_path: Path, parent_id: str) -> list[tuple]:
-    """The stored vectors for a memory and its copies, by id."""
+    """The stored vector for a memory, by id."""
     return _rows(
         db_path,
-        "SELECT id FROM memory_embeddings WHERE id = ? OR id LIKE ? ORDER BY id",
-        (parent_id, parent_id + "_closet_%"),
+        "SELECT id FROM memory_embeddings WHERE id = ? ORDER BY id",
+        (parent_id,),
     )
 
 
@@ -155,7 +135,7 @@ def test_ingest_that_cannot_embed_leaves_the_store_writable(tmp_path: Path, monk
     engine = _bloom(db)
     engine.ingest(_memory("mem_keep", _turns(OLD_TEXT)))
     before = _family(db, "mem_keep")
-    assert len(before) == 3  # parent + Alice + Bob
+    assert len(before) == 1
 
     _fail_embed(monkeypatch, engine)
     with pytest.raises(ModelUnavailableError):
@@ -168,20 +148,14 @@ def test_ingest_that_cannot_embed_leaves_the_store_writable(tmp_path: Path, monk
     engine._conn.close()
 
 
-def test_failed_content_edit_keeps_both_speaker_copies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reported case: an edit that cannot embed must not disturb the copies.
-
-    A content edit replays through ingest, which clears the copies before writing
-    the new text. If the embed failure happens after that clearing, the user is
-    told the edit failed while the copies are already gone.
-    """
+def test_failed_content_edit_keeps_memory_and_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An embedding failure leaves the existing memory and search index intact."""
     db = tmp_path / "poppy.db"
     engine = _bloom(db)
     engine.ingest(_memory("mem_edit", _turns(OLD_TEXT)))
     before = _family(db, "mem_edit")
-    assert len(before) == 3
-    # The parent holds both speakers' turns; only Alice's copy repeats her text.
-    assert sum(OLD_TEXT in row[2] for row in before) == 2
+    assert len(before) == 1
+    assert sum(OLD_TEXT in row[2] for row in before) == 1
 
     _fail_embed(monkeypatch, engine)
     with pytest.raises(ModelUnavailableError):
@@ -191,29 +165,25 @@ def test_failed_content_edit_keeps_both_speaker_copies(tmp_path: Path, monkeypat
     _assert_another_process_can_write(db)
     after = _family(db, "mem_edit")
     assert after == before
-    assert len(after) == 3
+    assert len(after) == 1
     assert all(NEW_TEXT not in row[1] for row in after)
     engine._conn.close()
 
 
 def test_failure_inside_the_write_rolls_the_deletion_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failure AFTER the copies are deleted still leaves them standing.
-
-    Moving the embed out of the transaction is not enough on its own: the write
-    sequence makes several statements and any of them can fail. Here the failure
-    is raised from the tombstone bookkeeping at the end of ingest, long after the
-    old copies have been deleted and the new rows written, so only the rollback
-    can restore them.
-    """
+    """A failure after replacing a memory restores its old text, index, and vector."""
     db = tmp_path / "poppy.db"
     engine = _bloom(db)
     engine.ingest(_memory("mem_edit", _turns(OLD_TEXT)))
     before = _family(db, "mem_edit")
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("bookkeeping failed mid-write")
+    real_insert = engine._insert_memory
 
-    monkeypatch.setattr(_closet_engine, "record_closet_tombstones", boom)
+    def boom(*args, **kwargs):
+        real_insert(*args, **kwargs)
+        raise RuntimeError("interrupted write")
+
+    monkeypatch.setattr(engine, "_insert_memory", boom)
     with pytest.raises(RuntimeError):
         engine.ingest(_memory("mem_edit", _turns(NEW_TEXT)))
 
@@ -230,21 +200,19 @@ def test_failure_inside_the_write_rolls_the_deletion_back(tmp_path: Path, monkey
 def test_next_successful_ingest_commits_nothing_from_the_failed_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The delayed-damage half of the bug: a later write must not adopt the leftovers.
-
-    With the transaction left open, the deletions from the failed edit sat
-    uncommitted on the engine's connection and were committed by the next
-    unrelated ``remember`` — copies gone, parent still holding its old text.
-    """
+    """A later write must not commit any part of an earlier failed write."""
     db = tmp_path / "poppy.db"
     engine = _bloom(db)
     engine.ingest(_memory("mem_edit", _turns(OLD_TEXT)))
     before = _family(db, "mem_edit")
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("bookkeeping failed mid-write")
+    real_insert = engine._insert_memory
 
-    monkeypatch.setattr(_closet_engine, "record_closet_tombstones", boom)
+    def boom(*args, **kwargs):
+        real_insert(*args, **kwargs)
+        raise RuntimeError("interrupted write")
+
+    monkeypatch.setattr(engine, "_insert_memory", boom)
     with pytest.raises(RuntimeError):
         engine.ingest(_memory("mem_edit", _turns(NEW_TEXT)))
     monkeypatch.undo()
@@ -258,30 +226,22 @@ def test_next_successful_ingest_commits_nothing_from_the_failed_one(
     engine._conn.close()
 
 
-def test_failed_delete_leaves_the_memory_and_its_copies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``delete`` is the other redaction path and gets the same guard.
-
-    The failure is injected AFTER the per-speaker copies have been deleted — the
-    only point at which a missing rollback is observable — so both their rows and
-    their embedding rows have to come back.
-    """
+def test_failed_delete_leaves_memory_and_embedding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A vector deletion failure rolls back the memory and full-text deletion too."""
     db = tmp_path / "poppy.db"
     engine = _bloom(db)
     engine.ingest(_memory("mem_del", _turns(OLD_TEXT)))
     before = _family(db, "mem_del")
     before_vectors = _embedding_ids(db, "mem_del")
-    assert len(before) == 3
-    assert len(before_vectors) == 3
+    assert len(before) == 1
+    assert len(before_vectors) == 1
 
-    real_sweep = _closet_engine.delete_marked_closets
-
-    def sweep_then_fail(*args, **kwargs):
-        removed = real_sweep(*args, **kwargs)
-        assert removed, "the copies should have been deleted before the failure"
-        raise RuntimeError("bookkeeping failed after the copy sweep")
-
-    monkeypatch.setattr(_closet_engine, "delete_marked_closets", sweep_then_fail)
-    with pytest.raises(RuntimeError):
+    with engine._conn:
+        engine._conn.execute(
+            "CREATE TRIGGER fail_vector_delete AFTER DELETE ON memory_embeddings "
+            "BEGIN SELECT RAISE(ABORT, 'interrupted deletion'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="interrupted deletion"):
         engine.delete("mem_del")
 
     assert engine._conn.in_transaction is False
@@ -307,18 +267,19 @@ def test_a_failed_write_cannot_erase_another_threads_write(tmp_path: Path, monke
 
     a_inside = threading.Event()
     b_done = threading.Event()
-    real_tombstones = _closet_engine.record_closet_tombstones
+    real_insert = engine._insert_memory
 
     def stall_then_fail(*args, **kwargs):
+        real_insert(*args, **kwargs)
         if threading.current_thread().name != "writer-a":
-            return real_tombstones(*args, **kwargs)
+            return
         a_inside.set()
         # Hold A's transaction open and give B every chance to slip into it.
         # Under the lock B cannot, so this wait simply times out.
         b_done.wait(timeout=1.0)
         raise RuntimeError("bookkeeping failed mid-write")
 
-    monkeypatch.setattr(_closet_engine, "record_closet_tombstones", stall_then_fail)
+    monkeypatch.setattr(engine, "_insert_memory", stall_then_fail)
 
     unexpected: list[BaseException] = []
 

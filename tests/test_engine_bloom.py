@@ -25,7 +25,6 @@ from typing import Any
 import numpy as np
 import pytest
 
-from poppy.engine._closet_marker import _closet_like_pattern, _disambiguate_slugs, _escape_like
 from poppy.engine.bloom import BloomEngine
 from poppy.engine.migration import MigrateFilters, stale_stats
 from poppy.engine.migration import migrate as run_migrate
@@ -103,6 +102,22 @@ def test_fresh_db_round_trip(tmp_path: Path) -> None:
     got = engine.get("m1")
     assert got is not None
     assert got.content == "user prefers vim over emacs"
+
+
+@pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
+def test_multi_speaker_ingest_stores_one_unmarked_row(tmp_path: Path, engine_kind: str) -> None:
+    db = tmp_path / "memories.db"
+    engine = _make_engine(db) if engine_kind == "bloom" else SeedEngine(db)
+    content = '[{"speaker":"Alice","text":"hello"},{"speaker":"Bob","text":"world"}]'
+    memory = _memory("conversation", content)
+    for _ in range(2):
+        engine.ingest(memory)
+        with sqlite3.connect(db) as conn:
+            assert "is_closet" in {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+            assert conn.execute("SELECT id, content, is_closet FROM memories").fetchall() == [(memory.id, content, 0)]
+            assert conn.execute("SELECT COUNT(*) FROM memory_fts").fetchone()[0] == 1
+            if engine_kind == "bloom":
+                assert conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0] == 1
 
 
 def test_model_id_is_the_onnx_fingerprint(tmp_path: Path) -> None:
@@ -201,7 +216,7 @@ def test_expires_at_filtered_on_retrieve_and_list(tmp_path: Path) -> None:
     assert {r.memory.id for r in results}.isdisjoint({"expired"})
 
 
-def test_purge_expired_drops_parent_and_closets(tmp_path: Path) -> None:
+def test_purge_expired_drops_memory_and_embedding(tmp_path: Path) -> None:
     """purge_expired must also clean up synthetic closet rows."""
     engine = _make_engine(tmp_path / "t.db")
     past = datetime.now(timezone.utc) - timedelta(days=1)
@@ -211,7 +226,7 @@ def test_purge_expired_drops_parent_and_closets(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(engine._db_path))
     pre = conn.execute("SELECT COUNT(*) FROM memories WHERE id LIKE 'session1%'").fetchone()[0]
     conn.close()
-    assert pre >= 2  # parent + at least one closet
+    assert pre == 1
 
     purged = engine.purge_expired()
     assert purged == 1  # only the parent counts; closet rows are cascade
@@ -324,76 +339,21 @@ def test_legacy_torch_tagged_db_migrates_to_onnx(tmp_path: Path) -> None:
 _TWO_SPEAKER_TURNS = '[{"speaker":"Alice","dia_id":"D1","text":"hi"},{"speaker":"Bob","dia_id":"D2","text":"yo"}]'
 
 
-def test_escape_like_escapes_wildcards() -> None:
-    assert _escape_like("a%b_c") == r"a\%b\_c"
-    assert _escape_like(r"x\y") == r"x\\y"
+@pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
+def test_ingest_never_calls_legacy_classification(tmp_path: Path, monkeypatch, engine_kind: str) -> None:
+    from poppy.engine import _legacy_copies
 
+    engine = _make_engine(tmp_path / "memories.db") if engine_kind == "bloom" else SeedEngine(tmp_path / "memories.db")
 
-def test_closet_like_pattern_escapes_id_and_separator() -> None:
-    # The `_closet_` separator is literal; only the trailing % is a wildcard.
-    assert _closet_like_pattern("m1") == r"m1\_closet\_%"
-    # A wildcard in the id itself is escaped so it can't over-match.
-    assert _closet_like_pattern("a%b") == r"a\%b\_closet\_%"
+    def unexpected(*args, **kwargs):
+        pytest.fail("ingest reached legacy copy cleanup")
 
-
-def _closet_count(engine: BloomEngine, parent_id: str) -> int:
-    conn = sqlite3.connect(str(engine._db_path))
-    try:
-        return conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE id LIKE ? ESCAPE '\\'",
-            (_closet_like_pattern(parent_id),),
-        ).fetchone()[0]
-    finally:
-        conn.close()
-
-
-def test_builds_one_closet_per_speaker(tmp_path: Path) -> None:
-    engine = _make_engine(tmp_path / "t.db")
-    engine.ingest(_memory("sess", _TWO_SPEAKER_TURNS))
-    assert _closet_count(engine, "sess") == 2
-
-
-def test_like_escaping_prevents_cross_memory_deletion(tmp_path: Path) -> None:
-    """An id carrying a LIKE wildcard must not wipe another memory's closets.
-
-    Ids reach delete/ingest from `sync pull` unvalidated; a `%` in one id used to
-    over-match the `_closet_` LIKE and silently delete unrelated rows.
-    """
-    engine = _make_engine(tmp_path / "t.db")
-    engine.ingest(_memory("safe", _TWO_SPEAKER_TURNS))
-    assert _closet_count(engine, "safe") >= 2
-
-    # "saf%" naively LIKE-matches "safe...": deleting it must leave safe intact.
-    engine.delete("saf%")
-    assert _closet_count(engine, "safe") >= 2
-
-    # The real parent still cascades to its own closets.
-    engine.delete("safe")
-    assert _closet_count(engine, "safe") == 0
-
-
-def test_colliding_speaker_slugs_keep_distinct_closets(tmp_path: Path) -> None:
-    """Two speakers that slugify identically must each keep their own closet."""
-    engine = _make_engine(tmp_path / "t.db")
-    # "O'Brien" and "O Brien" both slug to "o_brien"; without disambiguation the
-    # second INSERT OR REPLACE dropped the first speaker's closet.
-    turns = '[{"speaker":"O\'Brien","dia_id":"D1","text":"one"},{"speaker":"O Brien","dia_id":"D2","text":"two"}]'
-    engine.ingest(_memory("sess", turns))
-
-    conn = sqlite3.connect(str(engine._db_path))
-    try:
-        ids = [
-            r[0]
-            for r in conn.execute(
-                "SELECT id FROM memories WHERE id LIKE ? ESCAPE '\\'",
-                (_closet_like_pattern("sess"),),
-            ).fetchall()
-        ]
-    finally:
-        conn.close()
-    assert len(ids) == 2  # both speakers kept a closet
-    assert len(set(ids)) == 2  # and their ids are distinct
-
-
-def test_disambiguate_slugs_breaks_ties() -> None:
-    assert _disambiguate_slugs(["O'Brien", "O Brien"]) == {"O'Brien": "o_brien", "O Brien": "o_brien_2"}
+    monkeypatch.setattr(_legacy_copies, "classify_legacy_copy", unexpected)
+    monkeypatch.setattr(_legacy_copies, "_projected_texts", unexpected)
+    memory = _memory("conversation", _TWO_SPEAKER_TURNS)
+    engine.ingest(memory)
+    for marker in (1, 2):
+        with engine._conn:
+            engine._conn.execute("UPDATE memories SET is_closet = ? WHERE id = ?", (marker, memory.id))
+        engine.ingest(memory)
+        assert [tuple(row) for row in engine._conn.execute("SELECT id, is_closet FROM memories")] == [(memory.id, 0)]
