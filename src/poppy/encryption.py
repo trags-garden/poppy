@@ -923,7 +923,7 @@ def _opens_as_plaintext(db_path: Path) -> bool:
     enough, so an unreadable/corrupt file can never trigger a key-deleting lockout.
     """
     try:
-        conn = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
+        conn = sqlite3.connect(_immutable_uri(db_path), uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
     except Exception:
         return False
     try:
