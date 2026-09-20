@@ -1949,7 +1949,10 @@ def build_group():
     pass
 
 
-@build_group.command("mcpb")
+@build_group.command(
+    "mcpb",
+    short_help="Build a .mcpb bundle. Needs a source checkout.",
+)
 @click.option(
     "--output-dir",
     type=click.Path(file_okay=False, path_type=Path),
@@ -1957,7 +1960,13 @@ def build_group():
     help="Where to write the .mcpb file (default: ./dist).",
 )
 def build_mcpb_cmd(output_dir: Path):
-    """Build a Claude Desktop Extension bundle (.mcpb) from this checkout."""
+    """Build a Claude Desktop Extension bundle (.mcpb) from a source checkout.
+
+    This is a maintainer tool, not a supported way to install Poppy. It reads
+    `pyproject.toml` and `mcpb/` from the repository, so it cannot run from a
+    Poppy installed with pipx or pip. To use Poppy with the Claude desktop app,
+    run `poppy setup claude-desktop` instead.
+    """
     from poppy.build_mcpb import build_mcpb
 
     repo_root = Path(__file__).resolve().parents[3]
