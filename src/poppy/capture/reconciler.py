@@ -238,12 +238,19 @@ def _verdict_from_candidates(
         log.warning("conflict detection: poppy.consolidation unavailable, skipping LLM call")
         return []
 
+    # A verdict never speaks for the extraction backend's health. On this much
+    # shorter timeout a slow-but-working CLI would look broken, and three of
+    # those in one capture pass is enough to put a false "every extraction is
+    # failing" line in front of someone whose capture is fine. The reverse is
+    # just as wrong: a fast verdict would clear a genuinely broken CLI's record.
+    # The failure is still logged, just not counted.
     raw = call_llm(
         prompt,
         transcript_path=None,
         cfg=cfg,
         parser=parse_llm_response,
         host_timeout_s=CONFLICT_LLM_TIMEOUT_S,
+        record_health=False,
     )
     if not raw:
         return []

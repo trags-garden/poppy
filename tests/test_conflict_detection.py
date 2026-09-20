@@ -126,7 +126,7 @@ def test_detect_conflicts_parses_backend_text(
     )
     calls = []
 
-    def host(prompt, *, cli, timeout_s):
+    def host(prompt, *, cli, timeout_s, **kwargs):
         assert cli == "claude"
         # A verdict is a small prompt; it must not book the whole-transcript budget.
         assert timeout_s == CONFLICT_LLM_TIMEOUT_S
