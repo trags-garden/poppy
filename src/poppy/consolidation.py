@@ -240,27 +240,94 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # fallback is skipped and said so, rather than started and cut off instantly.
 MIN_FALLBACK_TIMEOUT_S = 2.0
 
+# A chat completion is a few kilobytes. A body past this is a server streaming
+# without end, which would fill memory and outlast the budget.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+# Shorter configured keys are a local server's placeholder ("ollama", "none"),
+# not a secret, and blanking such a word out of model text would corrupt real
+# memories that happen to contain it.
+MIN_REDACTABLE_KEY_LEN = 12
+
 
 class OpenAICompatError(Exception):
     """A fallback failure safe to display in worker logs and backend health."""
 
 
-def _warn_if_key_sent_in_clear(endpoint: str) -> None:
-    """Warn once per call when the API key would cross the network unencrypted.
+def _is_loopback(host: str) -> bool:
+    """Whether a hostname names this machine."""
+    host = host.lower()
+    return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost") or host.startswith("127.")
 
-    A local server on loopback is the normal way to run an OpenAI-compatible
-    model and needs no TLS, so only a plain-http endpoint on another host is
-    worth a word.
+
+def _endpoint(base_url: str | None) -> tuple[str, bool]:
+    """The chat-completions URL, and whether it is served from this machine.
+
+    A configured URL is user input, and a malformed one makes ``urlsplit``
+    raise, so this reports a named failure rather than letting a traceback
+    abort a capture pass. A local model server is the normal way to run an
+    OpenAI-compatible endpoint and needs no TLS, so only plain http to another
+    host is worth warning about.
     """
-    parsed = urlsplit(endpoint)
-    if parsed.scheme != "http":
-        return
-    host = (parsed.hostname or "").lower()
-    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost"):
-        return
-    sys.stderr.write(
-        f"poppy consolidate: warning, {parsed.scheme}://{host} is not encrypted, so the API key is sent in clear text\n"
-    )
+    raw = (base_url or DEFAULT_OPENAI_BASE_URL).rstrip("/")
+    try:
+        parsed = urlsplit(raw)
+        host = (parsed.hostname or "").lower()
+    except ValueError as exc:
+        raise OpenAICompatError("configured endpoint is not a valid URL") from exc
+    if parsed.scheme not in ("http", "https") or not host:
+        raise OpenAICompatError("configured endpoint is not an http or https URL")
+    loopback = _is_loopback(host)
+    if parsed.scheme == "http" and not loopback:
+        sys.stderr.write(
+            f"poppy consolidate: warning, http://{host} is not encrypted, so the API key is sent in clear text\n"
+        )
+    return f"{raw}/chat/completions", loopback
+
+
+def _http_client(*, timeout_s: float, trust_env: bool) -> httpx.Client:
+    """The client every fallback request goes through.
+
+    ``follow_redirects=False`` keeps the Authorization header from being
+    replayed at a location the endpoint picks. ``trust_env`` is off for a
+    server on this machine, where an environment proxy is both wrong and a way
+    to capture the key, and on for a remote endpoint, where a corporate proxy
+    is often how the request gets out at all.
+    """
+    return httpx.Client(timeout=timeout_s, trust_env=trust_env, follow_redirects=False)
+
+
+def _read_bounded(resp: httpx.Response, *, deadline: float) -> bytes:
+    """Read a streamed body under a wall-clock deadline and a size cap.
+
+    An httpx timeout applies per socket operation, so a server that sends one
+    byte just inside it holds the connection open for as long as it likes. A
+    capture pass runs while a lock another worker will steal on a fixed TTL, so
+    the read needs a real deadline and a bound on how much it will hold.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_bytes():
+        if time.monotonic() >= deadline:
+            raise OpenAICompatError("timed out reading the response")
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise OpenAICompatError(f"response larger than {MAX_RESPONSE_BYTES // (1024 * 1024)}MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _redact_key(text: str, api_key: str) -> str:
+    """Keep a credential the endpoint echoed back out of memories and logs.
+
+    Response text is parsed into stored memories and its opening is logged, so
+    an endpoint that quotes the key back would otherwise persist it. Matching
+    the configured value catches keys of any shape, which pattern-based
+    redaction cannot.
+    """
+    if len(api_key) >= MIN_REDACTABLE_KEY_LEN and api_key in text:
+        return text.replace(api_key, "[REDACTED]")
+    return text
 
 
 def call_openai_compat(
@@ -273,24 +340,23 @@ def call_openai_compat(
     timeout_s: float = HOST_CLI_TIMEOUT_S,
 ) -> str:
     """Request a chat completion, raising a specific, credential-free failure."""
-    endpoint = (base_url or DEFAULT_OPENAI_BASE_URL).rstrip("/")
-    _warn_if_key_sent_in_clear(endpoint)
+    deadline = time.monotonic() + timeout_s
+    url, loopback = _endpoint(base_url)
     try:
-        resp = httpx.post(
-            f"{endpoint}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.2,
-                "max_tokens": max_tokens,
-            },
-            timeout=timeout_s,
-            # Never replay the Authorization header at a location the endpoint
-            # picks: a redirect can point anywhere, including another host.
-            follow_redirects=False,
-        )
-        resp.raise_for_status()
+        with _http_client(timeout_s=timeout_s, trust_env=not loopback) as client:
+            with client.stream(
+                "POST",
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": max_tokens,
+                },
+            ) as resp:
+                resp.raise_for_status()
+                body = _read_bounded(resp, deadline=deadline)
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         unmapped = "server error" if status >= 500 else httpx.codes.get_reason_phrase(status) or "unexpected status"
@@ -311,7 +377,9 @@ def call_openai_compat(
         raise OpenAICompatError("invalid endpoint URL or request configuration") from exc
 
     try:
-        payload = resp.json()
+        # Bytes, so a body that is not UTF-8 lands here as a decode error
+        # rather than anywhere further down.
+        payload = json.loads(body)
     except ValueError as exc:
         raise OpenAICompatError("response is not valid JSON") from exc
     try:
@@ -320,7 +388,7 @@ def call_openai_compat(
         raise OpenAICompatError("response has no text in choices[0].message.content") from exc
     if not isinstance(content, str) or not content.strip():
         raise OpenAICompatError("response has no text in choices[0].message.content")
-    return content
+    return _redact_key(content, api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +429,15 @@ def parse_json_array(text: str) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         mtype = item.get("type", "fact")
-        content = (item.get("content") or "").strip()
+        raw_content = item.get("content")
+        # A model can put a number or an object where text belongs. Drop the
+        # item rather than letting one malformed entry end the capture pass.
+        if not isinstance(raw_content, str):
+            continue
+        content = raw_content.strip()
         if not content:
             continue
-        if mtype not in ALLOWED_TYPES:
+        if not isinstance(mtype, str) or mtype not in ALLOWED_TYPES:
             mtype = "fact"
         out.append({"type": mtype, "content": content})
     return out

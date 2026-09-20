@@ -3530,15 +3530,23 @@ def doctor():
     remote_health = backend_health.clis.get("openai-compat")
     if remote_health is not None:
         # Surface a configured fallback's failure even without a host CLI or
-        # before repeated failures change the overall capture status.
+        # before repeated failures change the overall capture status. One
+        # failure can be a dropped connection, so it reads as information and
+        # only a run of them warns, matching how a host CLI is reported.
         from poppy.capture.redaction import load_custom_redaction, redact_secrets
 
         custom_patterns, _redaction_issues = load_custom_redaction(capture_cfg)
+        failures = remote_health.consecutive_failures
+        broken = failures >= _capture_health.FAILURE_THRESHOLD
         line(
             "openai-compat",
-            "WARN",
-            redact_secrets(remote_health.last_error, custom_patterns),
-            hint="check the configured endpoint, API key and model; retry extraction after fixing the error",
+            "WARN" if broken else "INFO",
+            f"{redact_secrets(remote_health.last_error, custom_patterns)} ({failures} in a row)",
+            hint=(
+                "check the configured endpoint, API key and model; retry extraction after fixing the error"
+                if broken
+                else ""
+            ),
         )
 
     # Last-capture freshness: proof the loop has actually run. Reads the

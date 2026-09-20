@@ -469,18 +469,25 @@ def test_doctor_reports_remote_failure(tmp_path, monkeypatch, capsys, forced, fa
             return httpx.Response(401)
         raise failure("connection refused", request=request)
 
-    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
-        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
-        for _ in range(attempts):
-            assert call_llm("extract", transcript_path=None, cfg=cfg) == []
+    def client(*, timeout_s, trust_env):
+        return httpx.Client(transport=httpx.MockTransport(respond), timeout=timeout_s, follow_redirects=False)
+
+    monkeypatch.setattr("poppy.consolidation._http_client", client)
+    for _ in range(attempts):
+        assert call_llm("extract", transcript_path=None, cfg=cfg) == []
     assert detail in capsys.readouterr().err
     result = _doctor(poppy_dir, tmp_path)
     assert result.exit_code == 0, result.output
-    assert "[!] openai-compat: WARN" in result.output
-    assert detail in result.output
+    # A single dropped connection is information, not a warning; only a run of
+    # them means the backend is really broken, as for a host CLI.
+    broken = attempts >= health.FAILURE_THRESHOLD
+    assert ("[!] openai-compat: WARN" in result.output) is broken
+    assert ("[·] openai-compat: INFO" in result.output) is not broken
+    assert detail in result.output, "doctor must name the failure either way"
+    assert f"({attempts} in a row)" in result.output
     assert "`openai-compat` runs and is logged in" not in result.output
     health.record_success()
-    assert "[!] openai-compat: WARN" not in _doctor(poppy_dir, tmp_path).output
+    assert "openai-compat" not in _doctor(poppy_dir, tmp_path).output
 
 
 def test_doctor_redacts_the_stderr_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
