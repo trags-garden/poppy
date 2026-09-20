@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from poppy.capture import health
@@ -116,14 +117,27 @@ def format_transcript(messages: list[dict[str, str]], char_budget: int = 16000) 
 # Backend 1: Host CLI subprocess
 # ---------------------------------------------------------------------------
 
+# Order to try host CLIs in when there is no transcript to identify the host
+# (the conflict verdict, which judges one memory rather than a session). Same
+# four CLIs the transcript-based branch below can pick, so a no-transcript call
+# can never reach a backend a normal capture would not have used.
+HOST_CLI_PREFERENCE = ("claude", "cursor-agent", "codex", "gemini")
+
+# Seconds a host CLI gets to answer. Sized for the big job: a whole transcript
+# window to extract memories from. Callers with a small prompt pass a smaller
+# budget.
+HOST_CLI_TIMEOUT_S = 120
+
 
 def detect_host_cli(transcript_path: str | None) -> str | None:
     """Pick the host coding-agent CLI based on the transcript path.
 
+    Without a transcript, fall back to the first CLI on PATH in
+    ``HOST_CLI_PREFERENCE`` order.
     Returns the executable name if it exists on PATH, else None.
     """
     if not transcript_path:
-        return None
+        return next((cli for cli in HOST_CLI_PREFERENCE if shutil.which(cli)), None)
     transcript_host = detect_transcript_host(Path(transcript_path))
     if transcript_host == "cursor" and shutil.which("cursor-agent"):
         return "cursor-agent"
@@ -153,7 +167,9 @@ def _capture_source(transcript_path: str) -> str:
     return source_from_capture_host(host, fallback_cli=detect_host_cli(transcript_path))
 
 
-def call_host_cli(prompt: str, *, cli: str, timeout_s: int = 120) -> str | None:
+def call_host_cli(
+    prompt: str, *, cli: str, timeout_s: int = HOST_CLI_TIMEOUT_S, record_health: bool = True
+) -> str | None:
     """Invoke a coding-agent CLI in headless mode. Returns the model's text.
 
     Every hard failure (non-zero exit, timeout, spawn error) is recorded as
@@ -162,6 +178,11 @@ def call_host_cli(prompt: str, *, cli: str, timeout_s: int = 120) -> str | None:
     ``poppy doctor`` instead of failing silently. Clearing that record is left to
     ``call_llm``, which is where the output is parsed: exiting 0 is not proof the
     backend worked, since a CLI can exit 0 while printing an error page.
+
+    ``record_health=False`` still logs a failure but keeps it out of that record.
+    It is for callers on a tighter timeout than an extraction, whose result would
+    otherwise misreport the backend in both directions: their timeout is not
+    evidence the CLI is broken, and their success is not evidence it is healthy.
     """
     if cli == "claude":
         # claude -p reads the prompt from stdin or as a positional arg.
@@ -185,17 +206,20 @@ def call_host_cli(prompt: str, *, cli: str, timeout_s: int = 120) -> str | None:
         else:
             proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout_s, env=child_env)
     except subprocess.TimeoutExpired:
-        health.record_failure(cli, f"timed out after {timeout_s}s")
+        if record_health:
+            health.record_failure(cli, f"timed out after {timeout_s}s")
         sys.stderr.write(f"poppy consolidate: {cli} timed out after {timeout_s}s\n")
         return None
     except OSError as exc:
-        health.record_failure(cli, f"spawn failed: {exc}")
+        if record_health:
+            health.record_failure(cli, f"spawn failed: {exc}")
         sys.stderr.write(f"poppy consolidate: {cli} spawn failed: {exc}\n")
         return None
     if proc.returncode != 0:
         stderr_tail = (proc.stderr or "").strip().splitlines()[-3:]
         detail = f"exited rc={proc.returncode} stderr_tail={' | '.join(stderr_tail)!r}"
-        health.record_failure(cli, detail)
+        if record_health:
+            health.record_failure(cli, detail)
         sys.stderr.write(f"poppy consolidate: {cli} {detail}\n")
         return None
     return proc.stdout or None
@@ -284,24 +308,37 @@ def parse_json_array(text: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def call_llm(prompt: str, *, transcript_path: str | None, cfg: PoppyConfig) -> list[dict[str, str]]:
+def call_llm(
+    prompt: str,
+    *,
+    transcript_path: str | None,
+    cfg: PoppyConfig,
+    parser: Callable[[str], list[dict]] = parse_json_array,
+    host_timeout_s: int = HOST_CLI_TIMEOUT_S,
+    record_health: bool = True,
+) -> list[dict]:
     """Pick a backend, run it, parse the JSON array.
 
     Tries host CLI first (free, no key). Falls back to OpenAI-compat using
     config / env. Logs a one-line classification of every empty result so
-    silent zeros are diagnosable.
+    silent zeros are diagnosable. The default parser extracts durable memories;
+    callers requesting another response shape can supply their own parser, and
+    callers with a small prompt can shorten the host CLI's ``host_timeout_s``.
+
+    ``record_health=False`` leaves the extraction-backend health record
+    untouched, for a caller whose timeout is too short to judge the backend by.
     """
     cli = detect_host_cli(transcript_path)
     if cli:
-        text = call_host_cli(prompt, cli=cli)
+        text = call_host_cli(prompt, cli=cli, timeout_s=host_timeout_s, record_health=record_health)
         if text is None:
             # call_host_cli already logged the failure mode (timeout / rc / OSError).
             pass
         else:
-            parsed = parse_json_array(text)
+            parsed = parser(text)
             arr = _find_json_array(text)
             empty_array = arr is not None and not arr
-            if parsed or empty_array:
+            if (parsed or empty_array) and record_health:
                 # Exit 0 *and* an array we could parse is the only evidence the
                 # backend really works; an empty array is a real answer ("nothing
                 # durable here"). An exit-0 error page falls through and leaves
@@ -328,8 +365,9 @@ def call_llm(prompt: str, *, transcript_path: str | None, cfg: PoppyConfig) -> l
         if text:
             # The configured fallback works, so extraction as a whole is healthy
             # even if the host CLI just failed.
-            health.record_success()
-            parsed = parse_json_array(text)
+            if record_health:
+                health.record_success()
+            parsed = parser(text)
             if not parsed:
                 snippet = text.strip()[:200].replace("\n", " ")
                 sys.stderr.write(f"poppy consolidate: openai-compat output yielded 0 items (first 200: {snippet!r})\n")

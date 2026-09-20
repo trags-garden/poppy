@@ -74,6 +74,17 @@ CANDIDATE_MIN_SCORE = 0.30
 # ADR-0003 autoresearch tuning pass points here.
 AUTO_SUPERSEDE_THRESHOLD = 0.85
 
+# Seconds a verdict gets from the backend, well under the whole-transcript
+# default. A verdict judges one memory against at most DEFAULT_TOP_K neighbours,
+# so it is a small prompt and a slow answer is not worth waiting for. The budget
+# has to stay small: a background capture pass runs one verdict per extracted
+# candidate while it holds the per-session capture lock, and that lock is treated
+# as abandoned after capture.lock.LOCK_TTL_S (300s), at which point a second
+# worker steals it from the one still running. One extraction (120s) plus a
+# verdict for every candidate in a default batch of five stays inside that
+# window. It also keeps `remember --check-conflicts` from parking a terminal.
+CONFLICT_LLM_TIMEOUT_S = 20
+
 # How many same-project / same-type neighbours the prefilter / verdict inspect.
 DEFAULT_TOP_K = 5
 
@@ -227,7 +238,20 @@ def _verdict_from_candidates(
         log.warning("conflict detection: poppy.consolidation unavailable, skipping LLM call")
         return []
 
-    raw = call_llm(prompt, transcript_path=None, cfg=cfg)
+    # A verdict never speaks for the extraction backend's health. On this much
+    # shorter timeout a slow-but-working CLI would look broken, and three of
+    # those in one capture pass is enough to put a false "every extraction is
+    # failing" line in front of someone whose capture is fine. The reverse is
+    # just as wrong: a fast verdict would clear a genuinely broken CLI's record.
+    # The failure is still logged, just not counted.
+    raw = call_llm(
+        prompt,
+        transcript_path=None,
+        cfg=cfg,
+        parser=parse_llm_response,
+        host_timeout_s=CONFLICT_LLM_TIMEOUT_S,
+        record_health=False,
+    )
     if not raw:
         return []
 

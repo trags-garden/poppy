@@ -32,7 +32,9 @@ def _no_autosync(monkeypatch):
 def _conflict_llm(monkeypatch, target_id, *, confidence):
     monkeypatch.setattr(
         "poppy.consolidation.call_llm",
-        lambda prompt, *, transcript_path, cfg: [{"id": target_id, "confidence": confidence, "reason": "replaces"}],
+        lambda prompt, *, transcript_path, cfg, **kwargs: [
+            {"id": target_id, "confidence": confidence, "reason": "replaces"}
+        ],
     )
 
 

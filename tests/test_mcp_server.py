@@ -137,7 +137,7 @@ async def test_handle_remember_check_conflicts_dry_run(fast_server, monkeypatch)
 
     monkeypatch.setattr(
         "poppy.consolidation.call_llm",
-        lambda prompt, *, transcript_path, cfg: [
+        lambda prompt, *, transcript_path, cfg, **kwargs: [
             {"id": fast_server._engine.list_all(limit=5)[0].id, "confidence": 0.91, "reason": "replaces"}
         ],
     )
@@ -168,7 +168,7 @@ async def test_handle_remember_auto_supersede_path(fast_server, monkeypatch):
 
     monkeypatch.setattr(
         "poppy.consolidation.call_llm",
-        lambda prompt, *, transcript_path, cfg: [{"id": old_id, "confidence": 0.91, "reason": "replaces"}],
+        lambda prompt, *, transcript_path, cfg, **kwargs: [{"id": old_id, "confidence": 0.91, "reason": "replaces"}],
     )
 
     result = await fast_server.handle_remember(
@@ -293,7 +293,7 @@ async def test_handle_remember_default_off_skips_llm(fast_server, monkeypatch):
 
     called: list[str] = []
 
-    def boom(prompt, *, transcript_path, cfg):
+    def boom(prompt, *, transcript_path, cfg, **kwargs):
         called.append(prompt)
         return []
 

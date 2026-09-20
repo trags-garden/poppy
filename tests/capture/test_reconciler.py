@@ -47,7 +47,7 @@ def _ban_llm(monkeypatch: pytest.MonkeyPatch) -> list:
     """Make any LLM call a test failure; returns the (empty) call log."""
     called: list = []
 
-    def boom(prompt, *, transcript_path, cfg):
+    def boom(prompt, *, transcript_path, cfg, **kwargs):
         called.append(prompt)
         return []
 
@@ -83,9 +83,10 @@ def test_contradiction_supersedes_above_threshold(
 ) -> None:
     engine.ingest(_mk("existing", "Use all-MiniLM for embeddings."))
 
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/claude" if name == "claude" else None)
     monkeypatch.setattr(
-        "poppy.consolidation.call_llm",
-        lambda prompt, *, transcript_path, cfg: [{"id": "existing", "confidence": 0.95, "reason": "replaces"}],
+        "poppy.consolidation.call_host_cli",
+        lambda prompt, *, cli, **kwargs: '[{"id": "existing", "confidence": 0.9, "reason": "replaces"}]',
     )
 
     replacement = _mk("new", "Use bge-large for embeddings instead.")
@@ -105,7 +106,7 @@ def test_uncertain_verdict_biases_to_add(engine: SeedEngine, monkeypatch: pytest
 
     called: list = []
 
-    def low_confidence(prompt, *, transcript_path, cfg):
+    def low_confidence(prompt, *, transcript_path, cfg, **kwargs):
         called.append(prompt)
         return [{"id": "existing", "confidence": 0.5, "reason": "maybe related"}]
 
@@ -177,7 +178,7 @@ def test_ambiguous_candidate_retrieves_once(engine: SeedEngine, monkeypatch: pyt
     # without superseding, so the assertion is purely about the retrieval count.
     monkeypatch.setattr(
         "poppy.consolidation.call_llm",
-        lambda prompt, *, transcript_path, cfg: [{"id": "existing", "confidence": 0.5, "reason": "maybe"}],
+        lambda prompt, *, transcript_path, cfg, **kwargs: [{"id": "existing", "confidence": 0.5, "reason": "maybe"}],
     )
 
     decision = decide(engine, _mk("new", "Use bge-large for embeddings instead."), cfg=PoppyConfig())
@@ -192,9 +193,10 @@ def test_supersede_is_reversible_tombstone_written(
     from poppy.ui.tombstones import TombstoneStore
 
     engine.ingest(_mk("existing", "Use all-MiniLM for embeddings."))
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/claude" if name == "claude" else None)
     monkeypatch.setattr(
-        "poppy.consolidation.call_llm",
-        lambda prompt, *, transcript_path, cfg: [{"id": "existing", "confidence": 0.95, "reason": "replaces"}],
+        "poppy.consolidation.call_host_cli",
+        lambda prompt, *, cli, **kwargs: '[{"id": "existing", "confidence": 0.9, "reason": "replaces"}]',
     )
 
     new = _mk("new", "Use bge-large for embeddings instead.")
