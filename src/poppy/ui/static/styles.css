@@ -521,6 +521,7 @@ body.compact .today-card .row-line { font-size: 12px; padding: 2px 0; }
   padding: 60px 32px;
 }
 .empty[hidden] { display: none; }
+.feed-empty { padding: 40px 0; }
 .empty-mark {
   font-family: var(--serif); font-size: 64px; color: var(--forest-15);
   line-height: 1;

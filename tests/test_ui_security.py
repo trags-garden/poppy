@@ -119,6 +119,16 @@ def test_csp_and_nosniff_headers_present(app_client: TestClient) -> None:
     assert resp.headers.get("x-content-type-options") == "nosniff"
 
 
+def test_csp_disallows_inline_script_and_style(app_client: TestClient) -> None:
+    # Regression net: the UI has no inline <script>/<style>, so neither
+    # directive should ever regain 'unsafe-inline'.
+    resp = app_client.get("/api/facets")
+    csp = resp.headers.get("content-security-policy", "")
+    assert "'unsafe-inline'" not in csp
+    assert "script-src 'self'" in csp
+    assert "style-src 'self'" in csp
+
+
 # --- PP-03: Host allowlist ---
 
 

@@ -34,15 +34,15 @@ STATIC_DIR = Path(__file__).parent / "static"
 # delete/edit API. `poppy ui --allow-remote` widens this to ["*"] deliberately.
 LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]"]
 
-# Content-Security-Policy for the local UI. The app inlines its <script> and
-# <style>, so 'unsafe-inline' is required for now (tightening to nonces/hashes
-# is a follow-up); everything else is locked to same-origin. This turns any
-# stored-content injection that slips past escaping into inert text rather than
-# an executing script, and blocks exfiltration to third-party origins.
+# Content-Security-Policy for the local UI. Scripts and styles both load from
+# external files (no inline <script>/<style>), so both are locked to
+# same-origin with no 'unsafe-inline'. This turns any stored-content injection
+# that slips past escaping into inert text rather than an executing script,
+# and blocks exfiltration to third-party origins.
 CSP_POLICY = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
     "img-src 'self' data:; "
     "connect-src 'self'; "
     "base-uri 'none'; "
