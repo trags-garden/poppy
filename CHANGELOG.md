@@ -41,6 +41,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The OpenAI-compatible backend works on a default install. It called the
+  endpoint through an SDK that Poppy does not depend on, so configuring a model
+  and an API key produced empty consolidation and conflict results behind one
+  generic log line. It now uses the HTTP client Poppy already ships, and names
+  what actually went wrong (connection refused, authentication failed, rate
+  limited, an unreadable response) in the worker log and in `poppy doctor`,
+  never writing the credential to either. A host CLI and this fallback now
+  share one time budget per call rather than taking one each, keeping a capture
+  pass inside its lock. Short conflict checks still leave extraction-backend
+  health unchanged. In `poppy doctor` a single failed call reads as
+  information and only a run of them warns, matching how a host CLI is
+  reported.
+- Hardened that same path against a hostile or broken endpoint. Requests do not
+  follow redirects, so the key is never replayed to a host the endpoint names.
+  A model server on this machine bypasses any proxy set in the environment,
+  which would otherwise be handed the key; a plaintext endpoint anywhere else
+  warns that the key crosses the network in clear text. An answer that quotes
+  the configured key back is discarded whole, rather than edited, so neither
+  the credential nor a rewritten version of your own words can be stored. The
+  response is read under a wall-clock deadline and an 8MB cap, and connecting
+  gets a short cap of its own, so a server that stalls, drips bytes or never
+  stops cannot outlast the capture lock or fill memory. A malformed endpoint
+  URL, and model output with a number where text belongs, are now reported
+  instead of ending the capture pass with a traceback.
 - Conflict detection now reaches a backend and keeps the answer it gets back, so
   `remember --check-conflicts` reports real candidates and auto-supersede
   replaces a contradicted memory instead of quietly storing both. It picks a

@@ -82,7 +82,8 @@ AUTO_SUPERSEDE_THRESHOLD = 0.85
 # as abandoned after capture.lock.LOCK_TTL_S (300s), at which point a second
 # worker steals it from the one still running. One extraction (120s) plus a
 # verdict for every candidate in a default batch of five stays inside that
-# window. It also keeps `remember --check-conflicts` from parking a terminal.
+# window, because a budget covers a whole call_llm rather than each backend it
+# tries. It also keeps `remember --check-conflicts` from parking a terminal.
 CONFLICT_LLM_TIMEOUT_S = 20
 
 # How many same-project / same-type neighbours the prefilter / verdict inspect.

@@ -26,8 +26,12 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
+
+import httpx
 
 from poppy.capture import health
 from poppy.capture.cadence import soft_cap_reached
@@ -230,6 +234,123 @@ def call_host_cli(
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+# A remote call needs a few seconds to be worth starting. Below this the
+# fallback is skipped and said so, rather than started and cut off instantly.
+MIN_FALLBACK_TIMEOUT_S = 2.0
+
+# A chat completion is a few kilobytes. A body past this is a server streaming
+# without end, which would fill memory and outlast the budget.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+# Reaching a working endpoint is quick even over a slow link, so the connect
+# and pool waits are capped well under the budget, leaving it for the answer.
+CONNECT_TIMEOUT_S = 5.0
+
+# Shorter configured keys are a local server's placeholder ("ollama", "none"),
+# not a secret, so seeing one in an answer says nothing and must not throw the
+# answer away.
+MIN_ECHOED_KEY_LEN = 12
+
+
+class OpenAICompatError(Exception):
+    """A fallback failure safe to display in worker logs and backend health."""
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether a hostname names this machine, judged on the literal form alone.
+
+    A fully qualified name may carry a trailing root dot, and the unspecified
+    addresses reach this machine too. Deliberately no DNS: a lookup here would
+    be a network call on the path that decides whether the network is trusted.
+    """
+    host = host.lower().removesuffix(".")
+    if host in ("localhost", "0.0.0.0", "::", "::1") or host.endswith(".localhost"):
+        return True
+    return host.startswith("127.")
+
+
+def _endpoint(base_url: str | None) -> tuple[str, bool]:
+    """The chat-completions URL, and whether it is served from this machine.
+
+    A configured URL is user input, and a malformed one makes ``urlsplit``
+    raise, so this reports a named failure rather than letting a traceback
+    abort a capture pass. A local model server is the normal way to run an
+    OpenAI-compatible endpoint and needs no TLS, so only plain http to another
+    host is worth warning about.
+    """
+    raw = (base_url or DEFAULT_OPENAI_BASE_URL).rstrip("/")
+    try:
+        parsed = urlsplit(raw)
+        host = (parsed.hostname or "").lower()
+    except ValueError as exc:
+        raise OpenAICompatError("configured endpoint is not a valid URL") from exc
+    if parsed.scheme not in ("http", "https") or not host:
+        raise OpenAICompatError("configured endpoint is not an http or https URL")
+    loopback = _is_loopback(host)
+    if parsed.scheme == "http" and not loopback:
+        sys.stderr.write(
+            f"poppy consolidate: warning, http://{host} is not encrypted, so the API key is sent in clear text\n"
+        )
+    return f"{raw}/chat/completions", loopback
+
+
+def _http_client(*, timeout_s: float, trust_env: bool, transport: httpx.BaseTransport | None = None) -> httpx.Client:
+    """The client every fallback request goes through.
+
+    ``transport`` substitutes the socket layer only, so a test exercises the
+    real timeouts, redirect policy and proxy decision made here.
+
+    ``follow_redirects=False`` keeps the Authorization header from being
+    replayed at a location the endpoint picks. ``trust_env`` is off for a
+    server on this machine, where an environment proxy is both wrong and a way
+    to capture the key, and on for a remote endpoint, where a corporate proxy
+    is often how the request gets out at all.
+
+    Connecting and waiting for a pool slot get a short cap of their own, since
+    each httpx timeout is per operation: an endpoint that stalls the connect
+    would otherwise spend the whole budget before a single byte is read.
+    """
+    handshake_s = min(CONNECT_TIMEOUT_S, timeout_s)
+    timeout = httpx.Timeout(timeout_s, connect=handshake_s, pool=handshake_s)
+    kwargs = {"transport": transport} if transport is not None else {}
+    return httpx.Client(timeout=timeout, trust_env=trust_env, follow_redirects=False, **kwargs)
+
+
+def _read_bounded(resp: httpx.Response, *, deadline: float) -> bytes:
+    """Read a streamed body under a wall-clock deadline and a size cap.
+
+    An httpx timeout applies per socket operation, so a server that sends one
+    byte just inside it holds the connection open for as long as it likes. A
+    capture pass runs while a lock another worker will steal on a fixed TTL, so
+    the read needs a real deadline and a bound on how much it will hold.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_bytes():
+        if time.monotonic() >= deadline:
+            raise OpenAICompatError("timed out reading the response")
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise OpenAICompatError(f"response larger than {MAX_RESPONSE_BYTES // (1024 * 1024)}MB")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _reject_if_key_echoed(text: str, api_key: str) -> None:
+    """Discard a whole answer that quotes the configured credential back.
+
+    Response text is parsed into stored memories, which sync, and its opening
+    is logged, so a key in it would persist. Rewriting the key out of the text
+    would be worse than dropping it: a key that happens to read like ordinary
+    words would silently corrupt real memories. An endpoint echoing the
+    credential is not one to trust the rest of the answer from either.
+    """
+    if len(api_key) >= MIN_ECHOED_KEY_LEN and api_key in text:
+        raise OpenAICompatError("response echoed the configured API key and was discarded")
+
+
 def call_openai_compat(
     prompt: str,
     *,
@@ -237,23 +358,60 @@ def call_openai_compat(
     base_url: str | None,
     api_key: str,
     max_tokens: int = 800,
-) -> str | None:
+    timeout_s: float = HOST_CLI_TIMEOUT_S,
+) -> str:
+    """Request a chat completion, raising a specific, credential-free failure."""
+    deadline = time.monotonic() + timeout_s
+    url, loopback = _endpoint(base_url)
     try:
-        from openai import OpenAI
-    except ImportError:
-        return None
+        with _http_client(timeout_s=timeout_s, trust_env=not loopback) as client:
+            with client.stream(
+                "POST",
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": max_tokens,
+                },
+            ) as resp:
+                resp.raise_for_status()
+                body = _read_bounded(resp, deadline=deadline)
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        unmapped = "server error" if status >= 500 else httpx.codes.get_reason_phrase(status) or "unexpected status"
+        reason = {
+            401: "authentication failed",
+            403: "access denied",
+            429: "rate limit exceeded",
+        }.get(status, "redirected, which is not followed" if 300 <= status < 400 else unmapped)
+        raise OpenAICompatError(f"HTTP {status}: {reason}") from exc
+    except httpx.TimeoutException as exc:
+        raise OpenAICompatError(f"timed out after {timeout_s:.0f}s ({type(exc).__name__})") from exc
+    except httpx.RequestError as exc:
+        # URLs, exception messages and response bodies can contain credentials
+        # or prompt text. Report the transport category without persisting them.
+        kind = "connection failed" if isinstance(exc, httpx.NetworkError) else "request failed"
+        raise OpenAICompatError(f"{kind} ({type(exc).__name__})") from exc
+    except (httpx.InvalidURL, ValueError) as exc:
+        raise OpenAICompatError("invalid endpoint URL or request configuration") from exc
 
-    client = OpenAI(base_url=base_url, api_key=api_key)
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=max_tokens,
-        )
-    except Exception:
-        return None
-    return resp.choices[0].message.content
+        # Bytes, so a body that is not UTF-8 lands here as a decode error
+        # rather than anywhere further down.
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise OpenAICompatError("response is not valid JSON") from exc
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise OpenAICompatError("response has no text in choices[0].message.content") from exc
+    if not isinstance(content, str) or not content.strip():
+        raise OpenAICompatError("response has no text in choices[0].message.content")
+    # Before returning, so no caller can parse, store or log the text.
+    _reject_if_key_echoed(content, api_key)
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -294,10 +452,15 @@ def parse_json_array(text: str) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         mtype = item.get("type", "fact")
-        content = (item.get("content") or "").strip()
+        raw_content = item.get("content")
+        # A model can put a number or an object where text belongs. Drop the
+        # item rather than letting one malformed entry end the capture pass.
+        if not isinstance(raw_content, str):
+            continue
+        content = raw_content.strip()
         if not content:
             continue
-        if mtype not in ALLOWED_TYPES:
+        if not isinstance(mtype, str) or mtype not in ALLOWED_TYPES:
             mtype = "fact"
         out.append({"type": mtype, "content": content})
     return out
@@ -323,11 +486,18 @@ def call_llm(
     config / env. Logs a one-line classification of every empty result so
     silent zeros are diagnosable. The default parser extracts durable memories;
     callers requesting another response shape can supply their own parser, and
-    callers with a small prompt can shorten the host CLI's ``host_timeout_s``.
+    callers with a small prompt can shorten ``host_timeout_s`` for both backends.
 
     ``record_health=False`` leaves the extraction-backend health record
     untouched, for a caller whose timeout is too short to judge the backend by.
+
+    ``host_timeout_s`` budgets the whole call, not each backend in turn. A
+    capture pass runs one extraction plus a verdict per candidate while holding
+    the per-session lock, and that budget is sized on one timeout per call; a
+    fallback free to spend a second full timeout after a slow host CLI would
+    let the lock go stale under a worker that is still running.
     """
+    deadline = time.monotonic() + host_timeout_s
     cli = detect_host_cli(transcript_path)
     if cli:
         text = call_host_cli(prompt, cli=cli, timeout_s=host_timeout_s, record_health=record_health)
@@ -361,18 +531,30 @@ def call_llm(
     settings = resolved_consolidate_settings(cfg)
     model, base_url, api_key = settings.model, settings.base_url, settings.api_key
     if model and api_key:
-        text = call_openai_compat(prompt, model=model, base_url=base_url, api_key=api_key)
-        if text:
-            # The configured fallback works, so extraction as a whole is healthy
-            # even if the host CLI just failed.
+        remaining = deadline - time.monotonic()
+        if remaining < MIN_FALLBACK_TIMEOUT_S:
+            sys.stderr.write(
+                f"poppy consolidate: openai-compat skipped, {cli or 'the host cli'} used the {host_timeout_s}s budget\n"
+            )
+            return []
+        try:
+            text = call_openai_compat(prompt, model=model, base_url=base_url, api_key=api_key, timeout_s=remaining)
+        except OpenAICompatError as exc:
             if record_health:
-                health.record_success()
-            parsed = parser(text)
-            if not parsed:
-                snippet = text.strip()[:200].replace("\n", " ")
-                sys.stderr.write(f"poppy consolidate: openai-compat output yielded 0 items (first 200: {snippet!r})\n")
-            return parsed
-        sys.stderr.write("poppy consolidate: openai-compat returned no text\n")
+                health.record_failure("openai-compat", str(exc))
+            sys.stderr.write(f"poppy consolidate: openai-compat {exc}\n")
+            return []
+        parsed = parser(text)
+        arr = _find_json_array(text)
+        if (parsed or (arr is not None and not arr)) and record_health:
+            # An answer we could parse is the only evidence the fallback really
+            # works, so extraction as a whole is healthy even if the host CLI
+            # just failed. Text we cannot parse leaves the record standing.
+            health.record_success()
+        if not parsed:
+            snippet = text.strip()[:200].replace("\n", " ")
+            sys.stderr.write(f"poppy consolidate: openai-compat output yielded 0 items (first 200: {snippet!r})\n")
+        return parsed
     elif not cli:
         sys.stderr.write("poppy consolidate: no host cli detected and no openai-compat fallback configured\n")
     return []
