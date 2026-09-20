@@ -25,7 +25,8 @@ poppy setup claude-code   # or: claude-desktop, cursor, vscode, windsurf, codex,
 - **`recall`** pulls the few memories most relevant to a query.
 - **MCP server**: agents call `remember`/`recall`/`forget`/`consolidate`
   directly. Works with Claude Code, Claude Desktop, Cursor, VS Code, Windsurf,
-  Codex, Gemini CLI, Copilot CLI, Pi, Goose, and Hermes Agent.
+  Codex, Gemini CLI, Copilot CLI, Pi, and Goose. Hermes Agent gets a memory
+  provider plugin instead.
 - **Hooks**: Claude Code, Cursor, and Codex hooks surface relevant memories and
   capture new ones. Claude Code and Cursor use end-of-session and compaction
   backstops; Codex uses cadence-only capture.
