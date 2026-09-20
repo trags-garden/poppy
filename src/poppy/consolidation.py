@@ -244,10 +244,14 @@ MIN_FALLBACK_TIMEOUT_S = 2.0
 # without end, which would fill memory and outlast the budget.
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
+# Reaching a working endpoint is quick even over a slow link, so the connect
+# and pool waits are capped well under the budget, leaving it for the answer.
+CONNECT_TIMEOUT_S = 5.0
+
 # Shorter configured keys are a local server's placeholder ("ollama", "none"),
-# not a secret, and blanking such a word out of model text would corrupt real
-# memories that happen to contain it.
-MIN_REDACTABLE_KEY_LEN = 12
+# not a secret, so seeing one in an answer says nothing and must not throw the
+# answer away.
+MIN_ECHOED_KEY_LEN = 12
 
 
 class OpenAICompatError(Exception):
@@ -255,9 +259,16 @@ class OpenAICompatError(Exception):
 
 
 def _is_loopback(host: str) -> bool:
-    """Whether a hostname names this machine."""
-    host = host.lower()
-    return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost") or host.startswith("127.")
+    """Whether a hostname names this machine, judged on the literal form alone.
+
+    A fully qualified name may carry a trailing root dot, and the unspecified
+    addresses reach this machine too. Deliberately no DNS: a lookup here would
+    be a network call on the path that decides whether the network is trusted.
+    """
+    host = host.lower().removesuffix(".")
+    if host in ("localhost", "0.0.0.0", "::", "::1") or host.endswith(".localhost"):
+        return True
+    return host.startswith("127.")
 
 
 def _endpoint(base_url: str | None) -> tuple[str, bool]:
@@ -285,16 +296,26 @@ def _endpoint(base_url: str | None) -> tuple[str, bool]:
     return f"{raw}/chat/completions", loopback
 
 
-def _http_client(*, timeout_s: float, trust_env: bool) -> httpx.Client:
+def _http_client(*, timeout_s: float, trust_env: bool, transport: httpx.BaseTransport | None = None) -> httpx.Client:
     """The client every fallback request goes through.
+
+    ``transport`` substitutes the socket layer only, so a test exercises the
+    real timeouts, redirect policy and proxy decision made here.
 
     ``follow_redirects=False`` keeps the Authorization header from being
     replayed at a location the endpoint picks. ``trust_env`` is off for a
     server on this machine, where an environment proxy is both wrong and a way
     to capture the key, and on for a remote endpoint, where a corporate proxy
     is often how the request gets out at all.
+
+    Connecting and waiting for a pool slot get a short cap of their own, since
+    each httpx timeout is per operation: an endpoint that stalls the connect
+    would otherwise spend the whole budget before a single byte is read.
     """
-    return httpx.Client(timeout=timeout_s, trust_env=trust_env, follow_redirects=False)
+    handshake_s = min(CONNECT_TIMEOUT_S, timeout_s)
+    timeout = httpx.Timeout(timeout_s, connect=handshake_s, pool=handshake_s)
+    kwargs = {"transport": transport} if transport is not None else {}
+    return httpx.Client(timeout=timeout, trust_env=trust_env, follow_redirects=False, **kwargs)
 
 
 def _read_bounded(resp: httpx.Response, *, deadline: float) -> bytes:
@@ -317,17 +338,17 @@ def _read_bounded(resp: httpx.Response, *, deadline: float) -> bytes:
     return b"".join(chunks)
 
 
-def _redact_key(text: str, api_key: str) -> str:
-    """Keep a credential the endpoint echoed back out of memories and logs.
+def _reject_if_key_echoed(text: str, api_key: str) -> None:
+    """Discard a whole answer that quotes the configured credential back.
 
-    Response text is parsed into stored memories and its opening is logged, so
-    an endpoint that quotes the key back would otherwise persist it. Matching
-    the configured value catches keys of any shape, which pattern-based
-    redaction cannot.
+    Response text is parsed into stored memories, which sync, and its opening
+    is logged, so a key in it would persist. Rewriting the key out of the text
+    would be worse than dropping it: a key that happens to read like ordinary
+    words would silently corrupt real memories. An endpoint echoing the
+    credential is not one to trust the rest of the answer from either.
     """
-    if len(api_key) >= MIN_REDACTABLE_KEY_LEN and api_key in text:
-        return text.replace(api_key, "[REDACTED]")
-    return text
+    if len(api_key) >= MIN_ECHOED_KEY_LEN and api_key in text:
+        raise OpenAICompatError("response echoed the configured API key and was discarded")
 
 
 def call_openai_compat(
@@ -388,7 +409,9 @@ def call_openai_compat(
         raise OpenAICompatError("response has no text in choices[0].message.content") from exc
     if not isinstance(content, str) or not content.strip():
         raise OpenAICompatError("response has no text in choices[0].message.content")
-    return _redact_key(content, api_key)
+    # Before returning, so no caller can parse, store or log the text.
+    _reject_if_key_echoed(content, api_key)
+    return content
 
 
 # ---------------------------------------------------------------------------

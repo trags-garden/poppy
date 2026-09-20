@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import poppy.consolidation
 from poppy.capture import health
 from poppy.config import PoppyConfig, resolved_consolidate_settings
 from poppy.consolidation import (
@@ -49,15 +50,14 @@ def mock_endpoint(monkeypatch, respond):
     """
     seen = {}
 
+    real = poppy.consolidation._http_client
+
     def factory(*, timeout_s, trust_env):
         seen["timeout_s"] = timeout_s
         seen["trust_env"] = trust_env
-        return httpx.Client(
-            transport=httpx.MockTransport(respond),
-            timeout=timeout_s,
-            trust_env=trust_env,
-            follow_redirects=False,
-        )
+        # The real builder, so timeouts, redirect policy and the proxy
+        # decision are the production ones; only the socket is replaced.
+        return real(timeout_s=timeout_s, trust_env=trust_env, transport=httpx.MockTransport(respond))
 
     monkeypatch.setattr("poppy.consolidation._http_client", factory)
     return seen
@@ -97,7 +97,11 @@ def test_openai_compat_uses_httpx_without_sdk(monkeypatch, remote_backend, base_
         "temperature": 0.2,
         "max_tokens": 42,
     }
-    assert set(request.extensions["timeout"].values()) == {120}
+    timeout = request.extensions["timeout"]
+    assert timeout["read"] == 120 and timeout["write"] == 120
+    # Reaching the endpoint is capped short so a stalled connect cannot spend
+    # the budget before a byte is read.
+    assert timeout["connect"] == 5 and timeout["pool"] == 5
 
 
 def test_openai_compat_falls_back_to_the_openai_base_url_env(monkeypatch):
@@ -134,8 +138,17 @@ def test_openai_compat_does_not_follow_a_redirect(monkeypatch, remote_backend):
         ("http://127.0.0.1:1234/v1", False),
         ("http://127.7.7.7:1234/v1", False),
         ("http://ollama.localhost/v1", False),
+        # A fully qualified name may carry the root dot, and the unspecified
+        # addresses reach this machine too.
+        ("http://localhost.:11434/v1", False),
+        ("http://LocalHost./v1", False),
+        ("http://127.0.0.1./v1", False),
+        ("http://0.0.0.0:11434/v1", False),
+        ("http://[::]:11434/v1", False),
+        ("http://[::1]:11434/v1", False),
         ("http://192.168.1.9:11434/v1", True),
         ("http://llm.test/v1", True),
+        ("http://localhost.evil.test/v1", True),
     ],
 )
 def test_openai_compat_treats_a_local_model_server_differently(monkeypatch, capsys, endpoint, remote):
@@ -163,8 +176,12 @@ def test_the_real_client_refuses_redirects_and_is_built_per_endpoint():
         assert client.follow_redirects is False
         assert client.trust_env is False
         assert client.timeout.read == 12
+        assert client.timeout.connect == 5 and client.timeout.pool == 5
     with _http_client(timeout_s=12, trust_env=True) as client:
         assert client.trust_env is True
+    # A budget shorter than the cap must not be extended by it.
+    with _http_client(timeout_s=1.5, trust_env=False) as client:
+        assert client.timeout.connect == 1.5
 
 
 @pytest.mark.parametrize(
@@ -225,33 +242,61 @@ def test_an_unbounded_response_body_stops_at_the_size_cap(monkeypatch):
     assert str(excinfo.value) == "response larger than 8MB"
 
 
+@pytest.mark.parametrize("record_health", [True, False])
 @pytest.mark.parametrize("api_key", ["sk-live-5f3a9c1e77b24d0e", "an-arbitrary-self-hosted-key"])
-def test_a_key_echoed_back_by_the_endpoint_is_redacted(monkeypatch, capsys, api_key):
-    """A compromised or chatty endpoint can put the key in the text we store.
+def test_a_key_echoed_back_by_the_endpoint_discards_the_answer(monkeypatch, capsys, api_key, record_health):
+    """An endpoint that quotes the credential back is not one to keep an answer from.
 
     Response text becomes memories, which sync, and its opening is logged, so
-    the credential has to be stripped before either happens. Pattern-based
-    redaction only knows common key shapes; the configured value is exact.
+    the whole answer is dropped rather than edited: a key that reads like
+    ordinary words would otherwise be rewritten out of genuine memories.
     """
+    detail = "response echoed the configured API key and was discarded"
+    health.record_failure("claude", "previous failure")
+    before = health.load()
 
     def respond(request):
         content = json.dumps([{"type": "fact", "content": f"The configured key is {api_key} and it works."}])
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     mock_endpoint(monkeypatch, respond)
-    text = call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key=api_key)
-    assert api_key not in text
-    assert "[REDACTED]" in text
+    with pytest.raises(OpenAICompatError) as excinfo:
+        call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key=api_key)
+    assert str(excinfo.value) == detail
+    assert api_key not in str(excinfo.value)
 
     cfg = PoppyConfig(consolidate_model="m", consolidate_api_key=api_key, consolidate_base_url="https://llm.test/v1")
     monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: None)
-    (memory,) = call_llm("extract", transcript_path=None, cfg=cfg)
-    assert api_key not in memory["content"], "an echoed key must not reach a stored memory"
-    assert api_key not in capsys.readouterr().err
+    assert call_llm("extract", transcript_path=None, cfg=cfg, record_health=record_health) == []
+    stderr = capsys.readouterr().err
+    assert f"openai-compat {detail}" in stderr
+    assert api_key not in stderr, "no snippet of the echoing response may be logged"
+    if record_health:
+        recorded = health.load().clis["openai-compat"].last_error
+        assert recorded == detail and api_key not in recorded
+    else:
+        assert health.load() == before
 
 
-def test_a_short_placeholder_key_is_left_alone(monkeypatch):
-    """Local servers take a dummy key, and blanking that word would corrupt memories."""
+def test_an_ordinary_word_configured_as_a_key_does_not_corrupt_memories(monkeypatch):
+    """Rewriting the key out of the text would silently damage a real memory.
+
+    A key long enough to be treated as a secret can still read like ordinary
+    prose, so the answer is discarded whole rather than edited in place.
+    """
+    api_key = "deployment-notes"
+
+    def respond(request):
+        content = json.dumps([{"type": "decision", "content": f"Keep the {api_key} in the runbook."}])
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    mock_endpoint(monkeypatch, respond)
+    with pytest.raises(OpenAICompatError):
+        call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key=api_key)
+
+
+def test_a_short_placeholder_key_never_discards_an_answer(monkeypatch):
+    """Local servers take a dummy key, and seeing that word in an answer means nothing."""
 
     def respond(request):
         content = json.dumps([{"type": "fact", "content": "We run ollama for local models."}])
@@ -260,7 +305,6 @@ def test_a_short_placeholder_key_is_left_alone(monkeypatch):
     mock_endpoint(monkeypatch, respond)
     text = call_openai_compat("extract", model="m", base_url="http://localhost:11434/v1", api_key="ollama")
     assert "We run ollama for local models." in text
-    assert "[REDACTED]" not in text
 
 
 def test_parse_json_array_drops_items_whose_fields_are_not_text():

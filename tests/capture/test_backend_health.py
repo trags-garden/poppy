@@ -25,6 +25,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
+import poppy.consolidation
 from poppy.capture import health
 from poppy.capture.banner import is_user_facing_status, render_banner
 from poppy.capture.policy import CaptureStatus, evaluate, is_capture_enabled
@@ -469,8 +470,10 @@ def test_doctor_reports_remote_failure(tmp_path, monkeypatch, capsys, forced, fa
             return httpx.Response(401)
         raise failure("connection refused", request=request)
 
+    real = poppy.consolidation._http_client
+
     def client(*, timeout_s, trust_env):
-        return httpx.Client(transport=httpx.MockTransport(respond), timeout=timeout_s, follow_redirects=False)
+        return real(timeout_s=timeout_s, trust_env=trust_env, transport=httpx.MockTransport(respond))
 
     monkeypatch.setattr("poppy.consolidation._http_client", client)
     for _ in range(attempts):

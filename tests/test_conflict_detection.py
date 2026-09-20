@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import poppy.consolidation
 from poppy.capture.reconciler import (
     AUTO_SUPERSEDE_THRESHOLD,
     CONFLICT_LLM_TIMEOUT_S,
@@ -140,8 +141,10 @@ def test_detect_conflicts_parses_backend_text(
         calls.append("remote")
         return httpx.Response(200, json={"choices": [{"message": {"content": raw}}]})
 
+    real = poppy.consolidation._http_client
+
     def client(*, timeout_s, trust_env):
-        return httpx.Client(transport=httpx.MockTransport(remote), timeout=timeout_s, follow_redirects=False)
+        return real(timeout_s=timeout_s, trust_env=trust_env, transport=httpx.MockTransport(remote))
 
     monkeypatch.setattr("poppy.consolidation.call_host_cli", host)
     monkeypatch.setattr("poppy.consolidation._http_client", client)
