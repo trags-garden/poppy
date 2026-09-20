@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Anonymous usage telemetry is off until you turn it on. Poppy asks once, on
+  the first run in a terminal, and the default is no; `poppy telemetry on|off`
+  answers it too. Nothing is sent, and the daily PyPI update check does not
+  run either, while the question is unanswered, so a fresh install makes no
+  network request until you say yes. The question is only asked when someone
+  can answer it: hooks, the MCP server, daemon commands, detached workers,
+  `--json` output, `--help`, any piped or redirected run, and any terminal
+  driven by a coding agent or a CI runner are never interrupted by it.
+  `poppy telemetry status` reports "not answered yet" separately from a choice
+  you made.
 - Removed experimental local ONNX model-file overrides. Bloom always uses its
   pinned models, including cached models when offline.
 - The local web UI now runs the same design system as the trags.ai dashboard
@@ -50,6 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed JSON; non-UTF-8 configs are refused without changes.
 - `poppy telemetry off` now also disables the daily PyPI update check in
   `poppy doctor`, honoring the persistent telemetry opt-out.
+- A hand-edited `"telemetry_enabled": "false"` or `"off"` in `config.json` no
+  longer reads as an opt-in. Only a real JSON boolean counts as an answer now;
+  anything else leaves the question unanswered, which is off.
 - Trags API keys stay in config.json as a fallback unless an OS keychain write
   can be read back in the same session, preventing background jobs from losing
   access to their configured key. `poppy doctor` now reports the key source, and
