@@ -21,9 +21,11 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
+import poppy.consolidation
 from poppy.capture import health
 from poppy.capture.banner import is_user_facing_status, render_banner
 from poppy.capture.policy import CaptureStatus, evaluate, is_capture_enabled
@@ -440,6 +442,55 @@ def _doctor(poppy_dir: Path, tmp_path: Path):  # type: ignore[no-untyped-def]
         ["doctor"],
         env={"POPPY_DIR": str(poppy_dir), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude-config")},
     )
+
+
+@pytest.mark.parametrize("forced", [False, True])
+@pytest.mark.parametrize("failure", [401, httpx.ConnectError])
+@pytest.mark.parametrize("attempts", [1, health.FAILURE_THRESHOLD])
+def test_doctor_reports_remote_failure(tmp_path, monkeypatch, capsys, forced, failure, attempts):
+    poppy_dir = _consented_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/poppy" if name == "poppy" else None)
+    if forced:
+        monkeypatch.setenv("POPPY_CONSOLIDATE", "1")
+    cfg = PoppyConfig(consolidate_model="test-model", consolidate_api_key="test-key")
+    (poppy_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "engine": "seed",
+                "consent": "granted",
+                "consolidate_model": cfg.consolidate_model,
+                "consolidate_api_key": cfg.consolidate_api_key,
+            }
+        )
+    )
+    detail = "HTTP 401: authentication failed" if failure == 401 else "connection failed (ConnectError)"
+
+    def respond(request):
+        if failure == 401:
+            return httpx.Response(401)
+        raise failure("connection refused", request=request)
+
+    real = poppy.consolidation._http_client
+
+    def client(*, timeout_s, trust_env):
+        return real(timeout_s=timeout_s, trust_env=trust_env, transport=httpx.MockTransport(respond))
+
+    monkeypatch.setattr("poppy.consolidation._http_client", client)
+    for _ in range(attempts):
+        assert call_llm("extract", transcript_path=None, cfg=cfg) == []
+    assert detail in capsys.readouterr().err
+    result = _doctor(poppy_dir, tmp_path)
+    assert result.exit_code == 0, result.output
+    # A single dropped connection is information, not a warning; only a run of
+    # them means the backend is really broken, as for a host CLI.
+    broken = attempts >= health.FAILURE_THRESHOLD
+    assert ("[!] openai-compat: WARN" in result.output) is broken
+    assert ("[·] openai-compat: INFO" in result.output) is not broken
+    assert detail in result.output, "doctor must name the failure either way"
+    assert f"({attempts} in a row)" in result.output
+    assert "`openai-compat` runs and is logged in" not in result.output
+    health.record_success()
+    assert "openai-compat" not in _doctor(poppy_dir, tmp_path).output
 
 
 def test_doctor_redacts_the_stderr_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

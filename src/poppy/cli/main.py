@@ -3567,7 +3567,9 @@ def doctor():
         # and the last stderr tail come from the recorded backend health.
         CaptureStatus.WARN_BACKEND_BROKEN: (
             "WARN",
-            f"check that `{backend_health.cli or 'your host CLI'}` runs and is logged in",
+            "check the configured endpoint, API key and model"
+            if backend_health.cli == "openai-compat"
+            else f"check that `{backend_health.cli or 'your host CLI'}` runs and is logged in",
         ),
         CaptureStatus.DISABLED_NO_BACKEND: (
             "WARN",
@@ -3589,6 +3591,28 @@ def doctor():
             f"{safe_tail} ({backend_health.consecutive_failures} in a row)."
         )
     line("auto-capture", status_kind, status_detail, hint=status_hint)
+
+    remote_health = backend_health.clis.get("openai-compat")
+    if remote_health is not None:
+        # Surface a configured fallback's failure even without a host CLI or
+        # before repeated failures change the overall capture status. One
+        # failure can be a dropped connection, so it reads as information and
+        # only a run of them warns, matching how a host CLI is reported.
+        from poppy.capture.redaction import load_custom_redaction, redact_secrets
+
+        custom_patterns, _redaction_issues = load_custom_redaction(capture_cfg)
+        failures = remote_health.consecutive_failures
+        broken = failures >= _capture_health.FAILURE_THRESHOLD
+        line(
+            "openai-compat",
+            "WARN" if broken else "INFO",
+            f"{redact_secrets(remote_health.last_error, custom_patterns)} ({failures} in a row)",
+            hint=(
+                "check the configured endpoint, API key and model; retry extraction after fixing the error"
+                if broken
+                else ""
+            ),
+        )
 
     # Last-capture freshness: proof the loop has actually run. Reads the
     # local capture journal; informational, never a failure. Includes the total

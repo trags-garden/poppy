@@ -1,6 +1,7 @@
 """HTTP client for the Trags memories KV endpoints.
 
-Wraps the 5 endpoints exposed by trags-apps:
+Wraps the 5 endpoints the Trags sync API exposes (implemented server-side, in
+a separate private repository):
   POST   /api/memories
   GET    /api/memories?updated_since=&limit=&cursor=
   GET    /api/memories/{id}

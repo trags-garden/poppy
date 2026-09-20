@@ -1,15 +1,24 @@
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from poppy.config import PoppyConfig
+import poppy.consolidation
+from poppy.capture import health
+from poppy.config import PoppyConfig, resolved_consolidate_settings
 from poppy.consolidation import (
+    MAX_RESPONSE_BYTES,
+    OpenAICompatError,
     _compact_event_id,
+    _http_client,
     call_host_cli,
     call_llm,
+    call_openai_compat,
     consolidate_compact_event,
     consolidate_stop_event,
     detect_host_cli,
@@ -22,6 +31,413 @@ from poppy.consolidation import (
 from poppy.models import Filters
 
 CURSOR_FIXTURE = Path(__file__).parent / "fixtures" / "cursor" / "run-shell.jsonl"
+
+
+@pytest.fixture
+def remote_backend(monkeypatch):
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: None)
+    monkeypatch.setitem(sys.modules, "openai", None)
+    for name in ("POPPY_CONSOLIDATE_MODEL", "POPPY_CONSOLIDATE_BASE_URL", "POPPY_CONSOLIDATE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    return PoppyConfig(consolidate_model="test-model", consolidate_api_key="test-key")
+
+
+def mock_endpoint(monkeypatch, respond):
+    """Serve the fallback from a mock transport, keeping the real client stack.
+
+    Everything above the socket stays production code: the same client, the
+    same streaming read, the same deadline and size cap.
+    """
+    seen = {}
+
+    real = poppy.consolidation._http_client
+
+    def factory(*, timeout_s, trust_env):
+        seen["timeout_s"] = timeout_s
+        seen["trust_env"] = trust_env
+        # The real builder, so timeouts, redirect policy and the proxy
+        # decision are the production ones; only the socket is replaced.
+        return real(timeout_s=timeout_s, trust_env=trust_env, transport=httpx.MockTransport(respond))
+
+    monkeypatch.setattr("poppy.consolidation._http_client", factory)
+    return seen
+
+
+class DripStream(httpx.SyncByteStream):
+    """A body that arrives in chunks, each well inside the per-read timeout."""
+
+    def __init__(self, chunk: bytes, count: int, pause_s: float = 0.0):
+        self.chunk, self.count, self.pause_s = chunk, count, pause_s
+
+    def __iter__(self):
+        for _ in range(self.count):
+            if self.pause_s:
+                time.sleep(self.pause_s)
+            yield self.chunk
+
+
+@pytest.mark.parametrize("base_url", [None, "https://llm.test/v1", "https://llm.test/prefix/v1/"])
+def test_openai_compat_uses_httpx_without_sdk(monkeypatch, remote_backend, base_url):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    mock_endpoint(monkeypatch, respond)
+    assert (
+        call_openai_compat("extract", model="test-model", base_url=base_url, api_key="test-key", max_tokens=42) == "[]"
+    )
+    (request,) = requests
+    assert str(request.url) == (base_url or "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
+    assert request.headers["Authorization"] == "Bearer test-key"
+    assert json.loads(request.content) == {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "extract"}],
+        "temperature": 0.2,
+        "max_tokens": 42,
+    }
+    timeout = request.extensions["timeout"]
+    assert timeout["read"] == 120 and timeout["write"] == 120
+    # Reaching the endpoint is capped short so a stalled connect cannot spend
+    # the budget before a byte is read.
+    assert timeout["connect"] == 5 and timeout["pool"] == 5
+
+
+def test_openai_compat_falls_back_to_the_openai_base_url_env(monkeypatch):
+    """A shell already pointed at a compatible server keeps working unconfigured."""
+    for name in ("POPPY_CONSOLIDATE_BASE_URL", "POPPY_CONSOLIDATE_MODEL", "POPPY_CONSOLIDATE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.test/v1")
+    assert resolved_consolidate_settings(PoppyConfig()).base_url == "https://env.test/v1"
+    explicit = PoppyConfig(consolidate_base_url="https://config.test/v1")
+    assert resolved_consolidate_settings(explicit).base_url == "https://config.test/v1"
+
+
+def test_openai_compat_does_not_follow_a_redirect(monkeypatch, remote_backend):
+    """A redirect can point at any host, and the Authorization header must not go there."""
+    seen = []
+
+    def respond(request):
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"location": "https://attacker.test/v1/chat/completions"})
+
+    mock_endpoint(monkeypatch, respond)
+    with pytest.raises(OpenAICompatError) as excinfo:
+        call_openai_compat("extract", model="test-model", base_url="https://llm.test/v1", api_key="test-key")
+    assert seen == ["https://llm.test/v1/chat/completions"]
+    assert "HTTP 302" in str(excinfo.value)
+    assert "attacker.test" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "remote"),
+    [
+        ("https://llm.test/v1", True),
+        ("http://localhost:11434/v1", False),
+        ("http://127.0.0.1:1234/v1", False),
+        ("http://127.7.7.7:1234/v1", False),
+        ("http://ollama.localhost/v1", False),
+        # A fully qualified name may carry the root dot, and the unspecified
+        # addresses reach this machine too.
+        ("http://localhost.:11434/v1", False),
+        ("http://LocalHost./v1", False),
+        ("http://127.0.0.1./v1", False),
+        ("http://0.0.0.0:11434/v1", False),
+        ("http://[::]:11434/v1", False),
+        ("http://[::1]:11434/v1", False),
+        ("http://192.168.1.9:11434/v1", True),
+        ("http://llm.test/v1", True),
+        ("http://localhost.evil.test/v1", True),
+    ],
+)
+def test_openai_compat_treats_a_local_model_server_differently(monkeypatch, capsys, endpoint, remote):
+    """A model server on this machine needs no TLS, and must never go via a proxy.
+
+    An environment proxy is how a remote request often gets out of a corporate
+    network, but for a server on this machine it is both wrong and a way for
+    whoever set the variable to collect the key.
+    """
+
+    def respond(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    seen = mock_endpoint(monkeypatch, respond)
+    call_openai_compat("extract", model="test-model", base_url=endpoint, api_key="test-key")
+    assert seen["trust_env"] is remote
+    stderr = capsys.readouterr().err
+    assert ("sent in clear text" in stderr) is (remote and endpoint.startswith("http://"))
+    assert "test-key" not in stderr
+
+
+def test_the_real_client_refuses_redirects_and_is_built_per_endpoint():
+    """The mock transport replaces the socket, so pin the real client's own defaults."""
+    with _http_client(timeout_s=12, trust_env=False) as client:
+        assert client.follow_redirects is False
+        assert client.trust_env is False
+        assert client.timeout.read == 12
+        assert client.timeout.connect == 5 and client.timeout.pool == 5
+    with _http_client(timeout_s=12, trust_env=True) as client:
+        assert client.trust_env is True
+    # A budget shorter than the cap must not be extended by it.
+    with _http_client(timeout_s=1.5, trust_env=False) as client:
+        assert client.timeout.connect == 1.5
+
+
+@pytest.mark.parametrize(
+    ("base_url", "detail"),
+    [
+        ("http://[invalid/v1", "configured endpoint is not a valid URL"),
+        ("ftp://llm.test/v1", "configured endpoint is not an http or https URL"),
+        ("not-a-url", "configured endpoint is not an http or https URL"),
+        ("https:///v1", "configured endpoint is not an http or https URL"),
+    ],
+)
+def test_a_malformed_endpoint_is_a_named_failure_not_a_traceback(monkeypatch, capsys, remote_backend, base_url, detail):
+    """A configured URL is user input, and a capture pass must survive a bad one."""
+    monkeypatch.setattr("poppy.consolidation._http_client", _unreachable_client)
+    with pytest.raises(OpenAICompatError) as excinfo:
+        call_openai_compat("extract", model="test-model", base_url=base_url, api_key="test-key")
+    assert str(excinfo.value) == detail
+    cfg = PoppyConfig(consolidate_model="m", consolidate_api_key="test-key", consolidate_base_url=base_url)
+    assert call_llm("extract", transcript_path=None, cfg=cfg) == []
+    assert f"openai-compat {detail}" in capsys.readouterr().err
+
+
+def _unreachable_client(*, timeout_s, trust_env):  # pragma: no cover - no request should be built
+    raise AssertionError("a malformed endpoint must fail before any request is made")
+
+
+def test_a_slow_drip_response_stops_at_the_deadline(monkeypatch):
+    """An httpx timeout is per read, so a drip inside it would never trip it.
+
+    Each chunk arrives comfortably within the per-read timeout, so only a real
+    wall-clock deadline ends this. Without one the capture lock outlives its
+    TTL and another worker steals it from a running pass.
+    """
+
+    def respond(request):
+        return httpx.Response(200, stream=DripStream(b"x" * 8, count=10_000, pause_s=0.002))
+
+    mock_endpoint(monkeypatch, respond)
+    started = time.monotonic()
+    with pytest.raises(OpenAICompatError) as excinfo:
+        call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=0.25)
+    elapsed = time.monotonic() - started
+    assert str(excinfo.value) == "timed out reading the response"
+    assert elapsed < 5, f"the deadline did not bound the read ({elapsed:.1f}s)"
+
+
+def test_an_unbounded_response_body_stops_at_the_size_cap(monkeypatch):
+    """A server streaming without end must not be buffered into memory."""
+    chunk = b"y" * (1024 * 1024)
+    count = (MAX_RESPONSE_BYTES // len(chunk)) + 4
+
+    def respond(request):
+        return httpx.Response(200, stream=DripStream(chunk, count=count))
+
+    mock_endpoint(monkeypatch, respond)
+    with pytest.raises(OpenAICompatError) as excinfo:
+        call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=30)
+    assert str(excinfo.value) == "response larger than 8MB"
+
+
+@pytest.mark.parametrize("record_health", [True, False])
+@pytest.mark.parametrize("api_key", ["sk-live-5f3a9c1e77b24d0e", "an-arbitrary-self-hosted-key"])
+def test_a_key_echoed_back_by_the_endpoint_discards_the_answer(monkeypatch, capsys, api_key, record_health):
+    """An endpoint that quotes the credential back is not one to keep an answer from.
+
+    Response text becomes memories, which sync, and its opening is logged, so
+    the whole answer is dropped rather than edited: a key that reads like
+    ordinary words would otherwise be rewritten out of genuine memories.
+    """
+    detail = "response echoed the configured API key and was discarded"
+    health.record_failure("claude", "previous failure")
+    before = health.load()
+
+    def respond(request):
+        content = json.dumps([{"type": "fact", "content": f"The configured key is {api_key} and it works."}])
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    mock_endpoint(monkeypatch, respond)
+    with pytest.raises(OpenAICompatError) as excinfo:
+        call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key=api_key)
+    assert str(excinfo.value) == detail
+    assert api_key not in str(excinfo.value)
+
+    cfg = PoppyConfig(consolidate_model="m", consolidate_api_key=api_key, consolidate_base_url="https://llm.test/v1")
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: None)
+    assert call_llm("extract", transcript_path=None, cfg=cfg, record_health=record_health) == []
+    stderr = capsys.readouterr().err
+    assert f"openai-compat {detail}" in stderr
+    assert api_key not in stderr, "no snippet of the echoing response may be logged"
+    if record_health:
+        recorded = health.load().clis["openai-compat"].last_error
+        assert recorded == detail and api_key not in recorded
+    else:
+        assert health.load() == before
+
+
+def test_an_ordinary_word_configured_as_a_key_does_not_corrupt_memories(monkeypatch):
+    """Rewriting the key out of the text would silently damage a real memory.
+
+    A key long enough to be treated as a secret can still read like ordinary
+    prose, so the answer is discarded whole rather than edited in place.
+    """
+    api_key = "deployment-notes"
+
+    def respond(request):
+        content = json.dumps([{"type": "decision", "content": f"Keep the {api_key} in the runbook."}])
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    mock_endpoint(monkeypatch, respond)
+    with pytest.raises(OpenAICompatError):
+        call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key=api_key)
+
+
+def test_a_short_placeholder_key_never_discards_an_answer(monkeypatch):
+    """Local servers take a dummy key, and seeing that word in an answer means nothing."""
+
+    def respond(request):
+        content = json.dumps([{"type": "fact", "content": "We run ollama for local models."}])
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    mock_endpoint(monkeypatch, respond)
+    text = call_openai_compat("extract", model="m", base_url="http://localhost:11434/v1", api_key="ollama")
+    assert "We run ollama for local models." in text
+
+
+def test_parse_json_array_drops_items_whose_fields_are_not_text():
+    """One malformed item from the model must not end the whole capture pass."""
+    raw = json.dumps(
+        [
+            {"type": "fact", "content": 123},
+            {"type": "fact", "content": {"nested": "object"}},
+            {"type": "fact", "content": None},
+            {"type": 7, "content": "A numeric type falls back to fact."},
+            {"type": "decision", "content": "We keep the good item."},
+        ]
+    )
+    assert parse_json_array(raw) == [
+        {"type": "fact", "content": "A numeric type falls back to fact."},
+        {"type": "decision", "content": "We keep the good item."},
+    ]
+
+
+@pytest.mark.parametrize("record_health", [True, False])
+@pytest.mark.parametrize("items", [[], [{"type": "fact", "content": "Use pytest."}]])
+def test_openai_compat_success_health_and_timeout(monkeypatch, remote_backend, record_health, items):
+    health.record_failure("openai-compat", "HTTP 401: authentication failed")
+    before = health.load()
+
+    def respond(request):
+        # The budget covers the whole call, so the fallback gets what is left of it.
+        assert all(0 < value <= 20 for value in request.extensions["timeout"].values())
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(items)}}]})
+
+    mock_endpoint(monkeypatch, respond)
+    assert (
+        call_llm("extract", transcript_path=None, cfg=remote_backend, host_timeout_s=20, record_health=record_health)
+        == items
+    )
+    assert health.load() == (health.BackendHealth() if record_health else before)
+
+
+@pytest.mark.parametrize("record_health", [True, False])
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        (401, "HTTP 401: authentication failed"),
+        (403, "HTTP 403: access denied"),
+        (429, "HTTP 429: rate limit exceeded"),
+        (500, "HTTP 500: server error"),
+        (httpx.ConnectError, "connection failed (ConnectError)"),
+        (httpx.ReadTimeout, "timed out after 20s (ReadTimeout)"),
+        ("invalid-json", "response is not valid JSON"),
+        ("missing-content", "response has no text in choices[0].message.content"),
+        ("null-content", "response has no text in choices[0].message.content"),
+        ("blank-content", "response has no text in choices[0].message.content"),
+    ],
+)
+def test_openai_compat_failure_is_specific(monkeypatch, capsys, remote_backend, record_health, failure, detail):
+    health.record_failure("claude", "previous failure")
+    before = health.load()
+
+    def respond(request):
+        if isinstance(failure, type):
+            raise failure("private endpoint and credentials", request=request)
+        if isinstance(failure, int):
+            return httpx.Response(failure, json={"error": {"message": "private endpoint and credentials"}})
+        if failure == "invalid-json":
+            return httpx.Response(200, text="private endpoint and credentials")
+        if failure in ("null-content", "blank-content"):
+            content = None if failure == "null-content" else "   "
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx.Response(200, json={"choices": []})
+
+    mock_endpoint(monkeypatch, respond)
+    assert (
+        call_llm("extract", transcript_path=None, cfg=remote_backend, host_timeout_s=20, record_health=record_health)
+        == []
+    )
+    stderr = capsys.readouterr().err
+    assert f"openai-compat {detail}" in stderr
+    assert "private endpoint and credentials" not in stderr
+    assert "returned no text" not in stderr
+    assert "test-key" not in stderr
+    if record_health:
+        recorded = health.load().clis["openai-compat"].last_error
+        assert recorded == detail
+        assert "test-key" not in recorded
+    else:
+        assert health.load() == before
+
+
+def test_openai_compat_output_we_cannot_parse_does_not_mark_the_backend_healthy(monkeypatch, capsys, remote_backend):
+    """Text back is not proof the fallback works: a server can return an error page as prose."""
+    health.record_failure("openai-compat", "HTTP 500: server error")
+    before = health.load()
+
+    def respond(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Sorry, I cannot help with that."}}]})
+
+    mock_endpoint(monkeypatch, respond)
+    assert call_llm("extract", transcript_path=None, cfg=remote_backend) == []
+    assert "openai-compat output yielded 0 items" in capsys.readouterr().err
+    assert health.load() == before
+
+
+@pytest.mark.parametrize("cli_is_slow", [True, False])
+def test_the_fallback_gets_what_is_left_of_the_budget(monkeypatch, capsys, remote_backend, cli_is_slow):
+    """Both backends share one budget, so a capture pass cannot outlive its lock.
+
+    A host CLI that burns the whole budget leaves nothing to call the fallback
+    with; one that fails immediately leaves almost all of it.
+    """
+    budget = 0.2
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: "claude")
+    monkeypatch.setattr("poppy.consolidation.MIN_FALLBACK_TIMEOUT_S", 0.01)
+    timeouts = []
+
+    def cli(prompt, *, cli, timeout_s, record_health=True):
+        if cli_is_slow:
+            time.sleep(timeout_s)
+        return None
+
+    def respond(request):
+        timeouts.append(max(request.extensions["timeout"].values()))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    monkeypatch.setattr("poppy.consolidation.call_host_cli", cli)
+    mock_endpoint(monkeypatch, respond)
+    assert call_llm("extract", transcript_path=None, cfg=remote_backend, host_timeout_s=budget) == []
+    stderr = capsys.readouterr().err
+    if cli_is_slow:
+        assert timeouts == [], "the fallback must not start a request the budget cannot cover"
+        assert f"openai-compat skipped, claude used the {budget}s budget" in stderr
+    else:
+        assert timeouts and timeouts[0] <= budget
+        assert "skipped" not in stderr
 
 
 def test_is_enabled_respects_env(tmp_path, monkeypatch):
