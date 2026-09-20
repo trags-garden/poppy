@@ -297,10 +297,102 @@ def test_unanswered_consent_never_initializes_client_or_latches_events(
 
 
 def test_prompt_persistence_failure_stays_off(tmp_path, telemetry_allowed, monkeypatch):
-    monkeypatch.setattr(telemetry, "_streams_are_a_terminal", lambda: True)
+    monkeypatch.setattr(telemetry, "_a_person_is_watching", lambda: True)
     with patch("click.confirm", return_value=True), patch("poppy.config.save_config", side_effect=OSError("disk full")):
         telemetry.maybe_prompt_for_consent(tmp_path)
     assert telemetry.status(tmp_path) == (False, "not answered yet")
+
+
+def _scrub_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the agent and CI markers the suite itself is probably running under."""
+    for name in telemetry._NON_INTERACTIVE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    for name in list(os.environ):
+        if name.startswith(telemetry._NON_INTERACTIVE_ENV_PREFIXES):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+
+def test_a_clean_terminal_is_a_person(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(telemetry, "_streams_are_a_terminal", lambda: True)
+    _scrub_agent_env(monkeypatch)
+    assert telemetry._a_person_is_watching() is True
+
+
+@pytest.mark.parametrize("var", sorted(telemetry._NON_INTERACTIVE_ENV_VARS) + ["CLAUDE_CODE_ENTRYPOINT"])
+def test_an_agent_or_runner_is_not_a_person(monkeypatch: pytest.MonkeyPatch, var: str) -> None:
+    """These all allocate a terminal nobody can type into."""
+    monkeypatch.setattr(telemetry, "_streams_are_a_terminal", lambda: True)
+    _scrub_agent_env(monkeypatch)
+    monkeypatch.setenv(var, "1")
+    assert telemetry._a_person_is_watching() is False
+
+
+def test_a_dumb_terminal_is_not_a_person(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(telemetry, "_streams_are_a_terminal", lambda: True)
+    _scrub_agent_env(monkeypatch)
+    monkeypatch.setenv("TERM", "dumb")
+    assert telemetry._a_person_is_watching() is False
+
+
+def test_an_empty_agent_variable_does_not_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exported-but-empty variable is how a shell says "not set"."""
+    monkeypatch.setattr(telemetry, "_streams_are_a_terminal", lambda: True)
+    _scrub_agent_env(monkeypatch)
+    monkeypatch.setenv("CI", "")
+    assert telemetry._a_person_is_watching() is True
+
+
+@pytest.mark.parametrize(
+    ("stored", "answered"),
+    [
+        (True, True),
+        (False, True),
+        ("false", False),
+        ("off", False),
+        ("true", False),
+        ("", False),
+        (None, False),
+        (0, False),
+        (1, False),
+        ([], False),
+    ],
+)
+def test_only_a_real_boolean_counts_as_an_answer(tmp_path: Path, telemetry_allowed, stored, answered) -> None:
+    """A hand-edited `"off"` used to read as an opt-in: bool() makes every non-empty string true."""
+    (tmp_path / "config.json").write_text(json.dumps({"telemetry_enabled": stored}))
+
+    enabled, reason = telemetry.status(tmp_path)
+
+    assert telemetry.is_unanswered(tmp_path) is not answered
+    if answered:
+        assert enabled is stored
+    else:
+        # Never on, and never mistaken for a decline the user made.
+        assert enabled is False
+        assert reason == "not answered yet"
+
+
+def test_an_unreadable_config_cannot_record_a_choice(tmp_path: Path, telemetry_allowed) -> None:
+    (tmp_path / "config.json").write_text("{not json")
+
+    with pytest.raises(telemetry.TelemetryChoiceError) as excinfo:
+        telemetry.set_enabled(tmp_path, True)
+
+    assert "config.json" in str(excinfo.value)
+    assert telemetry.is_unanswered(tmp_path) is True
+
+
+def test_a_failed_legacy_mirror_still_records_the_choice(tmp_path: Path, telemetry_allowed) -> None:
+    """analytics.json is a compatibility mirror; losing it does not unmake an answer."""
+    (tmp_path / "analytics.json").mkdir()
+
+    telemetry.set_enabled(tmp_path, False)  # must not raise
+
+    from poppy.config import load_config
+
+    assert load_config(tmp_path).telemetry_enabled is False
+    assert telemetry.status(tmp_path) == (False, f"set in {tmp_path / 'config.json'}")
 
 
 def test_cli_install_reports_resolved_version(tmp_path: Path, telemetry_on, fresh_client_state) -> None:

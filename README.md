@@ -414,10 +414,12 @@ If you onboard to Trags with `poppy setup trags`, the random device UUID is
 shared with the Trags server so it can link this machine's telemetry to your
 account.
 
-The question is asked on stderr, and only when stdin, stdout and stderr are
-all a terminal. Hooks, the MCP server (`poppy serve`), daemon commands,
-detached workers, `--help` output and any piped or redirected run are never
-interrupted by it, and they send nothing while the question is unanswered.
+The question is asked on stderr, and only when someone can actually answer
+it: stdin, stdout and stderr all have to be a terminal, and Poppy must see no
+sign of a coding agent or a CI runner driving that terminal. Hooks, the MCP
+server (`poppy serve`), daemon commands, detached workers, `--json` output,
+`--help` and any piped or redirected run are never interrupted by it, and
+nothing is sent from any of them while the question is unanswered.
 
 Your answer persists in `~/.poppy/config.json`, and either answer counts, so
 you are asked once. Change your mind at any time, or answer without waiting

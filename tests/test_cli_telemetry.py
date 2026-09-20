@@ -9,7 +9,11 @@ POPPY_TELEMETRY_OFF=1 guard.
 from __future__ import annotations
 
 import json
+import os
+import select
+import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +21,8 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from poppy import telemetry as telemetry_module
+from poppy.cli import main as main_module
 from poppy.cli.main import cli
 
 PROMPT_SNIPPET = "Send anonymous usage events?"
@@ -112,17 +118,17 @@ def test_telemetry_on_reports_effective_off_under_bad_host_override(tmp_path):
 
 @pytest.fixture
 def interactive(monkeypatch):
-    """Report a terminal to the consent check.
+    """Say a person is at the terminal, for tests about everything downstream.
 
     CliRunner swaps the standard streams for its own buffers during invoke, so
-    they cannot be made to look like a terminal from out here; the predicate is
-    patched instead. Stubbing the whole `sys` module inside `telemetry` would
-    also work, and would silently break every other attribute read off it.
-    `test_redirected_stream_prevents_prompt` covers the predicate itself.
+    they cannot be made to look like a terminal from out here, and the suite
+    itself usually runs under a coding agent, so the environment half of the
+    check is false too. Both are patched at their single seam. The predicate
+    itself is covered by `test_redirected_stream_prevents_prompt` and the
+    `_a_person_is_watching` tests in test_telemetry.py, and end to end by
+    `test_a_real_terminal_gets_the_question`.
     """
-    from poppy import telemetry
-
-    monkeypatch.setattr(telemetry, "_streams_are_a_terminal", lambda: True)
+    monkeypatch.setattr(telemetry_module, "_a_person_is_watching", lambda: True)
 
 
 @pytest.mark.parametrize(("answer", "enabled"), [("y\n", True), ("n\n", False), ("\n", False)])
@@ -170,8 +176,11 @@ def test_redirected_stream_prevents_prompt(tmp_path, monkeypatch, stream_name):
 
 @pytest.mark.parametrize("command", ["hook", "serve", "daemon", "telemetry"])
 def test_background_and_telemetry_commands_skip_prompt_even_on_tty(tmp_path, interactive, monkeypatch, command):
-    # Keep the real root dispatch, replacing only the long-running command body.
-    monkeypatch.setitem(cli.commands, command, click.Command(command, callback=lambda: None))
+    # Keep the real root dispatch, and the class that would ask, replacing only
+    # the long-running command body: a plain click.Command could never ask, so
+    # the exclusion would pass for the wrong reason.
+    stub = main_module._AskAboutTelemetryCommand(command, callback=lambda: None)
+    monkeypatch.setitem(cli.commands, command, stub)
     with patch("click.confirm") as confirm:
         result = CliRunner().invoke(cli, [command], env=_env_on(tmp_path))
     assert result.exit_code == 0
@@ -305,15 +314,63 @@ def test_legacy_opt_out_prevents_prompt(tmp_path, interactive):
     confirm.assert_not_called()
 
 
-@pytest.mark.parametrize("flag", ["--help", "-h", "--yes"])
-def test_flags_meaning_do_not_ask_me_skip_the_prompt(tmp_path, interactive, monkeypatch, flag):
-    """Help output stays scriptable, and `--yes` is an install saying it will not answer.
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["list", "--help"], id="help"),
+        pytest.param(["list", "-h"], id="help-short"),
+        pytest.param(["list", "--json"], id="json-output"),
+        pytest.param(["list", "--definitely-invalid"], id="usage-error"),
+        pytest.param(["recall"], id="missing-argument"),
+        pytest.param(["--help"], id="root-help"),
+        pytest.param(["--version"], id="version"),
+    ],
+)
+def test_invocations_that_must_not_stop_to_ask(tmp_path, interactive, args):
+    """Help, machine-readable output and usage errors all have to stay scriptable.
 
-    Click parses a subcommand's arguments only after the root callback has run,
-    so the guard reads argv; the CliRunner arguments stand in for the command
-    body that does run.
+    The question runs in the command's own invoke, after click has parsed and
+    validated everything, so click has already handled help and rejected bad
+    arguments by the time it could fire.
     """
-    monkeypatch.setattr(sys, "argv", ["poppy", "list", flag])
+    with patch("click.confirm") as confirm:
+        CliRunner().invoke(cli, args, env=_env_on(tmp_path))
+    confirm.assert_not_called()
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_unattended_install_is_not_asked(tmp_path, interactive, monkeypatch):
+    """`--yes` is how an install says it will not be answering questions.
+
+    Registered as a stand-in command rather than driving a real `poppy setup`,
+    so this tests the rule itself and not one installer's internals. The same
+    command without the flag must still ask, or the rule would be untestable
+    from a passing assertion.
+    """
+    stub = main_module._AskAboutTelemetryCommand(
+        "stub-install",
+        params=[click.Option(["--yes"], is_flag=True)],
+        callback=lambda yes: None,
+    )
+    monkeypatch.setitem(cli.commands, "stub-install", stub)
+
+    with patch("click.confirm") as confirm:
+        assert CliRunner().invoke(cli, ["stub-install", "--yes"], env=_env_on(tmp_path)).exit_code == 0
+    confirm.assert_not_called()
+
+    with patch("click.confirm", return_value=False) as confirm:
+        assert CliRunner().invoke(cli, ["stub-install"], env=_env_on(tmp_path)).exit_code == 0
+    confirm.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "var", ["AI_AGENT", "CI", "CLAUDECODE", "CODEX_CI", "CODEX_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT"]
+)
+def test_an_agent_driving_the_terminal_is_not_asked(tmp_path, monkeypatch, var):
+    """A pty an agent allocated looks interactive; a question there hangs the agent."""
+    monkeypatch.setattr(telemetry_module, "_streams_are_a_terminal", lambda: True)
+    _scrub_agent_env(monkeypatch)
+    monkeypatch.setenv(var, "1")
     with patch("click.confirm") as confirm:
         result = CliRunner().invoke(cli, ["list"], env=_env_on(tmp_path))
     assert result.exit_code == 0
@@ -327,6 +384,106 @@ def test_unanswered_status_says_it_has_not_been_asked(tmp_path):
     assert result.exit_code == 0
     assert "Telemetry: off (not answered yet)" in result.output
     assert "Nothing is sent until you answer" in result.output
+
+
+def _scrub_agent_env(monkeypatch) -> None:
+    """Drop the agent and CI markers the suite itself is probably running under."""
+    for name in telemetry_module._NON_INTERACTIVE_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    for name in list(os.environ):
+        if name.startswith(telemetry_module._NON_INTERACTIVE_ENV_PREFIXES):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+
+def _cli_on_a_pty(tmp_path: Path, args: list[str], extra_env: dict | None = None, timeout: float = 60.0):
+    """Run the real CLI in a subprocess with all three streams on a terminal.
+
+    CliRunner cannot reach this: it replaces the streams with buffers, so the
+    interactivity check it exercises is never the one users hit. stdin is
+    closed immediately, so an unanswered question ends in EOF instead of
+    hanging the suite, after the prompt has already been written.
+    """
+    pty = pytest.importorskip("pty")
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith(telemetry_module._NON_INTERACTIVE_ENV_PREFIXES)}
+    for name in telemetry_module._NON_INTERACTIVE_ENV_VARS:
+        env.pop(name, None)
+    env.pop("POPPY_TELEMETRY_OFF", None)
+    src_root = str(Path(telemetry_module.__file__).resolve().parent.parent)
+    env.update({"POPPY_DIR": str(tmp_path), "TERM": "xterm-256color", "PYTHONPATH": src_root})
+    env.update(extra_env or {})
+
+    in_r, in_w = pty.openpty()
+    out_r, out_w = pty.openpty()
+    err_r, err_w = pty.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "from poppy.cli.main import main; main()", *args],
+        stdin=in_r,
+        stdout=out_w,
+        stderr=err_w,
+        env=env,
+        close_fds=True,
+    )
+    for fd in (in_r, out_w, err_w, in_w):
+        os.close(fd)
+
+    buffers = {out_r: b"", err_r: b""}
+    open_fds = [out_r, err_r]
+    deadline = time.monotonic() + timeout
+    while open_fds and time.monotonic() < deadline:
+        ready, _, _ = select.select(open_fds, [], [], 0.2)
+        for fd in ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if chunk:
+                buffers[fd] += chunk
+            else:
+                open_fds.remove(fd)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise AssertionError("the CLI never exited; a question is blocking a terminal it should not") from None
+    for fd in (out_r, err_r):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return buffers[out_r].decode(errors="replace"), buffers[err_r].decode(errors="replace")
+
+
+def test_a_real_terminal_gets_the_question(tmp_path):
+    """The one test that exercises the real predicate against real terminals."""
+    stdout, stderr = _cli_on_a_pty(tmp_path, ["redaction", "list"])
+    assert PROMPT_SNIPPET in stderr
+    assert PROMPT_SNIPPET not in stdout
+
+
+@pytest.mark.parametrize("var", ["CLAUDECODE", "CODEX_CI", "CI"])
+def test_a_real_terminal_under_an_agent_gets_no_question(tmp_path, var):
+    stdout, stderr = _cli_on_a_pty(tmp_path, ["redaction", "list"], extra_env={var: "1"})
+    assert PROMPT_SNIPPET not in stderr
+    assert PROMPT_SNIPPET not in stdout
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_a_real_terminal_asking_for_json_gets_no_question(tmp_path):
+    stdout, stderr = _cli_on_a_pty(tmp_path, ["list", "--json"])
+    assert PROMPT_SNIPPET not in stderr
+    assert PROMPT_SNIPPET not in stdout
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_cli_reports_an_unrecordable_choice_without_a_traceback(tmp_path):
+    """A broken config.json must not turn `telemetry on` into a stack trace."""
+    (tmp_path / "config.json").write_text("{not json")
+    result = CliRunner().invoke(cli, ["telemetry", "on"], env=_env_on(tmp_path))
+    assert result.exit_code != 0
+    assert "Traceback" not in result.output
+    assert "could not record the choice" in result.output
 
 
 def test_declined_status_does_not_claim_it_is_unasked(tmp_path):

@@ -173,12 +173,20 @@ def is_unanswered(poppy_dir: Path) -> bool:
     return status(poppy_dir) == (False, _UNANSWERED_REASON)
 
 
-def set_enabled(poppy_dir: Path, enabled: bool) -> None:
-    """Persist the telemetry choice.
+class TelemetryChoiceError(Exception):
+    """The telemetry choice could not be recorded. Carries a one-line reason."""
 
-    Writes the first-class `telemetry_enabled` flag to config.json and mirrors
-    it into analytics.json for older readers. The legacy notice flag prevents
-    older versions from displaying a disclosure after an explicit choice.
+
+def set_enabled(poppy_dir: Path, enabled: bool) -> None:
+    """Persist the telemetry choice, or raise :class:`TelemetryChoiceError`.
+
+    config.json holds the answer and its write alone decides success: an
+    unreadable or unwritable config means the choice was not recorded, and the
+    caller has to say so rather than print a traceback over a half-done write.
+
+    analytics.json is only a mirror, so an older Poppy sharing the machine
+    reads the same answer. Failing to write it does not unmake a recorded
+    choice, so it is best effort and stays silent.
 
     Turning telemetry on mints the device id here, so `poppy setup trags` can
     link this machine to an account before any event has been sent. Declining
@@ -186,18 +194,24 @@ def set_enabled(poppy_dir: Path, enabled: bool) -> None:
     """
     from poppy.config import load_config, save_config
 
-    cfg = load_config(poppy_dir)
-    cfg.telemetry_enabled = enabled
-    save_config(cfg)
+    try:
+        cfg = load_config(poppy_dir)
+        cfg.telemetry_enabled = enabled
+        save_config(cfg)
+    except Exception as exc:
+        raise TelemetryChoiceError(f"could not record the choice in {poppy_dir / 'config.json'}: {exc}") from exc
 
-    data = _load(poppy_dir)
-    data["telemetry"] = "on" if enabled else "off"
-    data[_NOTICE_KEY] = True
-    if "device_id" not in data and enabled:
-        data["device_id"] = str(uuid.uuid4())
-        data["created_at"] = datetime.datetime.now(datetime.UTC).isoformat()
-        data[_INSTALL_PENDING_KEY] = True
-    _save(poppy_dir, data)
+    try:
+        data = _load(poppy_dir)
+        data["telemetry"] = "on" if enabled else "off"
+        data[_NOTICE_KEY] = True
+        if "device_id" not in data and enabled:
+            data["device_id"] = str(uuid.uuid4())
+            data["created_at"] = datetime.datetime.now(datetime.UTC).isoformat()
+            data[_INSTALL_PENDING_KEY] = True
+        _save(poppy_dir, data)
+    except Exception:
+        return  # the answer is already recorded where it counts
 
 
 _NOTICE_KEY = "first_run_notice_shown"
@@ -222,15 +236,50 @@ def _streams_are_a_terminal() -> bool:
     return all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
 
 
+# Environment variables that mean a program, not a person, is on the other end
+# of this terminal. Coding agents and CI runners allocate a pty and hand it to
+# the commands they run, so all three streams look interactive while nobody can
+# type an answer, and a question there blocks the caller until it gives up.
+# Poppy is a tool agents run, so that hang is the worst thing this can do. Any
+# non-empty value counts, and the list is meant to grow as runners appear.
+_NON_INTERACTIVE_ENV_VARS = (
+    "AI_AGENT",
+    "CI",
+    "CLAUDECODE",
+    "CODEX_CI",
+    "CODEX_SESSION_ID",
+)
+# Prefix form, for families that version their variable names.
+_NON_INTERACTIVE_ENV_PREFIXES = ("CLAUDE_CODE_",)
+
+
+def _a_person_is_watching() -> bool:
+    """True when someone could actually answer a question right now.
+
+    A terminal is necessary but nowhere near sufficient: ``TERM=dumb``, a CI
+    runner and a coding agent's pty all look interactive, and none of them can
+    answer. Getting this wrong fails closed, which is a silent extra run with
+    telemetry off, not a hung agent.
+    """
+    if os.environ.get("TERM") == "dumb":
+        return False
+    if any(os.environ.get(name) for name in _NON_INTERACTIVE_ENV_VARS):
+        return False
+    if any(name.startswith(_NON_INTERACTIVE_ENV_PREFIXES) for name in os.environ):
+        return False
+    return _streams_are_a_terminal()
+
+
 def maybe_prompt_for_consent(poppy_dir: Path) -> None:
     """Ask the one-time telemetry question, on a terminal, at most once.
 
-    Requires all three standard streams to be terminals: stdin so the question
-    cannot swallow piped input, stdout and stderr so it cannot land in
-    redirected output that something else is parsing. Callers exclude their own
-    background commands on top of that, because a hook, the MCP server, the
-    daemon or a detached worker can inherit a terminal from whoever started it,
-    and a question there would hang the caller or corrupt its stdio protocol.
+    Requires a human at a terminal: all three standard streams, so the question
+    cannot swallow piped input or land in redirected output something else is
+    parsing, and no sign of a CI runner or coding agent driving that terminal.
+    Callers exclude their own background commands on top of that, because a
+    hook, the MCP server, the daemon or a detached worker can inherit a
+    terminal from whoever started it, and a question there would hang the
+    caller or corrupt its stdio protocol.
 
     Ctrl-C or a closed stdin leaves the question unanswered rather than
     recording a decline: an answer nobody gave should not be stored, telemetry
@@ -240,7 +289,7 @@ def maybe_prompt_for_consent(poppy_dir: Path) -> None:
     import click
 
     try:
-        if not _streams_are_a_terminal():
+        if not _a_person_is_watching():
             return
         if not is_unanswered(poppy_dir):
             return
