@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -26,12 +27,14 @@ from click.testing import CliRunner
 from poppy.capture import health
 from poppy.capture.banner import is_user_facing_status, render_banner
 from poppy.capture.policy import CaptureStatus, evaluate, is_capture_enabled
+from poppy.capture.reconciler import detect_conflicts
 from poppy.capture.redaction import MASK
 from poppy.cli.hooks import _session_banner
 from poppy.cli.main import cli
 from poppy.config import PoppyConfig
 from poppy.consolidation import call_llm, consolidate_stop_event
 from poppy.engine.seed import SeedEngine
+from poppy.models import Memory, Source
 
 STUB_STDERR = "Invalid API key. Please run /login"
 
@@ -215,10 +218,15 @@ def _bin_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return bin_dir
 
 
-def _stub(bin_dir: Path, name: str, *, stdout: str = "", stderr: str = "", code: int = 1) -> None:
-    """Write an executable host-CLI stub with a fixed exit code and output."""
+def _stub(bin_dir: Path, name: str, *, stdout: str = "", stderr: str = "", code: int = 1, sleep_s: float = 0) -> None:
+    """Write an executable host-CLI stub with a fixed exit code and output.
+
+    ``sleep_s`` stalls the stub so the caller's timeout is what ends the call.
+    """
     script = bin_dir / name
     body = "#!/bin/sh\n"
+    if sleep_s:
+        body += f"sleep {sleep_s}\n"
     if stdout:
         body += f"cat <<'OUT'\n{stdout}\nOUT\n"
     if stderr:
@@ -344,6 +352,57 @@ def test_alternating_broken_backends_still_trip_the_warning(tmp_path: Path, monk
     assert status is CaptureStatus.WARN_BACKEND_BROKEN
     assert "INACTIVE" in (banner or "")
     assert user_facing is True
+
+
+def _decision(mid: str, content: str) -> Memory:
+    now = datetime.now(timezone.utc)
+    return Memory(
+        id=mid,
+        content=content,
+        memory_type="decision",
+        source=Source(type="manual", session_id=None, timestamp=now),
+        project="poppy",
+        related_to=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_a_slow_conflict_verdict_does_not_mark_the_backend_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A verdict's timeout says nothing about whether extraction works.
+
+    A verdict runs on a far shorter budget than an extraction, so a CLI that is
+    merely slow to start times out here while extracting perfectly well. One
+    capture pass asks for a verdict per candidate, so counting those would reach
+    the threshold on its own and tell someone whose capture is fine that every
+    extraction is failing.
+    """
+    poppy_dir = _consented_dir(tmp_path, monkeypatch)
+    _stub(_bin_dir(tmp_path, monkeypatch), "claude", sleep_s=30, stdout="[]", code=0)
+    monkeypatch.setattr("poppy.capture.reconciler.CONFLICT_LLM_TIMEOUT_S", 0.05)
+    engine = SeedEngine(db_path=poppy_dir / "m.db")
+    engine.ingest(_decision("existing", "We deploy the recall worker to Railway in Amsterdam."))
+    cfg = PoppyConfig(consent="granted")
+
+    for _ in range(health.FAILURE_THRESHOLD):
+        candidate = _decision("new", "We deploy the recall worker to Railway in Frankfurt.")
+        assert detect_conflicts(engine, candidate, cfg=cfg) == []
+
+    assert health.load(poppy_dir).clis == {}, "a verdict must not touch the extraction health record"
+    assert evaluate(cfg) is CaptureStatus.ACTIVE
+    banner, _user_facing, status = _session_banner(poppy_dir, project="poppy", memory_count=1, engine_ok=True)
+    assert status is CaptureStatus.ACTIVE
+    assert "INACTIVE" not in (banner or "")
+
+    # The same CLI timing out on a real extraction is still counted, so opting
+    # the verdict out has not blinded the record to a genuinely broken backend.
+    transcript = str(_transcript(tmp_path))
+    for _ in range(health.FAILURE_THRESHOLD):
+        assert call_llm("extract memories", transcript_path=transcript, cfg=cfg, host_timeout_s=0.05) == []
+    assert health.load(poppy_dir).failing
+    assert evaluate(cfg) is CaptureStatus.WARN_BACKEND_BROKEN
 
 
 def test_an_exit_zero_error_page_does_not_clear_the_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Conflict detection now reaches a backend and keeps the answer it gets back, so
+  `remember --check-conflicts` reports real candidates and auto-supersede
+  replaces a contradicted memory instead of quietly storing both. It picks a
+  coding-agent CLI from PATH when there is no session transcript to name one,
+  and no longer discards every verdict while parsing the response. A verdict
+  gets a short timeout of its own, so a slow or wedged CLI cannot hold up a
+  background capture pass, and a verdict that runs out of time is logged without
+  counting against the backend, so a slow CLI cannot make a working install
+  report itself as inactive.
 - `poppy setup` now refuses unparseable or structurally invalid client configs
   before changing files or starting the daemon, preserving Claude Code settings
   instead of silently replacing user permissions, environment, model and hooks
