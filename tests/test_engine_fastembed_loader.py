@@ -84,7 +84,25 @@ def test_load_threads_local_files_only_by_cache_state(
     assert captured["kwargs"]["providers"] == ["CPUExecutionProvider"]
 
 
-def test_unset_override_keeps_exact_stock_constructor_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("cached", [True, False])
+@pytest.mark.parametrize(
+    ("kind", "model_name", "dir_env", "file_env"),
+    [
+        ("bi", fe.BI_ENCODER, "POPPY_ONNX_BI_MODEL_DIR", "POPPY_ONNX_BI_MODEL_FILE"),
+        ("cross", fe.CROSS_ENCODER, "POPPY_ONNX_CE_MODEL_DIR", "POPPY_ONNX_CE_MODEL_FILE"),
+    ],
+)
+def test_removed_model_override_env_keeps_stock_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cached: bool,
+    kind: str,
+    model_name: str,
+    dir_env: str,
+    file_env: str,
+) -> None:
+    monkeypatch.setenv(dir_env, str(tmp_path / "unused-model"))
+    monkeypatch.setenv(file_env, "onnx/candidate.onnx")
     captured: dict[str, Any] = {}
 
     class _Recorder:
@@ -93,99 +111,18 @@ def test_unset_override_keeps_exact_stock_constructor_args(monkeypatch: pytest.M
             captured["kwargs"] = kwargs
 
     _patch_ctors(monkeypatch, _Recorder)
-    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: True)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: cached)
 
-    fe._load_fastembed("cross", fe.CROSS_ENCODER, tmp_path)
+    fe._load_fastembed(kind, model_name, tmp_path)
 
     assert captured == {
-        "model_name": fe.CROSS_ENCODER,
+        "model_name": model_name,
         "kwargs": {
             "cache_dir": str(tmp_path),
             "providers": ["CPUExecutionProvider"],
-            "local_files_only": True,
+            "local_files_only": cached,
         },
     }
-
-
-@pytest.mark.parametrize(
-    ("kind", "dir_env", "file_env"),
-    [
-        ("bi", "POPPY_ONNX_BI_MODEL_DIR", "POPPY_ONNX_BI_MODEL_FILE"),
-        ("cross", "POPPY_ONNX_CE_MODEL_DIR", "POPPY_ONNX_CE_MODEL_FILE"),
-    ],
-)
-def test_local_onnx_override_registers_and_constructs_exact_file(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    kind: str,
-    dir_env: str,
-    file_env: str,
-) -> None:
-    model_dir = tmp_path / kind
-    model_path = model_dir / "onnx" / "candidate.onnx"
-    model_path.parent.mkdir(parents=True)
-    model_path.touch()
-    monkeypatch.setenv(dir_env, str(model_dir))
-    monkeypatch.setenv(file_env, "onnx/candidate.onnx")
-    registered: list[dict[str, Any]] = []
-    constructed: list[tuple[str, dict[str, Any]]] = []
-
-    class _Recorder:
-        @classmethod
-        def list_supported_models(cls) -> list[dict[str, Any]]:
-            return []
-
-        @classmethod
-        def add_custom_model(cls, **kwargs: Any) -> None:
-            registered.append(kwargs)
-
-        def __init__(self, model_name: str, **kwargs: Any) -> None:
-            constructed.append((model_name, kwargs))
-
-    _patch_ctors(monkeypatch, _Recorder)
-    stock_name = fe.BI_ENCODER if kind == "bi" else fe.CROSS_ENCODER
-
-    fe._load_fastembed(kind, stock_name, tmp_path / "cache")
-
-    alias, kwargs = constructed[0]
-    assert alias.startswith(f"poppy-tra-442/{kind}-")
-    assert kwargs == {
-        "cache_dir": str(tmp_path / "cache"),
-        "providers": ["CPUExecutionProvider"],
-        "local_files_only": True,
-        "specific_model_path": str(model_dir.resolve()),
-    }
-    assert registered[0]["model"] == alias
-    assert registered[0]["model_file"] == "onnx/candidate.onnx"
-    assert registered[0]["sources"].hf == stock_name
-
-
-@pytest.mark.parametrize(
-    ("dir_value", "file_value", "message"),
-    [
-        (None, "onnx/model.onnx", "set POPPY_ONNX_BI_MODEL_DIR"),
-        ("missing", "onnx/model.onnx", "does not exist or is not a directory"),
-    ],
-)
-def test_bad_local_onnx_override_fails_actionably_without_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    dir_value: str | None,
-    file_value: str,
-    message: str,
-) -> None:
-    if dir_value is not None:
-        monkeypatch.setenv("POPPY_ONNX_BI_MODEL_DIR", str(tmp_path / dir_value))
-    monkeypatch.setenv("POPPY_ONNX_BI_MODEL_FILE", file_value)
-    monkeypatch.setattr(
-        fe,
-        "is_fastembed_model_cached",
-        lambda *_a, **_k: pytest.fail("bad override must not inspect or fall back to the stock cache"),
-    )
-
-    with pytest.raises(ModelUnavailableError, match=message) as excinfo:
-        fe._load_fastembed("bi", fe.BI_ENCODER, tmp_path / "cache")
-    assert "fallback" in str(excinfo.value)
 
 
 # --- first-run notice --------------------------------------------------------

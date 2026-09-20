@@ -21,7 +21,6 @@ import os
 import sys
 import time
 from collections.abc import Callable, Sequence
-from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
@@ -53,14 +52,6 @@ _IDLE_TIMEOUT_S = 600.0
 # Keep a one-variable rollback for unusual CPUs/document-length distributions.
 _RERANK_BATCH_SIZE = 8
 _STOCK_RERANK_ENV = "POPPY_ONNX_STOCK_RERANK"
-
-# Experimental probe seam. Both values for a kind must be supplied:
-# the directory holds the tokenizer/config assets, while the file is the ONNX
-# path relative to that directory (for example ``onnx/model_int8.onnx``).
-_OVERRIDE_ENV = {
-    "bi": ("POPPY_ONNX_BI_MODEL_DIR", "POPPY_ONNX_BI_MODEL_FILE"),
-    "cross": ("POPPY_ONNX_CE_MODEL_DIR", "POPPY_ONNX_CE_MODEL_FILE"),
-}
 
 _FIRST_RUN_NOTICE_SHOWN = False
 
@@ -97,102 +88,6 @@ def announce_first_run_download(model_names: Sequence[str]) -> None:
         )
 
 
-def _onnx_override(kind: str) -> tuple[Path, str] | None:
-    """Resolve and validate one experimental local ONNX override.
-
-    This is an experimental probe seam, not a model-selection API.
-    In particular, an overridden bi-encoder still writes and reads the same
-    ``MODEL_ID`` embedding keyspace. Reusing stored vectors across precision
-    variants is acceptable for latency probes only. Any quality evaluation or
-    shipping decision requires fresh ingestion and a committed Rosemary delta,
-    and the shipped model pins do not change without an explicit decision.
-
-    Both environment variables for ``kind`` are read at model load time. The
-    model file must be a relative path contained by the local model directory;
-    invalid or incomplete overrides fail closed rather than falling back to the
-    shipped model.
-    """
-    dir_env, file_env = _OVERRIDE_ENV[kind]
-    raw_dir = os.environ.get(dir_env)
-    raw_file = os.environ.get(file_env)
-    if raw_dir is None and raw_file is None:
-        return None
-    if not raw_dir or not raw_file:
-        missing = file_env if raw_dir else dir_env
-        raise ModelUnavailableError(
-            f"Incomplete experimental ONNX override for {kind!r}: set {missing} as well as "
-            f"{dir_env if missing == file_env else file_env}; no stock-model fallback was attempted."
-        )
-
-    model_dir = Path(raw_dir).expanduser().resolve()
-    model_file = Path(raw_file)
-    if model_file.is_absolute():
-        raise ModelUnavailableError(
-            f"Invalid experimental ONNX override {file_env}={raw_file!r}: expected a path relative to {dir_env}."
-        )
-    model_path = (model_dir / model_file).resolve()
-    try:
-        model_path.relative_to(model_dir)
-    except ValueError as exc:
-        raise ModelUnavailableError(
-            f"Invalid experimental ONNX override {file_env}={raw_file!r}: the model file must stay within "
-            f"{dir_env}={str(model_dir)!r}."
-        ) from exc
-    if not model_dir.is_dir():
-        raise ModelUnavailableError(
-            f"Experimental ONNX override directory from {dir_env} does not exist or is not a directory: "
-            f"{str(model_dir)!r}. Stage the complete local model directory; no stock-model fallback was attempted."
-        )
-    if not model_path.is_file():
-        raise ModelUnavailableError(
-            f"Experimental ONNX override file from {file_env} does not exist or is not a file: "
-            f"{str(model_path)!r}. Check the path relative to {dir_env}; no stock-model fallback was attempted."
-        )
-    return model_dir, model_file.as_posix()
-
-
-def _override_model_name(kind: str, model_dir: Path, model_file: str) -> str:
-    """Return a stable, registration-safe fastembed name for one override."""
-    fingerprint = sha256(f"{kind}\0{model_dir}\0{model_file}".encode()).hexdigest()[:16]
-    return f"poppy-tra-442/{kind}-{fingerprint}"
-
-
-def _load_fastembed_override(kind: str, model_name: str, model_dir: Path, model_file: str, cache: str):
-    """Register and construct a local-file override through fastembed's public API."""
-    from fastembed import TextEmbedding  # noqa: PLC0415
-    from fastembed.common.model_description import ModelSource, PoolingType  # noqa: PLC0415
-    from fastembed.rerank.cross_encoder import TextCrossEncoder  # noqa: PLC0415
-
-    alias = _override_model_name(kind, model_dir, model_file)
-    ctor = TextEmbedding if kind == "bi" else TextCrossEncoder
-    registered = {description["model"] for description in ctor.list_supported_models()}
-    if alias not in registered:
-        common = {
-            "model": alias,
-            # ``specific_model_path`` short-circuits source resolution. A valid
-            # source remains required by fastembed's public description type.
-            "sources": ModelSource(hf=model_name),
-            "model_file": model_file,
-            "description": "Poppy experimental local ONNX override",
-        }
-        if kind == "bi":
-            TextEmbedding.add_custom_model(
-                **common,
-                dim=384,
-                pooling=PoolingType.CLS,
-                normalization=True,
-            )
-        else:
-            TextCrossEncoder.add_custom_model(**common)
-    return ctor(
-        alias,
-        cache_dir=cache,
-        providers=_PROVIDERS,
-        local_files_only=True,
-        specific_model_path=str(model_dir),
-    )
-
-
 def _load_fastembed(kind: str, model_name: str, cache_dir: Path):
     """Construct one fastembed model with offline-safe semantics.
 
@@ -213,21 +108,6 @@ def _load_fastembed(kind: str, model_name: str, cache_dir: Path):
     _silence_fastembed_logs()
     ctor = TextEmbedding if kind == "bi" else TextCrossEncoder
     cache = str(cache_dir)
-    override = _onnx_override(kind)
-    if override is not None:
-        model_dir, model_file = override
-        try:
-            return _load_fastembed_override(kind, model_name, model_dir, model_file, cache)
-        except ModelUnavailableError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - translate probe configuration/load failures
-            dir_env, file_env = _OVERRIDE_ENV[kind]
-            raise ModelUnavailableError(
-                f"Couldn't load experimental ONNX override for {model_name!r} from "
-                f"{dir_env}={str(model_dir)!r}, {file_env}={model_file!r} "
-                f"({type(exc).__name__}: {exc}). Check that the directory contains the model and tokenizer/config "
-                "files required by fastembed; no stock-model fallback was attempted."
-            ) from exc
     cached = is_fastembed_model_cached(model_name, cache_dir)
     try:
         return ctor(model_name, cache_dir=cache, providers=_PROVIDERS, local_files_only=cached)
