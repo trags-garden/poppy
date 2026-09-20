@@ -532,6 +532,13 @@ class TombstoneStore:
         with self._lock:
             record_local_deletion(self._conn, memory_id, deleted_at)
 
+    def clear_local_deletion(self, memory_id: str) -> None:
+        """Forget the deletion record for an id a real memory has taken back."""
+        from poppy.sync.state import clear_local_deletion
+
+        with self._lock:
+            clear_local_deletion(self._conn, memory_id)
+
     def repush_stamp(self) -> str | None:
         """When the UTC rewrite moved a push candidate here, or None if it never did.
 

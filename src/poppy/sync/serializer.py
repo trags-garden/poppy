@@ -78,17 +78,40 @@ def deletion_time(row: dict) -> datetime | None:
     return _parse_iso(row.get("deleted_at")) or _parse_iso(row.get("updated_at"))
 
 
-def is_redacted_deletion(row: dict) -> bool:
-    """Recognize a 0.3.0 deletion whose body is not restorable memory content.
+# Every field the retired deletion format pinned to a constant. An earlier
+# release sent these rows to delete a derived copy in the cloud, and they are
+# still up there, so this version has to recognise one on the way in.
+_RETIRED_DELETION_BODY = "[poppy: derived per-speaker copy removed]"
+_RETIRED_DELETION_TYPE = "fact"
 
-    Keep this read-only compatibility guard while older deletions remain in the
-    cloud. Treating the placeholder as a Trash snapshot would let a restore
-    publish it as a real memory.
+
+def is_redacted_deletion(row: dict) -> bool:
+    """Recognize a deletion an earlier release sent, whose body is not memory content.
+
+    Read-only compatibility guard, kept while those deletions remain in the
+    cloud. Treating that body as a Trash snapshot would offer it to the user as
+    restorable text and write it back as a real memory on restore.
+
+    The WHOLE shape is matched, not just the body. Every field the retired format
+    pinned to a constant is checked, because the body on its own is a hint about
+    provenance rather than proof of it: a memory a user really wrote whose text
+    happens to read like the placeholder still carries a project, a source and
+    often a back-reference, and must take the ordinary path. Matching too little
+    silently destroys such a row; matching too much only means one of those old
+    deletions is handled as an ordinary tombstone, which is what the previous
+    release did with it anyway. The caller checks separately that no live row
+    holds the id.
     """
     return (
         is_tombstone(row)
-        and row.get("content") == "[poppy: derived per-speaker copy removed]"
-        and row.get("memory_type") == "fact"
+        and row.get("content") == _RETIRED_DELETION_BODY
+        and row.get("memory_type") == _RETIRED_DELETION_TYPE
+        and row.get("project") is None
+        and row.get("source_type") is None
+        and row.get("source_session_id") is None
+        and row.get("superseded_by") is None
+        and row.get("expires_at") is None
+        and not row.get("related_to")
     )
 
 

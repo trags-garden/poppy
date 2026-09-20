@@ -933,24 +933,41 @@ def _apply_pulled_row(
     the same gate as the write it leads to, so no concurrent forget, restore or
     edit can invalidate a decision between the two.
     """
-    if not is_redacted_deletion(row) and tombstones.local_deletion_wins(incoming.id, incoming.updated_at):
-        return "stale"
-
+    # A deletion in the retired format, for an id this device holds nothing live
+    # at. Recorded as what it is: filing it in ``ui_tombstones`` would put a
+    # restorable Trash entry in front of the user whose body is the placeholder,
+    # and restoring that would create junk and push it back up.
+    #
+    # The live-row check is what keeps this safe, and it is not optional. The
+    # shape match is a strong hint, not proof: a real memory that happened to
+    # match would otherwise be deleted here with no Trash entry and its id
+    # suppressed for good. With a live row present the ordinary tombstone branch
+    # below runs instead, freshness checks and all.
     if is_redacted_deletion(row):
-        local_live = engine.get(incoming.id)
-        if local_live is not None and local_live.updated_at > incoming.updated_at:
-            return "stale"
-        if not dry_run:
-            # Persist suppression before deleting the live row, so an interrupted
-            # pull can retry without admitting an older cloud version.
-            deleted_at = deletion_time(row) or incoming.updated_at
-            tombstones.record_local_deletion(incoming.id, deleted_at)
-            if local_live is not None:
-                engine.delete(incoming.id, **_remote_kwargs(engine, deleted_at))
-            previous = tombstones.get(incoming.id)
-            if previous is not None and previous.tombstoned_at <= deleted_at:
-                tombstones.remove(incoming.id, token=previous.token)
-        return "redacted"
+        local_live = engine.get(incoming.id)  # type: ignore[attr-defined]
+        # Applied to a LIVE row only on proof that the row really is a derived
+        # copy. The shape match says the deletion came from an older client; it
+        # says nothing about what this device holds at the id. A real memory
+        # whose body happened to match would otherwise be destroyed here with no
+        # Trash entry and its id suppressed for good, so proof is the local
+        # conjunctive test against the live parent, never the body.
+        if local_live is None or tombstones.is_proven_unmarked_copy(incoming.id):  # type: ignore[attr-defined]
+            if local_live is not None and local_live.updated_at > incoming.updated_at:
+                return "stale"
+            if not dry_run:
+                # The DELETION's timestamp, not this device's clock, so a
+                # recreation of the id written after it is not refused.
+                deleted_at = deletion_time(row) or incoming.updated_at  # type: ignore[attr-defined]
+                tombstones.record_local_deletion(incoming.id, deleted_at)  # type: ignore[attr-defined]
+                if local_live is not None:
+                    engine.delete(incoming.id, **_remote_kwargs(engine, deleted_at))  # type: ignore[attr-defined]
+                previous = tombstones.get(incoming.id)  # type: ignore[attr-defined]
+                if previous is not None and previous.tombstoned_at <= deleted_at:
+                    tombstones.remove(incoming.id, token=previous.token)  # type: ignore[attr-defined]
+            return "redacted"
+
+    if tombstones.local_deletion_wins(incoming.id, incoming.updated_at):  # type: ignore[attr-defined]
+        return "stale"
 
     # A marked closet is LOCAL-ONLY derived data: bloom re-derives it from
     # the parent on this device, so sync never applies an incoming row for
@@ -1119,6 +1136,9 @@ def _apply_pulled_row(
     # between, so the note is skipped and the watermark advances
     # past it for good.
     engine.ingest(incoming, **_remote_kwargs(engine, incoming.updated_at))  # type: ignore[arg-type]
+    # This id now holds a real memory that beat any deletion recorded for it, so
+    # the record has done its job and must not outlive the thing it described.
+    tombstones.clear_local_deletion(incoming.id)  # type: ignore[attr-defined]
     if local_tomb is not None:
         # The live row won over an older local tombstone: a restore
         # (or re-create) that happened elsewhere. Drop the stale

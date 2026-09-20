@@ -59,8 +59,28 @@ class _FakeCrossEncoder:
 
 def _local_deletion_time(db: Path, memory_id: str) -> datetime | None:
     with sqlite3.connect(db) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sync_local_deletions'").fetchone():
+            return None
         rows = conn.execute("SELECT deleted_at FROM sync_local_deletions WHERE id = ?", (memory_id,)).fetchall()
     return datetime.fromisoformat(rows[0][0]) if rows else None
+
+
+def _migrate_only(db: Path, *, had_bloom_schema: bool = True) -> None:
+    """Run the one-time marker migration on its own.
+
+    Opening an engine also REMOVES what that migration marks, which is the
+    product behaviour. These tests are about the grading itself, so they run it
+    directly instead of through an open.
+    """
+    from poppy.engine._closet_marker import ensure_closet_side_tables
+
+    conn = sqlite3.connect(str(db))
+    try:
+        ensure_closet_side_tables(conn)
+        migrate_closet_marker(conn, had_bloom_schema=had_bloom_schema)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _bloom(db_path: Path) -> BloomEngine:
@@ -469,14 +489,48 @@ def _legacy_store(tmp_path: Path) -> Path:
     return db
 
 
+def _legacy_store_open(tmp_path: Path) -> tuple[Path, "BloomEngine"]:
+    """A pre-marker store, with an engine already open on it.
+
+    The engine is opened BEFORE the legacy rows exist. Opening one now also
+    removes what the marker migration marks, and these tests are about what the
+    announcement queue does with that state afterwards, so they build it around
+    an engine that is already up rather than through a second open.
+    """
+    db = tmp_path / "memories.db"
+    engine = _bloom(db)
+    engine.ingest(_memory("sess-2026-01", _turns()))
+    _strip_marker(db)
+    _migrate_only(db)
+    return db, engine
+
+
 def test_migration_marks_closets_it_can_re_derive_from_a_live_parent(tmp_path: Path) -> None:
     db = _legacy_store(tmp_path)
     assert MARKER_COLUMN not in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
 
-    _bloom(db)  # opening the store runs the migration
+    _migrate_only(db)  # the migration alone; an open would also remove what it marks
 
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
     assert [m.id for m in _bloom(db).list_all()] == ["sess-2026-01"]
+
+
+def test_a_pre_marker_store_is_cleaned_on_the_first_open(tmp_path: Path) -> None:
+    """One open, not two.
+
+    A store written before the marker existed has nothing marked to find, so the
+    removal has to run after the migration that identifies the copies. Running
+    it first left them stored, recallable and queued for upload for the whole of
+    that session.
+    """
+    db = _legacy_store(tmp_path)
+
+    engine = _bloom(db)
+
+    assert _marked_ids(db) == []
+    assert _all_ids(db) == ["sess-2026-01"]
+    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
+    assert _pending_ids(TombstoneStore(db)) == []
 
 
 def test_migration_leaves_a_real_memory_shaped_like_an_orphan_closet_alone(tmp_path: Path) -> None:
@@ -620,6 +674,32 @@ def _cloud_row(mid: str, content: str, *, deleted: bool = False, when: datetime 
         "created_at": iso,
         "updated_at": iso,
         "deleted_at": iso if deleted else None,
+    }
+
+
+def _legacy_deletion_row(mid: str, when: datetime | None = None, *, updated: datetime | None = None) -> dict:
+    """Exactly the row the previous release sent to delete a derived copy.
+
+    Every field it pinned to a constant, because that whole shape is what the
+    reader recognises: a row carrying a real project or source is a real memory
+    and takes the ordinary path however its body reads.
+    """
+    iso = (when or datetime.now(timezone.utc)).isoformat()
+    return {
+        "id": mid,
+        "content": LEGACY_DELETION_BODY,
+        "memory_type": "fact",
+        "project": None,
+        "source_type": None,
+        "source_session_id": None,
+        "source_timestamp": iso,
+        "confidence": 1.0,
+        "related_to": [],
+        "expires_at": None,
+        "superseded_by": None,
+        "created_at": iso,
+        "updated_at": (updated or when or datetime.now(timezone.utc)).isoformat(),
+        "deleted_at": iso,
     }
 
 
@@ -805,15 +885,18 @@ def test_a_malformed_legacy_row_does_not_abort_the_migration(tmp_path: Path) -> 
     _insert_legacy(db, "meeting_closet_alice", _LIST_SPEAKER, ["meeting"])
     _insert_legacy(db, "meeting_closet_notes", "just some prose", [])
 
-    engine = _bloom(db)  # must not raise
+    _migrate_only(db)  # must not raise
+    # The well-formed closets alongside them still got marked, before the open
+    # below removes them.
+    assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
+
+    engine = _bloom(db)  # must not raise either
 
     assert MARKER_COLUMN in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
     assert engine.get("meeting_closet_alice").content == _LIST_SPEAKER
     assert engine.get("meeting_closet_notes").content == "just some prose"
     listed = {m.id for m in engine.list_all()}
     assert {"meeting_closet_alice", "meeting_closet_notes"} <= listed
-    # The well-formed closets alongside them still got marked.
-    assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
 
 
 def test_ingesting_malformed_turns_does_not_crash_the_engine(tmp_path: Path) -> None:
@@ -1071,9 +1154,11 @@ def test_migration_marks_a_closet_that_arrived_through_the_cloud(tmp_path: Path)
     conn.commit()
     conn.close()
 
+    _migrate_only(db)
+    assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
+
     engine = _bloom(db)
 
-    assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
     assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
 
     assert forget(engine, tmp_path, "sess-2026-01").deleted is True
@@ -1107,18 +1192,21 @@ def test_an_inferentially_adopted_copy_is_hidden_but_intact(tmp_path: Path) -> N
     """
     db = _tier_b_store(tmp_path)
 
-    engine = _bloom(db)
+    _migrate_only(db)
     # Only Alice's text changed, so only her copy is inferential; Bob's still
     # matches what the parent derives and is proven.
     assert _backup_rows(db) == {"sess-2026-01_closet_alice": "adopted"}
     assert "sess-2026-01_closet_alice" in _marked_ids(db)
-
-    kept = engine.get("sess-2026-01_closet_alice")
-    assert SECRET in kept.content  # not rewritten, not destroyed
-
     # NOT announced: an announcement deletes the cloud row everywhere, which
     # inference does not earn. Bob's proven copy is.
     assert _pending_ids(TombstoneStore(db)) == ["sess-2026-01_closet_bob"]
+
+    engine = _bloom(db)
+
+    kept = engine.get("sess-2026-01_closet_alice")
+    assert SECRET in kept.content  # not rewritten, not destroyed
+    # The inferred tier survives the open; only the proven one is removed.
+    assert engine.get("sess-2026-01_closet_bob") is None
 
     # Hidden from every list, and never pushed.
     assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
@@ -1189,8 +1277,7 @@ def test_a_pulled_closet_tombstone_never_becomes_a_restorable_entry(tmp_path: Pa
     db = tmp_path / "memories.db"
     engine = _bloom(db)
     store = TombstoneStore(db)
-    row = _cloud_row("sess-2026-01_closet_alice", LEGACY_DELETION_BODY, deleted=True)
-    row["memory_type"] = "fact"
+    row = _legacy_deletion_row("sess-2026-01_closet_alice")
 
     result = pull(
         engine=engine,
@@ -1226,7 +1313,12 @@ def test_an_ordinary_tombstone_is_still_a_restorable_entry(tmp_path: Path) -> No
 
 
 def test_a_real_memory_matching_the_placeholder_still_gets_deleted(tmp_path: Path) -> None:
-    """A reserved deletion body must not become a restorable snapshot."""
+    """Matching the body is a hint, not proof of provenance.
+
+    A live local row means the id belongs to a real memory, so its deletion runs
+    through the ordinary tombstone path however its body reads: it applies, it
+    leaves a restorable entry, and it records no permanent suppression.
+    """
     db = tmp_path / "memories.db"
     engine = _bloom(db)
     engine.ingest(_memory("mem_odd", LEGACY_DELETION_BODY))
@@ -1241,9 +1333,10 @@ def test_a_real_memory_matching_the_placeholder_still_gets_deleted(tmp_path: Pat
         poppy_dir=tmp_path,
     )
 
-    assert result.skipped_echoes == 1
+    assert result.applied_tombstones == 1
     assert engine.get("mem_odd") is None  # the deletion actually applied
-    assert store.list_all() == []
+    assert [t.memory.id for t in store.list_all()] == ["mem_odd"]
+    assert _local_deletion_time(db, "mem_odd") is None
 
 
 # --- round 5: supersede is the twin of forget, and must be guarded too -----
@@ -1542,9 +1635,7 @@ def test_a_pulled_copy_deletion_is_stamped_with_the_deletion_time(tmp_path: Path
     pull(
         engine=engine,
         tombstones=store,
-        client=_RecordingClient(
-            rows=[_cloud_row("sess-1_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=deleted_at)]
-        ),
+        client=_RecordingClient(rows=[_legacy_deletion_row("sess-1_closet_alice", deleted_at)]),
         state=SyncState(),
         poppy_dir=tmp_path,
     )
@@ -1573,7 +1664,7 @@ def test_re_pulling_a_copy_deletion_does_not_refresh_its_timestamp(tmp_path: Pat
     engine = _bloom(db)
     store = TombstoneStore(db)
     deleted_at = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
-    row = _cloud_row("sess-1_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=deleted_at)
+    row = _legacy_deletion_row("sess-1_closet_alice", deleted_at)
 
     for _ in range(3):
         pull(
@@ -1832,12 +1923,16 @@ def test_a_fresh_store_pushes_no_copy_deletions(tmp_path: Path, synced_state) ->
 def test_a_legacy_store_never_uploads_pending_copy_deletions(tmp_path: Path) -> None:
     """A copy the migration marked may have been leaked by a 0.2.4 client."""
     db = _legacy_store(tmp_path)
-    engine = _bloom(db)  # the one-time migration records the legacy ids
+    _migrate_only(db)  # the one-time migration records the legacy ids
     legacy = {"sess-2026-01_closet_alice", "sess-2026-01_closet_bob"}
     assert {r[0] for r in _rows(db, "SELECT id FROM legacy_closet_ids")} == legacy
+    assert set(_pending_ids(TombstoneStore(db))) == legacy
 
+    # Opening the store retires the queue: nothing here drains it, and an older
+    # client sharing this store would upload every entry left pending.
+    engine = _bloom(db)
     store = TombstoneStore(db)
-    assert set(_pending_ids(store)) == legacy
+    assert _pending_ids(store) == []
 
     client = _RecordingClient()
     push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
@@ -1867,15 +1962,14 @@ def test_a_rebuild_restores_the_parents_project_not_just_its_text(tmp_path: Path
     conn.commit()
     conn.close()
 
-    engine = _bloom(db)
+    _migrate_only(db)
 
-    copy = engine.get("meeting_closet_alice")
-    assert copy.project == "private"
-    assert copy.memory_type == "note"
-    assert engine.retrieve(SECRET, filters=Filters(project="public"), limit=10) == []
-    assert {r.memory.id for r in engine.retrieve(SECRET, filters=Filters(project="private"), limit=10)} >= {
-        "meeting_closet_alice"
-    }
+    # Read straight from the store: an engine open would remove the rebuilt row
+    # before the assertion could see it.
+    copy = _rows(db, "SELECT project, memory_type FROM memories WHERE id = 'meeting_closet_alice'")[0]
+    assert copy[0] == "private"
+    assert copy[1] == "note"
+    assert _bloom(db).retrieve(SECRET, filters=Filters(project="public"), limit=10) == []
 
 
 # --- round 9: the announcement lane is independent of the local record -----
@@ -1883,8 +1977,7 @@ def test_a_rebuild_restores_the_parents_project_not_just_its_text(tmp_path: Path
 
 def test_a_pulled_parent_deletion_does_not_upload_derived_deletions(tmp_path: Path) -> None:
     """A parent deletion removes local copies without publishing their deletion records."""
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)  # the migration queues both ids
+    db, engine = _legacy_store_open(tmp_path)
     legacy = {"sess-2026-01_closet_alice", "sess-2026-01_closet_bob"}
     store = TombstoneStore(db)
     assert set(_pending_ids(store)) == legacy
@@ -1918,8 +2011,7 @@ def test_an_announcement_survives_a_purge_of_the_local_record(tmp_path: Path) ->
     """A cascaded local record is stamped with the remote deletion time, which can
     be old enough to be purged on the first sync. The announcement must not go
     with it."""
-    db = _legacy_store(tmp_path)
-    _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     legacy = set(_pending_ids(store))
     assert len(legacy) == 2
@@ -1937,8 +2029,7 @@ def test_an_announcement_survives_a_purge_of_the_local_record(tmp_path: Path) ->
 
 def test_an_edit_that_keeps_both_speakers_does_not_upload_derived_deletions(tmp_path: Path) -> None:
     """An edit rebuilds local copies without sending special deletion rows."""
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     legacy = set(_pending_ids(store))
     assert len(legacy) == 2
@@ -2050,8 +2141,7 @@ def test_reclaiming_an_id_cancels_its_pending_announcement(tmp_path: Path) -> No
     Left pending, push sent the note live and then a NEWER deletion for the same
     id, and the next pull removed the note the user had just written.
     """
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     assert "sess-2026-01_closet_alice" in _pending_ids(store)
 
@@ -2197,8 +2287,7 @@ def test_a_restore_clears_the_earlier_copy_deletion_record(tmp_path: Path) -> No
 
 def test_regenerating_a_copy_keeps_its_pending_announcement(tmp_path: Path) -> None:
     """A restore does not un-leak what an older client already pushed."""
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     legacy = set(_pending_ids(store))
     assert len(legacy) == 2
@@ -2238,8 +2327,7 @@ class _FreshnessClient(_RecordingClient):
 
 def test_a_pending_copy_claim_does_not_modify_another_devices_note(tmp_path: Path) -> None:
     """A pending copy claim cannot overwrite an independent cloud memory."""
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)  # migration captures the copy's own updated_at
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     assert "sess-2026-01_closet_alice" in _pending_ids(store)
 
@@ -2422,7 +2510,7 @@ def test_a_strictly_newer_local_row_still_beats_a_tombstone(tmp_path: Path) -> N
 def test_tier_proven_marks_aligns_and_announces(tmp_path: Path) -> None:
     """Text IS what the parent derives: not an inference, so it may be announced."""
     db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    _migrate_only(db)
 
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
     assert _backup_rows(db) == {}  # nothing was rewritten, so nothing to snapshot
@@ -2430,7 +2518,7 @@ def test_tier_proven_marks_aligns_and_announces(tmp_path: Path) -> None:
         "sess-2026-01_closet_alice",
         "sess-2026-01_closet_bob",
     }
-    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
+    assert [m.id for m in _bloom(db).list_all()] == ["sess-2026-01"]
 
 
 def test_tier_likely_marks_but_never_rewrites_or_announces(tmp_path: Path) -> None:
@@ -2530,8 +2618,7 @@ def test_a_newer_sighting_of_our_leak_refreshes_the_announcement(tmp_path: Path)
     comparison, is answered `stale_ignored`, and the queue clears with the text
     still live up there.
     """
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     first = dict(store.pending_legacy_announcements())["sess-2026-01_closet_alice"]
 
@@ -2564,8 +2651,7 @@ def test_a_newer_sighting_of_our_leak_refreshes_the_announcement(tmp_path: Path)
 
 def test_a_reclaimed_id_seen_on_pull_cancels_the_announcement(tmp_path: Path) -> None:
     """Someone else owns the id now, so announcing would delete THEIR memory."""
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     assert "sess-2026-01_closet_alice" in _pending_ids(store)
 
@@ -2610,12 +2696,14 @@ def test_an_independent_record_holding_the_same_turns_is_not_a_copy(tmp_path: Pa
     conn.commit()
     conn.close()
 
+    _migrate_only(db)
+    assert _marked_ids(db) == ["p_closet_bob"]
+    assert _pending_ids(TombstoneStore(db)) == ["p_closet_bob"]
+
     engine = _bloom(db)
 
     assert engine.get("p_closet_alice").content == projected  # untouched
-    assert _marked_ids(db) == ["p_closet_bob"]
     assert "p_closet_alice" in {m.id for m in engine.list_all()}
-    assert _pending_ids(TombstoneStore(db)) == ["p_closet_bob"]
 
 
 # --- round 15: a stale leak is still our leak -----------------------------
@@ -2623,8 +2711,7 @@ def test_an_independent_record_holding_the_same_turns_is_not_a_copy(tmp_path: Pa
 
 def test_an_edited_parent_does_not_upload_copy_deletions(tmp_path: Path) -> None:
     """An edit keeps derived copies local even when older cloud copies exist."""
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     old_cloud_text = engine.get("sess-2026-01_closet_alice").content
     leaked_at = dict(store.pending_legacy_announcements())["sess-2026-01_closet_alice"]
@@ -2670,8 +2757,7 @@ def test_an_edited_split_on_another_device_is_not_overwritten(tmp_path: Path) ->
     at it — so it grades LIKELY here. Copying B's timestamp into our claim would
     have made the announcement tie and replace B's text with the placeholder.
     """
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
     leaked_at = dict(store.pending_legacy_announcements())["sess-2026-01_closet_alice"]
 
@@ -2832,8 +2918,7 @@ def test_a_republished_leak_re_arms_the_announcement(tmp_path: Path) -> None:
     The queue row survives with `announce_pending = 0`, so an INSERT that
     ignores conflicts left it done for ever and the text lived on in the cloud.
     """
-    db = _legacy_store(tmp_path)
-    engine = _bloom(db)
+    db, engine = _legacy_store_open(tmp_path)
     store = TombstoneStore(db)
 
     first = _RecordingClient()
@@ -3527,7 +3612,7 @@ def test_a_pulled_copy_deletion_is_dated_from_its_deleted_at(tmp_path: Path) -> 
     db = tmp_path / "memories.db"
     engine, store = _bloom(db), TombstoneStore(db)
     t0 = datetime.now(timezone.utc) - timedelta(days=2)
-    cleanup = _cloud_row("p_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=t0)
+    cleanup = _legacy_deletion_row("p_closet_alice", t0)
     cleanup["updated_at"] = (t0 + timedelta(hours=2)).isoformat()
     pull(engine=engine, tombstones=store, client=_RecordingClient([cleanup]), state=SyncState(), poppy_dir=tmp_path)
     assert _local_deletion_time(db, "p_closet_alice") == t0
@@ -3820,7 +3905,7 @@ def test_a_cleanup_deletion_landing_on_a_live_unmarked_copy_leaves_no_trash_entr
     _pull_leaked_pair(tmp_path, seed, store, when=when)
     assert seed.get("p_closet_alice") is not None
 
-    cleanup = _cloud_row("p_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=when)
+    cleanup = _legacy_deletion_row("p_closet_alice", when)
     result = pull(
         engine=seed, tombstones=store, client=_RecordingClient([cleanup]), state=SyncState(), poppy_dir=tmp_path
     )
@@ -4274,7 +4359,7 @@ def test_newer_remote_closet_deletion_is_not_retained(tmp_path: Path) -> None:
     t3 = t1 + timedelta(days=2)
     store.add_closets(["sess-1_closet_alice"], now=t1)
 
-    cleanup = _cloud_row("sess-1_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=t3)
+    cleanup = _legacy_deletion_row("sess-1_closet_alice", t3)
     pull(engine=engine, tombstones=store, client=_RecordingClient([cleanup]), state=SyncState(), poppy_dir=tmp_path)
 
     assert _local_deletion_time(db, "sess-1_closet_alice") == t3
@@ -4297,7 +4382,7 @@ def test_a_cleanup_deletion_never_lowers_a_record(tmp_path: Path) -> None:
     late = datetime(2026, 8, 1, tzinfo=timezone.utc)
     store.add_closets(["sess-1_closet_alice"], now=late)
 
-    cleanup = _cloud_row("sess-1_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=early)
+    cleanup = _legacy_deletion_row("sess-1_closet_alice", early)
     pull(engine=engine, tombstones=store, client=_RecordingClient([cleanup]), state=SyncState(), poppy_dir=tmp_path)
 
     assert store.get_closet("sess-1_closet_alice").tombstoned_at == late
@@ -4712,22 +4797,17 @@ def test_an_authoritative_deletion_raises_a_local_floor(tmp_path: Path) -> None:
     conn.close()
 
     later = old + timedelta(days=1)
-    cleanup = _cloud_row("sess-1_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=later)
+    cleanup = _legacy_deletion_row("sess-1_closet_alice", later)
     pull(engine=engine, tombstones=store, client=_RecordingClient([cleanup]), state=SyncState(), poppy_dir=tmp_path)
 
     assert _local_deletion_time(db, "sess-1_closet_alice") == later
     # ... and an older cleanup still cannot lower it.
-    older = _cloud_row("sess-1_closet_alice", LEGACY_DELETION_BODY, deleted=True, when=old)
+    older = _legacy_deletion_row("sess-1_closet_alice", old)
     pull(engine=engine, tombstones=store, client=_RecordingClient([older]), state=SyncState(), poppy_dir=tmp_path)
     assert _local_deletion_time(db, "sess-1_closet_alice") == later
 
     # A future deletion follows the same last-writer-wins ordering.
-    ahead = _cloud_row(
-        "sess-1_closet_alice",
-        LEGACY_DELETION_BODY,
-        deleted=True,
-        when=datetime.now(timezone.utc) + timedelta(days=365),
-    )
+    ahead = _legacy_deletion_row("sess-1_closet_alice", datetime.now(timezone.utc) + timedelta(days=365))
     pull(engine=engine, tombstones=store, client=_RecordingClient([ahead]), state=SyncState(), poppy_dir=tmp_path)
     raised = _local_deletion_time(db, "sess-1_closet_alice")
     assert raised == datetime.fromisoformat(ahead["deleted_at"])

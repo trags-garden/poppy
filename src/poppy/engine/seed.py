@@ -280,10 +280,14 @@ class SeedEngine(RetrievalEngine):
             # A store bloom created before the marker existed still holds
             # unmarked closets; seed must know which rows those are to keep them
             # out of list_all/sync and to clear them on a redaction.
+            migrate_closet_marker(self._conn, had_bloom_schema=had_bloom_schema)
+            # AFTER the marker migration, never before. On a store written before
+            # the marker existed the rows to remove are exactly the ones that
+            # migration has just identified, so running first finds nothing and
+            # leaves them stored and recallable for the whole session.
             from poppy.sync.state import remove_derived_rows
 
             remove_derived_rows(self._conn, db_path.parent)
-            migrate_closet_marker(self._conn, had_bloom_schema=had_bloom_schema)
             # After the marker migration, whose backfill copies a parent's
             # timestamps onto its copies verbatim: this then puts the whole store
             # — those rows included — into one spelling.

@@ -377,30 +377,78 @@ _RECORD_LOCAL_DELETION_SQL = (
 )
 
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
+
+
 def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path) -> None:
     """Remove stored derived duplicates without creating an upload or Trash entry.
 
-    Keep a durable, content-free deletion record: a cloud copy can arrive after
-    the ordinary Trash retention window. The timestamp preserves last-writer-wins
-    semantics, so a later independent memory can still reuse the same ID.
+    Keep a durable deletion record carrying no text: a cloud copy of one of these
+    rows can arrive long after the ordinary Trash retention window, and there
+    would be nothing left locally to recognise it by.
+
+    Also retires the announcement queue. Nothing in this version drains it, but a
+    client on the previous release sharing the same store still would, and every
+    entry in it uploads a deletion in the retired wire format.
     """
     columns = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
-    if "is_closet" not in columns or not conn.execute("SELECT 1 FROM memories WHERE is_closet = 1 LIMIT 1").fetchone():
+    has_marked = bool(
+        "is_closet" in columns and conn.execute("SELECT 1 FROM memories WHERE is_closet = 1 LIMIT 1").fetchone()
+    )
+    has_queue = bool(
+        _table_exists(conn, "legacy_closet_ids")
+        and conn.execute("SELECT 1 FROM legacy_closet_ids WHERE announce_pending = 1 LIMIT 1").fetchone()
+    )
+    if not has_marked and not has_queue:
         return
     with write_gate(poppy_dir), write_txn(conn):
-        rows = conn.execute("SELECT id, updated_at FROM memories WHERE is_closet = 1").fetchall()
+        now_iso = utc_iso(datetime.now(timezone.utc))
+        if _table_exists(conn, "legacy_closet_ids"):
+            # Marked answered rather than deleted: the entry doubles as the record
+            # that this id was once proved to be a derived copy, which pull still
+            # reads to keep a republished copy out. Clearing the pending flag is
+            # what stops an older client uploading it.
+            conn.execute(
+                "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE announce_pending = 1",
+                (now_iso,),
+            )
+        rows = conn.execute(
+            "SELECT m.id, COALESCE(l.legacy_updated_at, m.updated_at) FROM memories m "
+            "LEFT JOIN legacy_closet_ids l ON l.id = m.id WHERE m.is_closet = 1"
+            if _table_exists(conn, "legacy_closet_ids")
+            else "SELECT id, updated_at FROM memories WHERE is_closet = 1"
+        ).fetchall()
         if not rows:
             return
         conn.execute(LOCAL_DELETIONS_DDL)
-        now = datetime.now(timezone.utc)
         deletions = []
         for memory_id, updated_at in rows:
+            # The ROW'S OWN time, never this upgrade's clock. A record stamped now
+            # sits above every version of this id written before the upgrade, so a
+            # real memory another device wrote at the id months ago would be
+            # refused on the next pull and the watermark would move past it: the
+            # remote version would be lost here for good. Stamped with what the
+            # row actually carried, the record covers exactly the copy that was
+            # removed and anything newer is applied as usual.
+            stamp = utc_iso(updated_at)
             try:
-                previous = datetime.fromisoformat(utc_iso(updated_at))
+                datetime.fromisoformat(stamp)
             except (TypeError, ValueError, OverflowError):
-                previous = now
-            deletions.append((memory_id, max(now, previous).isoformat()))
+                # A row whose time cannot be read at all: nothing can be compared
+                # with it, so fall back to now and accept over-suppression at that
+                # one id rather than letting a redacted copy return.
+                stamp = now_iso
+            deletions.append((memory_id, stamp))
         conn.executemany(_RECORD_LOCAL_DELETION_SQL, deletions)
+        # No pre-image is kept, deliberately. Only rows marked as DERIVED are
+        # removed here, and a derived row is reconstructible from the parent that
+        # is still sitting in the store: either this engine wrote it at ingest, or
+        # the one-time migration proved its text equals what that parent projects.
+        # The inferred tier is marked differently, is not touched below, and keeps
+        # its own pre-image. Copying the speaker text into a backup table on the
+        # way out would put the very text this removal exists to get rid of back
+        # into the store.
         # Subqueries avoid SQLite's parameter limit on large stores. The engine's
         # existing DELETE trigger removes the corresponding full-text entries.
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -440,6 +488,14 @@ def local_deletion_wins(conn: sqlite3.Connection | None, memory_id: str, updated
     if updated_at.tzinfo is None:
         updated_at = updated_at.replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(row[0]) >= updated_at
+
+
+def clear_local_deletion(conn: sqlite3.Connection, memory_id: str) -> None:
+    """Drop the record for an id a real memory has legitimately taken back."""
+    if not _table_exists(conn, "sync_local_deletions"):
+        return
+    with write_txn(conn):
+        conn.execute("DELETE FROM sync_local_deletions WHERE id = ?", (memory_id,))
 
 
 def record_local_deletion(conn: sqlite3.Connection, memory_id: str, deleted_at: datetime) -> None:

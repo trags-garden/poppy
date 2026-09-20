@@ -3996,6 +3996,79 @@ def test_cleanup_matches_snapshot_timestamps_as_instants(tmp_path):
     assert client.upserts == []
 
 
+def test_cleanup_records_the_rows_own_time_not_the_upgrade_clock(tmp_path):
+    """A derived row removed on upgrade must not hide a version written since.
+
+    Stamped with the upgrade's clock the record sits above every version of the
+    id written before it, so a real memory another device wrote at that id
+    months ago is refused on the next pull and the watermark moves past it: the
+    remote version is lost here for good.
+    """
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    written = _NOW - timedelta(days=200)
+    engine.ingest(_memory("derived", updated=written))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+    engine._conn.close()
+
+    engine = SeedEngine(tmp_path / "memories.db")
+    stamp = engine._conn.execute("SELECT deleted_at FROM sync_local_deletions").fetchone()[0]
+    assert datetime.fromisoformat(stamp) == written
+
+    # Another device reclaimed the id between that write and this upgrade.
+    reclaimed = _memory("derived", updated=written + timedelta(days=1))
+    reclaimed.content = "An independent note another device wrote"
+    client = _FakeClient(rows=[memory_to_wire(reclaimed)])
+    result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+
+    assert result.pull.errors == 0
+    assert engine.get("derived").content == "An independent note another device wrote"
+
+
+def test_cleanup_retires_the_upload_queue_including_orphans(tmp_path):
+    """Nothing here drains that queue, but an older client sharing the store would."""
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("real", updated=_NOW))
+    with engine._conn:
+        # An id that is no longer in `memories`: left by an earlier redaction.
+        engine._conn.execute(
+            "INSERT INTO legacy_closet_ids (id, announce_pending, legacy_updated_at) VALUES (?, 1, ?)",
+            ("gone_closet_alice", _NOW.isoformat()),
+        )
+    engine._conn.close()
+
+    # No marked rows at all, so the cleanup must still reach the queue.
+    SeedEngine(tmp_path / "memories.db")._conn.close()
+
+    assert TombstoneStore(tmp_path / "memories.db").pending_legacy_announcements() == []
+
+
+def test_a_reclaimed_id_drops_its_deletion_record(tmp_path):
+    """The record must not outlive the thing it described."""
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("derived", updated=_NOW - timedelta(days=2)))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+    engine._conn.close()
+    engine = SeedEngine(tmp_path / "memories.db")
+    assert engine._conn.execute("SELECT 1 FROM sync_local_deletions WHERE id = 'derived'").fetchone()
+
+    newer = _memory("derived", updated=_NOW)
+    newer.content = "A real memory at that id"
+    pull(
+        engine=engine,
+        tombstones=tombstones,
+        client=_FakeClient(rows=[memory_to_wire(newer)]),
+        state=SyncState(),
+        poppy_dir=tmp_path,
+    )
+
+    assert engine.get("derived").content == "A real memory at that id"
+    assert not engine._conn.execute("SELECT 1 FROM sync_local_deletions WHERE id = 'derived'").fetchone()
+
+
 def test_cleanup_preserves_an_independent_snapshot_at_the_same_id(tmp_path):
     engine, tombstones = _engine_and_tombstones(tmp_path)
     previous = _memory("derived", updated=_NOW - timedelta(days=1))
@@ -4027,20 +4100,44 @@ def test_cleanup_suppresses_an_old_content_carrying_cloud_deletion(tmp_path):
     assert client.upserts == []
 
 
-def test_redacted_deletion_retries_after_local_delete_failure(tmp_path, monkeypatch):
+def test_redacted_deletion_records_suppression_before_it_touches_trash(tmp_path, monkeypatch):
+    """The record is persisted first, so an interrupted pull retries safely."""
     engine, tombstones = _engine_and_tombstones(tmp_path)
-    engine.ingest(_memory("deleted", updated=_NOW))
+    # A Trash entry at the id, no live row: clearing it is the step that can fail.
+    tombstones.add(_memory("deleted", updated=_NOW - timedelta(days=2)), tombstoned_at=_NOW - timedelta(days=1))
     client = _FakeClient(rows=[_release_030_redacted_row("deleted")])
-    original_delete = engine.delete
+    original_remove = tombstones.remove
 
     def interrupted(*args, **kwargs):
         raise OSError("interrupted deletion")
 
-    monkeypatch.setattr(engine, "delete", interrupted)
+    monkeypatch.setattr(tombstones, "remove", interrupted)
     with pytest.raises(OSError, match="interrupted deletion"):
         pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
-    monkeypatch.setattr(engine, "delete", original_delete)
+    # Already durable, even though the pull did not finish.
+    assert engine._conn.execute("SELECT 1 FROM sync_local_deletions WHERE id = 'deleted'").fetchone()
+
+    monkeypatch.setattr(tombstones, "remove", original_remove)
     result = pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
     assert result.errors == 0
     assert engine.get("deleted") is None
     assert tombstones.get("deleted") is None
+
+
+def test_a_real_memory_shaped_like_a_retired_deletion_keeps_its_trash_entry(tmp_path):
+    """The retired shape never destroys a live row it cannot prove is a copy."""
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("deleted", updated=_NOW - timedelta(days=1)))
+    row = _release_030_redacted_row("deleted")
+    # A real memory that happens to carry the retired body, with its own source.
+    row["source_type"] = "cli"
+    row["project"] = "work"
+
+    result = pull(
+        engine=engine, tombstones=tombstones, client=_FakeClient(rows=[row]), state=SyncState(), poppy_dir=tmp_path
+    )
+
+    assert result.applied_tombstones == 1
+    assert engine.get("deleted") is None  # the deletion still applies
+    assert tombstones.get("deleted") is not None  # but it stays restorable
+    assert not engine._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sync_local_deletions'").fetchone()
