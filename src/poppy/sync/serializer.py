@@ -1,6 +1,7 @@
 """Memory / Tombstone ↔ Trags wire-format conversions.
 
-Trags `MemoryIn` shape (mirrored from `trags-apps/api/trags/api/routes/memories.py`):
+Mirrors the JSON body the Trags sync API expects for a memory row (that API is
+implemented server-side, in a separate private repository, not this one):
   id, content, memory_type, project,
   source_type, source_session_id, source_timestamp,
   confidence, related_to, expires_at, superseded_by,
