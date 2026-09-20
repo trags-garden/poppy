@@ -92,6 +92,18 @@ def test_detect_host_cli_returns_none_when_no_cli(monkeypatch):
     assert detect_host_cli("/some/path.jsonl") is None
 
 
+@pytest.mark.parametrize("transcript_path", [None, ""])
+@pytest.mark.parametrize("cli_name", ["claude", "cursor-agent", "codex", "gemini", None])
+def test_detect_host_cli_without_transcript(monkeypatch, transcript_path, cli_name):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}" if name == cli_name else None)
+    assert detect_host_cli(transcript_path) == cli_name
+
+
+def test_detect_host_cli_without_transcript_prefers_claude(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    assert detect_host_cli(None) == "claude"
+
+
 @pytest.mark.parametrize("cli_name", ["claude", "cursor-agent", "codex", "gemini"])
 def test_call_host_cli_suppresses_hooks_in_child_environment(monkeypatch, cli_name):
     calls = []

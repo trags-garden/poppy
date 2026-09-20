@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from poppy.capture import health
@@ -116,14 +117,27 @@ def format_transcript(messages: list[dict[str, str]], char_budget: int = 16000) 
 # Backend 1: Host CLI subprocess
 # ---------------------------------------------------------------------------
 
+# Order to try host CLIs in when there is no transcript to identify the host
+# (the conflict verdict, which judges one memory rather than a session). Same
+# four CLIs the transcript-based branch below can pick, so a no-transcript call
+# can never reach a backend a normal capture would not have used.
+HOST_CLI_PREFERENCE = ("claude", "cursor-agent", "codex", "gemini")
+
+# Seconds a host CLI gets to answer. Sized for the big job: a whole transcript
+# window to extract memories from. Callers with a small prompt pass a smaller
+# budget.
+HOST_CLI_TIMEOUT_S = 120
+
 
 def detect_host_cli(transcript_path: str | None) -> str | None:
     """Pick the host coding-agent CLI based on the transcript path.
 
+    Without a transcript, fall back to the first CLI on PATH in
+    ``HOST_CLI_PREFERENCE`` order.
     Returns the executable name if it exists on PATH, else None.
     """
     if not transcript_path:
-        return None
+        return next((cli for cli in HOST_CLI_PREFERENCE if shutil.which(cli)), None)
     transcript_host = detect_transcript_host(Path(transcript_path))
     if transcript_host == "cursor" and shutil.which("cursor-agent"):
         return "cursor-agent"
@@ -153,7 +167,7 @@ def _capture_source(transcript_path: str) -> str:
     return source_from_capture_host(host, fallback_cli=detect_host_cli(transcript_path))
 
 
-def call_host_cli(prompt: str, *, cli: str, timeout_s: int = 120) -> str | None:
+def call_host_cli(prompt: str, *, cli: str, timeout_s: int = HOST_CLI_TIMEOUT_S) -> str | None:
     """Invoke a coding-agent CLI in headless mode. Returns the model's text.
 
     Every hard failure (non-zero exit, timeout, spawn error) is recorded as
@@ -284,21 +298,30 @@ def parse_json_array(text: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def call_llm(prompt: str, *, transcript_path: str | None, cfg: PoppyConfig) -> list[dict[str, str]]:
+def call_llm(
+    prompt: str,
+    *,
+    transcript_path: str | None,
+    cfg: PoppyConfig,
+    parser: Callable[[str], list[dict]] = parse_json_array,
+    host_timeout_s: int = HOST_CLI_TIMEOUT_S,
+) -> list[dict]:
     """Pick a backend, run it, parse the JSON array.
 
     Tries host CLI first (free, no key). Falls back to OpenAI-compat using
     config / env. Logs a one-line classification of every empty result so
-    silent zeros are diagnosable.
+    silent zeros are diagnosable. The default parser extracts durable memories;
+    callers requesting another response shape can supply their own parser, and
+    callers with a small prompt can shorten the host CLI's ``host_timeout_s``.
     """
     cli = detect_host_cli(transcript_path)
     if cli:
-        text = call_host_cli(prompt, cli=cli)
+        text = call_host_cli(prompt, cli=cli, timeout_s=host_timeout_s)
         if text is None:
             # call_host_cli already logged the failure mode (timeout / rc / OSError).
             pass
         else:
-            parsed = parse_json_array(text)
+            parsed = parser(text)
             arr = _find_json_array(text)
             empty_array = arr is not None and not arr
             if parsed or empty_array:
@@ -329,7 +352,7 @@ def call_llm(prompt: str, *, transcript_path: str | None, cfg: PoppyConfig) -> l
             # The configured fallback works, so extraction as a whole is healthy
             # even if the host CLI just failed.
             health.record_success()
-            parsed = parse_json_array(text)
+            parsed = parser(text)
             if not parsed:
                 snippet = text.strip()[:200].replace("\n", " ")
                 sys.stderr.write(f"poppy consolidate: openai-compat output yielded 0 items (first 200: {snippet!r})\n")
