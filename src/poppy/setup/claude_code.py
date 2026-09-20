@@ -22,6 +22,7 @@ import tempfile
 from collections.abc import MutableMapping
 from pathlib import Path
 
+import click
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
@@ -333,6 +334,63 @@ def _check_write_target(path: Path, target: Path) -> Path:
     return resolved
 
 
+def _contains_daemon_token(content: str) -> bool:
+    """Report whether ``content`` carries Poppy's own daemon credential.
+
+    Keyed on the structure that is actually written: Poppy's MCP entry holding
+    an ``Authorization`` header, under whichever server key the client uses
+    (``mcpServers`` for most, ``servers`` for VS Code, ``mcp_servers`` for the
+    Codex TOML config). Matching the parsed entry rather than searching the raw
+    text keeps token-free configs on their existing permissions, which a
+    substring guess would not.
+    """
+    try:
+        settings = json.loads(content)
+    except json.JSONDecodeError:
+        try:
+            settings = tomlkit.parse(content)
+        except TOMLKitError:
+            return False
+    if not isinstance(settings, MutableMapping):
+        return False
+    for key in ("mcpServers", "servers", "mcp_servers"):
+        servers = settings.get(key)
+        if not isinstance(servers, MutableMapping):
+            continue
+        entry = servers.get("poppy")
+        if isinstance(entry, MutableMapping) and _authorization_header_from_mcp_entry(entry):
+            return True
+    return False
+
+
+def _restrict_to_owner(fd: int, path: Path) -> None:
+    """Narrow an already-open file to owner-only, or refuse to write to it.
+
+    Called before the first byte of token-bearing content reaches the file, so
+    a failure here means nothing sensitive has been written yet and the write
+    can still be abandoned. Changing a file's mode requires owning it, which
+    being merely able to write it (through a group, say) does not grant.
+    """
+    try:
+        os.fchmod(fd, 0o600)
+    except (AttributeError, OSError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        raise CorruptConfigError(
+            f"Refusing to write the Poppy daemon token to {path}: its permissions could not be "
+            f"narrowed to owner-only ({reason}), so another user on this machine could read the "
+            "token. Take ownership of the file, or re-run `poppy setup` without `--daemon`."
+        ) from exc
+
+
+def _report_tightened(path: Path) -> None:
+    """Tell the user a config's permissions changed, on stderr.
+
+    Stderr keeps this off the stdout stream that `poppy serve` reserves for the
+    MCP protocol, matching how the rest of Poppy reports side notes.
+    """
+    click.echo(f"Tightened permissions on {path} to owner-only (0600) because it now holds the daemon token.", err=True)
+
+
 def _write_text(path: Path, content: str, *, target: Path) -> None:
     """Write a client config without detaching a symlinked one.
 
@@ -346,11 +404,12 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
     ``_write_in_place``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    contains_token = _contains_daemon_token(content)
     if _check_write_target(path, target) != path:
-        _write_in_place(path, content, target=target)
+        _write_in_place(path, content, target=target, contains_token=contains_token)
         return
-    # Preserve client config permissions; new configs may contain a bearer token.
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    previous_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    mode = 0o600 if contains_token else previous_mode
     # Atomic write: render to a temp file in the same directory, then os.replace
     # onto the target so a crash mid-write can't leave a half-written config.
     # Same-dir tmp keeps the rename on one filesystem (os.replace requirement).
@@ -358,7 +417,7 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
     try:
         # Create the temp file and chmod it to the final mode BEFORE writing any
         # content, so a bearer token is never briefly readable at the umask
-        # default (e.g. 0644) while the write is in flight (Greptile).
+        # default (e.g. 0644) while the write is in flight.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         try:
             os.fchmod(fd, mode)
@@ -368,15 +427,17 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
         with os.fdopen(fd, "w") as fh:
             fh.write(content)
         os.replace(tmp, path)
+        if contains_token and previous_mode != mode:
+            _report_tightened(path)
     finally:
         tmp.unlink(missing_ok=True)
 
 
-def _write_in_place(link: Path, content: str, *, target: Path) -> None:
+def _write_in_place(link: Path, content: str, *, target: Path, contains_token: bool = False) -> None:
     """Rewrite the existing file a symlinked config points to.
 
-    Writing into the same file keeps its owner, group, mode, ACLs, extended
-    attributes and hard links exactly as the user set them, and creates
+    Writing into the same file preserves its metadata and hard links, except
+    that configs containing a daemon token require mode 0600. It creates
     nothing in the dotfiles directory. The trade-off is that this write is not
     atomic: a crash part-way can leave the target half-written. Right before
     each write, the target's current content is saved to ``.poppy-prev.bak``
@@ -397,6 +458,13 @@ def _write_in_place(link: Path, content: str, *, target: Path) -> None:
             f"({exc.strerror}). Fix or remove the link, then re-run `poppy setup`."
         ) from exc
     try:
+        previous_mode = stat.S_IMODE(os.fstat(fd).st_mode)
+        tighten = contains_token and previous_mode != 0o600
+        if tighten:
+            # Narrow the existing inode before any token byte reaches it. A file
+            # already at 0600 is left alone, so a config someone else owns but
+            # keeps private does not fail the write for no gain.
+            _restrict_to_owner(fd, resolved)
         data = content.encode(locale.getpreferredencoding(False))
         # Pad shorter content with trailing whitespace up to the old size, so
         # the file never reads as new content followed by a stale old tail.
@@ -408,6 +476,10 @@ def _write_in_place(link: Path, content: str, *, target: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+    if tighten:
+        # Name the file that actually changed, not the link: a dotfiles tool may
+        # track the mode of its own copy and revert it.
+        _report_tightened(resolved)
 
 
 def _save_previous_content(link: Path, resolved: Path) -> None:
@@ -485,11 +557,17 @@ def _backup_once(path: Path, suffix: str) -> Path | None:
     backups.extend(path.with_name(f"{path.name}{suffix}-{index}") for index in range(1, 10))
     backup = next((candidate for candidate in backups if not candidate.exists()), backups[-1])
     data = path.read_bytes()
-    # Open (fresh or reused rotation slot) and lock the fd to 0600 BEFORE
-    # writing any bytes, then widen to the source's own mode after — a reused
-    # slot may still carry a wider mode from an earlier rotation, and backups
-    # can contain the same credentials as the original config, so the write
-    # itself must never happen at a readable-by-others mode (Greptile).
+    # Backing up a config that already holds the daemon token copies the token
+    # too, so that backup stays owner-only rather than inheriting the source's
+    # wider mode. Repeated setups rotate through the slots, so this is the
+    # normal path once a client has been set up with the daemon before.
+    if _contains_daemon_token(data.decode(errors="replace")):
+        mode = 0o600
+    # Open the slot (fresh or reused) and lock the fd to 0600 BEFORE writing any
+    # bytes, applying the final mode only afterwards: a reused slot can still
+    # carry a wider mode from an earlier rotation, and the bytes being copied
+    # may be credentials, so the write itself must never happen at a mode other
+    # users can read.
     fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.fchmod(fd, 0o600)

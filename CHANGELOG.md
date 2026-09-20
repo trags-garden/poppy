@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   background capture pass, and a verdict that runs out of time is logged without
   counting against the backend, so a slow CLI cannot make a working install
   report itself as inactive.
+- A client config that receives the loopback daemon's token now ends up readable
+  only by its owner (mode 0600), even when it was group- or world-readable
+  before, so no other user on the machine can read the token and talk to the
+  memory daemon. Symlinked dotfiles configs and rotated backups are covered too.
+  Setup reports the change when it makes one, and refuses to write the token at
+  all to a file whose permissions it cannot narrow. Configs that carry no token
+  keep the permissions you gave them.
 - `poppy setup` now refuses unparseable or structurally invalid client configs
   before changing files or starting the daemon, preserving Claude Code settings
   instead of silently replacing user permissions, environment, model and hooks
