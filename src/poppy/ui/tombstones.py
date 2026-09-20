@@ -513,6 +513,25 @@ class TombstoneStore:
         with self._lock:
             return pending_legacy_announcements(self._conn)
 
+    def local_deletion_wins(self, memory_id: str, updated_at: datetime) -> bool:
+        """Whether a recorded local deletion supersedes an incoming version of this id."""
+        from poppy.sync.state import local_deletion_wins
+
+        with self._lock:
+            return local_deletion_wins(self._conn, memory_id, updated_at)
+
+    def record_local_deletion(self, memory_id: str, deleted_at: datetime) -> None:
+        """Record a deletion that is neither restorable nor pushed.
+
+        Taken under the store lock like every other write on this connection: the
+        daemon, the CLI and the hook share it, and an unlocked write can join
+        another thread's open transaction and be rolled back with it.
+        """
+        from poppy.sync.state import record_local_deletion
+
+        with self._lock:
+            record_local_deletion(self._conn, memory_id, deleted_at)
+
     def repush_stamp(self) -> str | None:
         """When the UTC rewrite moved a push candidate here, or None if it never did.
 

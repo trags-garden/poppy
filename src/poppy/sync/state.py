@@ -21,13 +21,15 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-from poppy.engine._closet_marker import utc_iso
+from poppy.db import write_gate, write_txn
+from poppy.engine._timestamps import utc_iso
 from poppy.paths import ensure_poppy_dir, write_text_atomic
 
 try:
@@ -361,3 +363,87 @@ def clear_error(poppy_dir: Path, url: str) -> None:
         remote.error_gens.clear()
 
     mutate_remote(poppy_dir, url, _clear)
+
+
+# Ids this store deleted locally and must never accept back from a remote at or
+# below the recorded instant. The stamp is compared as TEXT by the upsert's MAX,
+# so both writers below put it through `utc_iso` first: two spellings of one
+# instant sort the wrong way round and would lower a record instead of raising it.
+LOCAL_DELETIONS_DDL = "CREATE TABLE IF NOT EXISTS sync_local_deletions (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)"
+
+_RECORD_LOCAL_DELETION_SQL = (
+    "INSERT INTO sync_local_deletions (id, deleted_at) VALUES (?, ?) "
+    "ON CONFLICT(id) DO UPDATE SET deleted_at = MAX(deleted_at, excluded.deleted_at)"
+)
+
+
+def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path) -> None:
+    """Remove stored derived duplicates without creating an upload or Trash entry.
+
+    Keep a durable, content-free deletion record: a cloud copy can arrive after
+    the ordinary Trash retention window. The timestamp preserves last-writer-wins
+    semantics, so a later independent memory can still reuse the same ID.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+    if "is_closet" not in columns or not conn.execute("SELECT 1 FROM memories WHERE is_closet = 1 LIMIT 1").fetchone():
+        return
+    with write_gate(poppy_dir), write_txn(conn):
+        rows = conn.execute("SELECT id, updated_at FROM memories WHERE is_closet = 1").fetchall()
+        if not rows:
+            return
+        conn.execute(LOCAL_DELETIONS_DDL)
+        now = datetime.now(timezone.utc)
+        deletions = []
+        for memory_id, updated_at in rows:
+            try:
+                previous = datetime.fromisoformat(utc_iso(updated_at))
+            except (TypeError, ValueError, OverflowError):
+                previous = now
+            deletions.append((memory_id, max(now, previous).isoformat()))
+        conn.executemany(_RECORD_LOCAL_DELETION_SQL, deletions)
+        # Subqueries avoid SQLite's parameter limit on large stores. The engine's
+        # existing DELETE trigger removes the corresponding full-text entries.
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if "ui_tombstones" in tables:
+            # A snapshot of the same derived row is not a restorable memory.
+            # Preserve an independent note that previously occupied this ID.
+            snapshots = conn.execute(
+                "SELECT t.id, t.created_at, m.created_at FROM ui_tombstones t "
+                "JOIN memories m ON m.id = t.id WHERE m.is_closet = 1 "
+                "AND m.content = t.content AND m.related_to = t.related_to "
+                "AND m.source_type = t.source_type "
+                "AND m.source_session_id IS t.source_session_id"
+            ).fetchall()
+            # A timestamp can have different UTC offsets in older stores.
+            conn.executemany(
+                "DELETE FROM ui_tombstones WHERE id = ?",
+                [(mid,) for mid, saved, live in snapshots if utc_iso(saved) == utc_iso(live)],
+            )
+        for table in ("memory_embeddings", "legacy_closet_ids"):
+            if table in tables:
+                conn.execute(f"DELETE FROM {table} WHERE id IN (SELECT id FROM memories WHERE is_closet = 1)")
+        conn.execute("DELETE FROM memories WHERE is_closet = 1")
+
+
+def local_deletion_wins(conn: sqlite3.Connection | None, memory_id: str, updated_at: datetime) -> bool:
+    """Whether a durable local deletion supersedes this incoming version."""
+    if (
+        conn is None
+        or not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_local_deletions'"
+        ).fetchone()
+    ):
+        return False
+    row = conn.execute("SELECT deleted_at FROM sync_local_deletions WHERE id = ?", (memory_id,)).fetchone()
+    if row is None:
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(row[0]) >= updated_at
+
+
+def record_local_deletion(conn: sqlite3.Connection, memory_id: str, deleted_at: datetime) -> None:
+    """Remember a non-restorable deletion without queuing a cloud write."""
+    with write_txn(conn):
+        conn.execute(LOCAL_DELETIONS_DDL)
+        conn.execute(_RECORD_LOCAL_DELETION_SQL, (memory_id, utc_iso(deleted_at)))

@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The facet rail is reachable on a phone: a Filters sheet opens it, and
   picking a memory opens the detail over the list with a way back.
 - The chrome link now points at trags.ai instead of the source repository.
+- Opening a store with this version removes the per speaker copies that an
+  earlier version derived from memories whose text was a conversation
+  transcript, along with their search entries. The memory each copy came from
+  is left untouched, nothing you wrote yourself is removed, and none of the
+  copies are uploaded on the way out. A copy that an earlier version had
+  already uploaded stays out of this store and never comes back to it, and it
+  never appears in Trash as something to restore.
 
 ### Fixed
 
