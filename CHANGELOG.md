@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed experimental local ONNX model-file overrides. Bloom always uses its
+  pinned models, including cached models when offline.
 - The local web UI now runs the same design system as the trags.ai dashboard
   (the anthotype: one chlorophyll pigment on a warm cream sheet). Palette,
   type scale, topbar, facet rail, list rows, cards, buttons and empty states
