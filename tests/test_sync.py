@@ -2598,46 +2598,6 @@ def test_cli_dry_run_offline_does_not_report_simulated_work_as_done(tmp_path, mo
         assert engine.get("m0") is not None, args  # the dry run really did touch nothing
 
 
-def test_cli_push_offline_reports_an_announcement_that_may_have_landed(tmp_path, monkeypatch):
-    """A legacy-copy announcement accepted with a body that will not parse, then
-    a dead host. `resp.json()` fails AFTER the server took the deletion, so that
-    row may be gone from the cloud — the run cannot claim nothing was sent. The
-    main upsert loop already keeps that uncertainty; the announcement loop has
-    to keep it the same way."""
-    import sqlite3
-
-    import httpx
-
-    from poppy.engine._closet_marker import LEGACY_CLOSET_DDL, LEGACY_CLOSET_TABLE
-
-    _engine_and_tombstones(tmp_path)  # an empty store: the announcements are the whole push
-    conn = sqlite3.connect(tmp_path / "memories.db")
-    conn.executescript(LEGACY_CLOSET_DDL)
-    conn.executemany(
-        f"INSERT INTO {LEGACY_CLOSET_TABLE} (id, legacy_updated_at) VALUES (?, ?)",
-        [(f"leak{i}", _NOW.isoformat()) for i in range(4)],
-    )
-    conn.commit()
-    conn.close()
-
-    posts = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        posts["n"] += 1
-        if posts["n"] == 1:
-            return httpx.Response(201, content=b"")  # accepted, then unreadable
-        raise httpx.ConnectError("[Errno 61] Connection refused", request=request)
-
-    result = _run_cli(tmp_path, monkeypatch, _wired_client(handler), ["sync", "push"])
-
-    assert result.exit_code != 0
-    # The parse failure is itself the breaker's first consecutive fault, so two
-    # refusals finish the count: one accepted request plus two refused.
-    assert posts["n"] == 3
-    assert "Nothing was sent" not in result.output
-    assert "The last request may still have completed." in result.output
-
-
 # --- Push: a deletion must not create the row it deletes ---------
 #
 # A tombstone on the wire is the memory's whole body plus a `deleted_at`, so an
@@ -3051,7 +3011,7 @@ def test_removed_remote_acceptance_field_is_ignored(tmp_path):
     assert "https://trags.test" in state.remotes
 
 
-def test_successful_content_free_announcement_does_not_unlock_private_deletion(tmp_path):
+def test_pending_legacy_announcement_does_not_upload_private_deletion(tmp_path):
     engine, tombstones = _engine_and_tombstones(tmp_path)
     tombstones.claim_leaked_copy("legacy", _NOW)
     tombstones.add(_memory("secret", updated=_NOW))
@@ -3060,7 +3020,7 @@ def test_successful_content_free_announcement_does_not_unlock_private_deletion(t
         push(
             engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path
         ).sent_tombstones
-        == 1
+        == 0
     )
     for _ in range(3):
         assert (
@@ -3713,3 +3673,509 @@ def test_migration_in_memory_does_not_load_cwd_sync_state(tmp_path, monkeypatch)
     tombstones = TombstoneStore(Path(":memory:"))
     assert tombstones.known_ids("https://trags.test") == set()
     assert "sent_remotes" in {r["name"] for r in tombstones._conn.execute("PRAGMA table_info(ui_tombstones)")}
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_open_removes_existing_derived_rows_without_upload(tmp_path, engine_kind):
+    from poppy.engine._closet_engine import ClosetHybridEngine
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    for mid in ("parent", "derived", "lookalike_closet_alice", "unverified"):
+        engine.ingest(_memory(mid, updated=_NOW))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1 WHERE id = 'derived'")
+        engine._conn.execute("UPDATE memories SET is_closet = 2 WHERE id = 'unverified'")
+        engine._conn.execute("CREATE TABLE memory_embeddings (id TEXT PRIMARY KEY, embedding BLOB)")
+        engine._conn.execute("INSERT INTO memory_embeddings VALUES ('derived', X'00')")
+        engine._conn.execute(
+            "INSERT INTO legacy_closet_ids (id, legacy_updated_at) VALUES ('derived', ?)", (_NOW.isoformat(),)
+        )
+    tombstones.add(engine.get("derived"))
+    tombstones.note_remote_memories({"derived"}, "https://trags.test")
+    engine._conn.close()
+    factory = SeedEngine if engine_kind == "seed" else ClosetHybridEngine
+    engine = factory(tmp_path / "memories.db")
+    assert engine.get("derived") is None
+    assert engine.get("parent") is not None
+    assert engine.get("lookalike_closet_alice") is not None
+    assert engine.get("unverified") is not None
+    assert not engine._conn.execute("SELECT 1 FROM memory_fts WHERE id = 'derived'").fetchone()
+    assert not engine._conn.execute("SELECT 1 FROM memory_embeddings WHERE id = 'derived'").fetchone()
+    assert tombstones.get("derived") is None
+    client = _FakeClient(rows=[memory_to_wire(_memory("derived", updated=_NOW))])
+    for _ in range(2):
+        result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+        assert result.pull.errors == result.push.errors == 0
+        assert engine.get("derived") is None
+    assert all(row["id"] != "derived" for row in client.upserts)
+    engine._conn.close()
+    engine = factory(tmp_path / "memories.db")
+    assert engine.get("derived") is None
+
+
+def test_existing_cloud_cleanup_tombstone_does_not_become_restorable(tmp_path):
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    row = _release_030_redacted_row("removed-copy")
+    client = _FakeClient(rows=[row])
+    for _ in range(2):
+        result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+        assert result.pull.errors == result.push.errors == 0
+        assert engine.get(row["id"]) is None
+        assert tombstones.get(row["id"]) is None
+        state = load(tmp_path).remotes[client.base_url]
+        assert state.last_pulled_at == row["updated_at"]
+        assert state.pulled_count == state.pushed_count == 0
+    assert client.upserts == []
+
+
+def test_cleanup_deletion_outlives_trash_but_allows_newer_recreation(tmp_path):
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("derived", updated=_NOW))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+    engine._conn.close()
+    engine = SeedEngine(tmp_path / "memories.db")
+    deleted_at = _NOW + timedelta(days=1)
+    with engine._conn:
+        engine._conn.execute("UPDATE sync_local_deletions SET deleted_at = ?", (deleted_at.isoformat(),))
+    tombstones.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
+    stale = memory_to_wire(_memory("derived", updated=_NOW))
+    client = _FakeClient(rows=[stale])
+    result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+    assert result.pull.skipped_stale == 1
+    assert result.pull.errors == result.push.errors == 0
+    assert engine.get("derived") is None
+    assert client.upserts == []
+
+    newer = _memory("derived", updated=deleted_at + timedelta(seconds=1))
+    newer.content = "An independent replacement"
+    client = _FakeClient(rows=[memory_to_wire(newer)])
+    result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+    assert result.pull.applied_live == 1
+    assert result.pull.errors == result.push.errors == 0
+    assert engine.get("derived").content == newer.content
+
+
+def test_cleanup_failure_rolls_back_rows_vectors_and_announcements(tmp_path):
+    import sqlite3
+
+    engine, _ = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("derived", updated=_NOW))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+        engine._conn.execute("INSERT INTO legacy_closet_ids (id) VALUES ('derived')")
+        engine._conn.execute("CREATE TABLE memory_embeddings (id TEXT PRIMARY KEY, embedding BLOB)")
+        engine._conn.execute("INSERT INTO memory_embeddings VALUES ('derived', X'00')")
+        engine._conn.execute(
+            "CREATE TRIGGER refuse_cleanup BEFORE DELETE ON memories "
+            "BEGIN SELECT RAISE(ABORT, 'cleanup interrupted'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="cleanup interrupted"):
+        SeedEngine(tmp_path / "memories.db")
+    assert engine.get("derived") is not None
+    assert engine._conn.execute("SELECT 1 FROM memory_embeddings WHERE id = 'derived'").fetchone()
+    assert engine._conn.execute("SELECT 1 FROM legacy_closet_ids WHERE id = 'derived'").fetchone()
+    assert not engine._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sync_local_deletions'").fetchone()
+    with engine._conn:
+        engine._conn.execute("DROP TRIGGER refuse_cleanup")
+    reopened = SeedEngine(tmp_path / "memories.db")
+    assert reopened.get("derived") is None
+
+
+def _release_030_redacted_row(memory_id):
+    # This is the shape the 0.3.0 release sends.
+    return {
+        "id": memory_id,
+        "content": "[poppy: derived per-speaker copy removed]",
+        "memory_type": "fact",
+        "project": None,
+        "source_type": None,
+        "source_session_id": None,
+        "source_timestamp": _NOW.isoformat(),
+        "confidence": 1.0,
+        "related_to": [],
+        "expires_at": None,
+        "superseded_by": None,
+        "created_at": _NOW.isoformat(),
+        "updated_at": _NOW.isoformat(),
+        "deleted_at": _NOW.isoformat(),
+    }
+
+
+@pytest.mark.parametrize("local_version", [None, "older", "equal", "newer"])
+def test_release_030_redacted_deletion_round_trip(tmp_path, local_version):
+    from poppy.sync import sync
+    from poppy.write_flow import restore
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    row = _release_030_redacted_row("deleted")
+    if local_version is not None:
+        seconds = {"older": -1, "equal": 0, "newer": 1}[local_version]
+        engine.ingest(_memory(row["id"], updated=_NOW + timedelta(seconds=seconds)))
+    client = _FakeClient(rows=[row])
+    for _ in range(3):
+        result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+        assert result.pull.errors == result.push.errors == 0
+        assert load(tmp_path).remotes[client.base_url].last_pulled_at == row["updated_at"]
+        assert tombstones.get(row["id"]) is None
+        if local_version == "newer":
+            assert engine.get(row["id"]).content == "content for deleted"
+        else:
+            assert engine.get(row["id"]) is None
+            assert not restore(engine, tmp_path, row["id"], tombstones=tombstones).found
+    assert all(r["content"] != row["content"] for r in client.upserts)
+    if local_version != "newer":
+        assert client.upserts == []
+        # A reset pull cursor and expired Trash must not admit a stale live copy.
+        tombstones.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
+        engine._conn.close()
+        engine = SeedEngine(tmp_path / "memories.db")
+        stale_client = _FakeClient(rows=[memory_to_wire(_memory(row["id"], updated=_NOW))])
+        result = pull(engine=engine, tombstones=tombstones, client=stale_client, state=SyncState(), poppy_dir=tmp_path)
+        assert result.skipped_stale == 1
+        assert engine.get(row["id"]) is None
+
+
+def test_release_030_redacted_deletion_dry_run_does_not_write(tmp_path):
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(rows=[_release_030_redacted_row("deleted")])
+    result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path, dry_run=True)
+    assert result.pull.errors == result.push.errors == 0
+    assert not engine._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sync_local_deletions'").fetchone()
+    assert tombstones.list_all() == []
+    assert client.upserts == []
+
+
+def _release_030_decode(row):
+    """The 0.3.0 reader's field mapping, independent of the current serializer."""
+
+    def parse(value):
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+    created = parse(row.get("created_at"))
+    if created is None:
+        raise ValueError("missing created_at")
+    return Memory(
+        id=row["id"],
+        content=row["content"],
+        memory_type=row["memory_type"],
+        source=Source(
+            type=row.get("source_type") or "trags-sync",
+            session_id=row.get("source_session_id"),
+            timestamp=parse(row.get("source_timestamp")) or created,
+        ),
+        project=row.get("project"),
+        related_to=list(row.get("related_to") or []),
+        created_at=created,
+        updated_at=parse(row.get("updated_at")) or created,
+        confidence=float(row.get("confidence") or 1.0),
+        expires_at=parse(row.get("expires_at")),
+    )
+
+
+class _Release030Peer:
+    """0.3.0's ordinary-row apply and push-watermark rules for a protocol test.
+
+    Repeated pull boundaries can reapply a deletion, but push only sends versions
+    strictly above its watermark. Deletion snapshots retain the event timestamp.
+    """
+
+    def __init__(self):
+        self.live = {}
+        self.deleted = {}
+        self.last_pulled = None
+        self.last_pushed = None
+
+    def exchange(self, rows):
+        for row in sorted(rows, key=lambda r: r["updated_at"]):
+            memory = _release_030_decode(row)
+            existing = self.live.get(memory.id)
+            if row.get("deleted_at") is not None:
+                if existing is None or existing.updated_at <= memory.updated_at:
+                    self.live.pop(memory.id, None)
+                    self.deleted[memory.id] = dict(row)
+            else:
+                deletion = self.deleted.get(memory.id)
+                if deletion is not None and datetime.fromisoformat(deletion["deleted_at"]) >= memory.updated_at:
+                    continue
+                if existing is None or existing.updated_at <= memory.updated_at:
+                    self.live[memory.id] = memory
+                    self.deleted.pop(memory.id, None)
+            self.last_pulled = max(self.last_pulled or row["updated_at"], row["updated_at"])
+        # The release writes the same ordinary shape it reads. These tests use
+        # UTC timestamps, matching the release's normalized watermark ordering.
+        candidates = [dict(row) for row in rows if row["id"] in self.live] + list(self.deleted.values())
+        outgoing = [row for row in candidates if self.last_pushed is None or row["updated_at"] > self.last_pushed]
+        if outgoing:
+            self.last_pushed = max(row["updated_at"] for row in outgoing)
+        return outgoing
+
+
+@pytest.mark.parametrize("kind", ["live", "deleted", "superseded"])
+def test_new_wire_shapes_round_trip_through_release_030_peer(tmp_path, kind):
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    memory = _memory("shared", updated=_NOW)
+    client = _FakeClient(echo=True)
+    engine.ingest(memory)
+    if kind != "live":
+        engine.delete(memory.id)
+        tombstones.note_remote_memories({memory.id}, client.base_url)
+        tombstones.add(
+            memory,
+            tombstoned_at=_NOW + timedelta(seconds=1),
+            superseded_by="replacement" if kind == "superseded" else None,
+        )
+    result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+    assert result.pull.errors == result.push.errors == 0
+    assert len(client.upserts) == 1
+    row = client.upserts[0]
+    # This is the ordinary row shape the 0.3.0 release sends.
+    assert row == {
+        "id": "shared",
+        "content": "content for shared",
+        "memory_type": "fact",
+        "project": "proj",
+        "source_type": "test",
+        "source_session_id": "s1",
+        "source_timestamp": _NOW.isoformat(),
+        "confidence": 1.0,
+        "related_to": [],
+        "expires_at": None,
+        "superseded_by": "replacement" if kind == "superseded" else None,
+        "created_at": _NOW.isoformat(),
+        "updated_at": (_NOW if kind == "live" else _NOW + timedelta(seconds=1)).isoformat(),
+        "deleted_at": None if kind == "live" else (_NOW + timedelta(seconds=1)).isoformat(),
+    }
+    peer = _Release030Peer()
+    if kind != "live":
+        peer.live[memory.id] = memory
+    outgoing = peer.exchange([row])
+    assert outgoing == [row]
+    for _ in range(3):
+        echoed = _FakeClient(rows=outgoing)
+        result = sync(engine=engine, tombstones=tombstones, client=echoed, poppy_dir=tmp_path)
+        assert result.pull.errors == result.push.errors == 0
+        assert echoed.upserts == []
+        assert peer.exchange([row]) == []
+        assert peer.last_pulled == peer.last_pushed == row["updated_at"]
+        if kind == "live":
+            assert engine.get(memory.id).content == peer.live[memory.id].content
+        else:
+            assert engine.get(memory.id) is None
+            assert memory.id not in peer.live
+            assert peer.deleted[memory.id]["superseded_by"] == row["superseded_by"]
+    if kind != "live":
+        assert peer.exchange([memory_to_wire(memory)]) == []
+        assert memory.id not in peer.live
+
+
+def test_cleanup_matches_snapshot_timestamps_as_instants(tmp_path):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("derived", updated=_NOW))
+    tombstones.add(engine.get("derived"))
+    tombstones.note_remote_memories({"derived"}, "https://trags.test")
+    with engine._conn:
+        engine._conn.execute(
+            "UPDATE memories SET is_closet = 1, created_at = ? WHERE id = 'derived'",
+            (_NOW.astimezone(timezone(timedelta(hours=2))).isoformat(),),
+        )
+    reopened = SeedEngine(tmp_path / "memories.db")
+    assert reopened.get("derived") is None
+    assert tombstones.get("derived") is None
+    client = _FakeClient()
+    push(engine=reopened, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert client.upserts == []
+
+
+def test_cleanup_records_the_rows_own_time_not_the_upgrade_clock(tmp_path):
+    """A derived row removed on upgrade must not hide a version written since.
+
+    Stamped with the upgrade's clock the record sits above every version of the
+    id written before it, so a real memory another device wrote at that id
+    months ago is refused on the next pull and the watermark moves past it: the
+    remote version is lost here for good.
+    """
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    written = _NOW - timedelta(days=200)
+    engine.ingest(_memory("derived", updated=written))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+    engine._conn.close()
+
+    engine = SeedEngine(tmp_path / "memories.db")
+    stamp = engine._conn.execute("SELECT deleted_at FROM sync_local_deletions").fetchone()[0]
+    assert datetime.fromisoformat(stamp) == written
+
+    # Another device reclaimed the id between that write and this upgrade.
+    reclaimed = _memory("derived", updated=written + timedelta(days=1))
+    reclaimed.content = "An independent note another device wrote"
+    client = _FakeClient(rows=[memory_to_wire(reclaimed)])
+    result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+
+    assert result.pull.errors == 0
+    assert engine.get("derived").content == "An independent note another device wrote"
+
+
+def test_an_unreadable_stamp_falls_back_to_the_past_not_to_now(tmp_path):
+    """A record it cannot date must not silently outrank every earlier version.
+
+    Dated now, the record sits above every version of the id written before the
+    upgrade, and a legitimate older recreation is refused for good. Dated from
+    what the row does carry, or from the earliest instant when it carries
+    nothing readable, the record can only let something through, and what it
+    would let through is caught by the grading on the pull side.
+    """
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    created = _NOW - timedelta(days=300)
+    engine.ingest(_memory("derived", updated=_NOW - timedelta(days=299)))
+    with engine._conn:
+        engine._conn.execute(
+            "UPDATE memories SET is_closet = 1, updated_at = 'not-a-timestamp', created_at = ?",
+            (created.isoformat(),),
+        )
+    engine._conn.close()
+
+    engine = SeedEngine(tmp_path / "memories.db")
+    stamp = engine._conn.execute("SELECT deleted_at FROM sync_local_deletions").fetchone()[0]
+    assert datetime.fromisoformat(stamp) == created
+
+    # An older, genuinely different memory at that id still lands.
+    older = _memory("derived", updated=created + timedelta(seconds=1))
+    older.content = "An independent note written before the upgrade"
+    result = pull(
+        engine=engine,
+        tombstones=tombstones,
+        client=_FakeClient(rows=[memory_to_wire(older)]),
+        state=SyncState(),
+        poppy_dir=tmp_path,
+    )
+
+    assert result.errors == 0
+    assert engine.get("derived").content == "An independent note written before the upgrade"
+
+
+def test_cleanup_retires_the_upload_queue_including_orphans(tmp_path):
+    """Nothing here drains that queue, but an older client sharing the store would."""
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("real", updated=_NOW))
+    with engine._conn:
+        # An id that is no longer in `memories`: left by an earlier redaction.
+        engine._conn.execute(
+            "INSERT INTO legacy_closet_ids (id, announce_pending, legacy_updated_at) VALUES (?, 1, ?)",
+            ("gone_closet_alice", _NOW.isoformat()),
+        )
+    engine._conn.close()
+
+    # No marked rows at all, so the cleanup must still reach the queue.
+    SeedEngine(tmp_path / "memories.db")._conn.close()
+
+    assert TombstoneStore(tmp_path / "memories.db").pending_legacy_announcements() == []
+
+
+def test_a_reclaimed_id_drops_its_deletion_record(tmp_path):
+    """The record must not outlive the thing it described."""
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("derived", updated=_NOW - timedelta(days=2)))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+    engine._conn.close()
+    engine = SeedEngine(tmp_path / "memories.db")
+    assert engine._conn.execute("SELECT 1 FROM sync_local_deletions WHERE id = 'derived'").fetchone()
+
+    newer = _memory("derived", updated=_NOW)
+    newer.content = "A real memory at that id"
+    pull(
+        engine=engine,
+        tombstones=tombstones,
+        client=_FakeClient(rows=[memory_to_wire(newer)]),
+        state=SyncState(),
+        poppy_dir=tmp_path,
+    )
+
+    assert engine.get("derived").content == "A real memory at that id"
+    assert not engine._conn.execute("SELECT 1 FROM sync_local_deletions WHERE id = 'derived'").fetchone()
+
+
+def test_cleanup_preserves_an_independent_snapshot_at_the_same_id(tmp_path):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    previous = _memory("derived", updated=_NOW - timedelta(days=1))
+    previous.content = "An independent note deleted before this ID was reused"
+    tombstones.add(previous)
+    engine.ingest(_memory("derived", updated=_NOW))
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+    reopened = SeedEngine(tmp_path / "memories.db")
+    assert reopened.get("derived") is None
+    assert tombstones.get("derived").memory.content == previous.content
+
+
+def test_cleanup_suppresses_an_old_content_carrying_cloud_deletion(tmp_path):
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    memory = _memory("derived", updated=_NOW)
+    engine.ingest(memory)
+    with engine._conn:
+        engine._conn.execute("UPDATE memories SET is_closet = 1")
+    reopened = SeedEngine(tmp_path / "memories.db")
+    row = memory_to_wire(memory)
+    row["deleted_at"] = _NOW.isoformat()
+    client = _FakeClient(rows=[row])
+    result = sync(engine=reopened, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+    assert result.pull.errors == result.push.errors == 0
+    assert tombstones.get(memory.id) is None
+    assert client.upserts == []
+
+
+def test_redacted_deletion_records_suppression_before_it_touches_trash(tmp_path, monkeypatch):
+    """The record is persisted first, so an interrupted pull retries safely."""
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    # A Trash entry at the id, no live row: clearing it is the step that can fail.
+    tombstones.add(_memory("deleted", updated=_NOW - timedelta(days=2)), tombstoned_at=_NOW - timedelta(days=1))
+    client = _FakeClient(rows=[_release_030_redacted_row("deleted")])
+    original_remove = tombstones.remove
+
+    def interrupted(*args, **kwargs):
+        raise OSError("interrupted deletion")
+
+    monkeypatch.setattr(tombstones, "remove", interrupted)
+    with pytest.raises(OSError, match="interrupted deletion"):
+        pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    # Already durable, even though the pull did not finish.
+    assert engine._conn.execute("SELECT 1 FROM sync_local_deletions WHERE id = 'deleted'").fetchone()
+
+    monkeypatch.setattr(tombstones, "remove", original_remove)
+    result = pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert result.errors == 0
+    assert engine.get("deleted") is None
+    assert tombstones.get("deleted") is None
+
+
+def test_a_real_memory_shaped_like_a_retired_deletion_keeps_its_trash_entry(tmp_path):
+    """The retired shape never destroys a live row it cannot prove is a copy."""
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("deleted", updated=_NOW - timedelta(days=1)))
+    row = _release_030_redacted_row("deleted")
+    # A real memory that happens to carry the retired body, with its own source.
+    row["source_type"] = "cli"
+    row["project"] = "work"
+
+    result = pull(
+        engine=engine, tombstones=tombstones, client=_FakeClient(rows=[row]), state=SyncState(), poppy_dir=tmp_path
+    )
+
+    assert result.applied_tombstones == 1
+    assert engine.get("deleted") is None  # the deletion still applies
+    assert tombstones.get("deleted") is not None  # but it stays restorable
+    assert not engine._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sync_local_deletions'").fetchone()

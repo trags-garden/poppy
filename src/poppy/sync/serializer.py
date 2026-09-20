@@ -19,18 +19,6 @@ from datetime import datetime
 from poppy.models import Memory, Source
 from poppy.ui.tombstones import Tombstone
 
-# Stand-in body for a closet tombstone. The Trags route rejects a falsy
-# `content` outright (`id, content, memory_type required` -> 400), so a
-# soft-delete still has to carry a string; this one is a fixed literal that
-# reveals nothing about the memory whose speaker copy is being deleted.
-#
-# Deliberately not something a person would type. `is_closet_tombstone` reads it
-# back to recognise our own deletions, and a user's memory that happened to
-# match would be misfiled — so the string is made implausible as a memory body
-# rather than merely short.
-CLOSET_TOMBSTONE_CONTENT = "[poppy: derived per-speaker copy removed]"
-CLOSET_TOMBSTONE_MEMORY_TYPE = "fact"
-
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
@@ -70,69 +58,6 @@ def tombstone_to_wire(tombstone: Tombstone) -> dict:
     return row
 
 
-# Used when a queued announcement has no recorded pre-migration timestamp, which
-# can only happen for a store migrated by an unreleased build of this branch.
-# An epoch-stamped delete loses the server's freshness comparison to any live
-# row, so the announcement is answered and consumed without ever overwriting
-# something. The leaked copy then falls to the human-inspected server-side
-# cleanup rather than to a guess made here.
-_UNKNOWN_LEGACY_TIMESTAMP = "1970-01-01T00:00:00+00:00"
-
-
-def closet_tombstone_to_wire(memory_id: str, when: datetime | str | None) -> dict:
-    """Serialize a leaked copy's deletion as a soft-deleted row carrying no text.
-
-    Every field is either the id, the time, or a fixed constant — no content, no
-    project, no source, no ``related_to``. A client at or below 0.3.0 pushed the
-    per-speaker copy to the cloud as an ordinary memory; this is what deletes it
-    there, and it must not re-send a character of the text.
-
-    ``when`` is the LEAKED ROW'S OWN ``updated_at``, as the 0.2.4 client wrote
-    it — captured at migration time, before the rebuild overwrote it. Not the
-    local deletion time, and emphatically not now.
-
-    That is what makes the announcement safe. The server resolves writes by
-    freshness, so this timestamp is an ownership claim: it matches the
-    untouched leak exactly, and the delete applies. If another device has since
-    reclaimed the id for a real memory and uploaded it, that row is newer, the
-    write is ignored, and the memory survives. A now-stamped delete would have
-    won that comparison and destroyed it on every device.
-
-    RESIDUAL, and it is not fixable from here: the tombstone the server stores
-    keeps this old timestamp, so a device whose pull watermark has already passed
-    it never fetches the tombstone and keeps its own copy of the row. Stamping
-    applied deletions forward server-side was tried and reverted — it lost
-    client-time ordering for offline restores — so this stands.
-
-    It is acceptable because these announcements are best-effort convergence, not
-    the erasure guarantee. The authoritative cloud erasure is the human-run
-    server-side cleanup (trags #134, migration 033), whose tombstones ARE stamped
-    forward and therefore reach every device.
-
-    The nulls are accepted: the Trags route requires only id, content and
-    memory_type (web/app/api/memories/route.ts), and the memories table takes
-    project, source_type and source_session_id as nullable TEXT (migration 009).
-    """
-    iso = when if isinstance(when, str) else _iso(when)
-    iso = iso or _UNKNOWN_LEGACY_TIMESTAMP
-    return {
-        "id": memory_id,
-        "content": CLOSET_TOMBSTONE_CONTENT,
-        "memory_type": CLOSET_TOMBSTONE_MEMORY_TYPE,
-        "project": None,
-        "source_type": None,
-        "source_session_id": None,
-        "source_timestamp": iso,
-        "confidence": 1.0,
-        "related_to": [],
-        "expires_at": None,
-        "superseded_by": None,
-        "created_at": iso,
-        "updated_at": iso,
-        "deleted_at": iso,
-    }
-
-
 def is_tombstone(row: dict) -> bool:
     return row.get("deleted_at") is not None
 
@@ -153,29 +78,40 @@ def deletion_time(row: dict) -> datetime | None:
     return _parse_iso(row.get("deleted_at")) or _parse_iso(row.get("updated_at"))
 
 
-def is_closet_tombstone(row: dict) -> bool:
-    """Whether a soft-deleted wire row is one of OUR content-free closet tombstones.
+# Every field the retired deletion format pinned to a constant. An earlier
+# release sent these rows to delete a derived copy in the cloud, and they are
+# still up there, so this version has to recognise one on the way in.
+_RETIRED_DELETION_BODY = "[poppy: derived per-speaker copy removed]"
+_RETIRED_DELETION_TYPE = "fact"
 
-    Recognised by the two constants this client writes into them, on a row that
-    is already deleted — not by the id's shape, and never applied to live data.
-    A device that does not hold that copy locally would otherwise file the
-    deletion in ``ui_tombstones`` and show a restorable Trash entry whose body is
-    the placeholder; restoring it would create junk and push it back.
 
-    Relies on the server storing ``content`` verbatim, which it does: the
-    memories table takes it as plain TEXT and the upsert writes it through
-    unchanged (trags migrations 009, 027 and 032), so the placeholder comes back
-    byte-for-byte.
+def is_redacted_deletion(row: dict) -> bool:
+    """Recognize a deletion an earlier release sent, whose body is not memory content.
 
-    The caller must also check that no live row holds the id. Content equality is
-    a strong hint, not a proof of provenance: a real memory whose body happened
-    to match would otherwise have its deletion filed as a closet's and never
-    applied to the live row.
+    Read-only compatibility guard, kept while those deletions remain in the
+    cloud. Treating that body as a Trash snapshot would offer it to the user as
+    restorable text and write it back as a real memory on restore.
+
+    The WHOLE shape is matched, not just the body. Every field the retired format
+    pinned to a constant is checked, because the body on its own is a hint about
+    provenance rather than proof of it: a memory a user really wrote whose text
+    happens to read like the placeholder still carries a project, a source and
+    often a back-reference, and must take the ordinary path. Matching too little
+    silently destroys such a row; matching too much only means one of those old
+    deletions is handled as an ordinary tombstone, which is what the previous
+    release did with it anyway. The caller checks separately that no live row
+    holds the id.
     """
     return (
         is_tombstone(row)
-        and row.get("content") == CLOSET_TOMBSTONE_CONTENT
-        and row.get("memory_type") == CLOSET_TOMBSTONE_MEMORY_TYPE
+        and row.get("content") == _RETIRED_DELETION_BODY
+        and row.get("memory_type") == _RETIRED_DELETION_TYPE
+        and row.get("project") is None
+        and row.get("source_type") is None
+        and row.get("source_session_id") is None
+        and row.get("superseded_by") is None
+        and row.get("expires_at") is None
+        and not row.get("related_to")
     )
 
 
