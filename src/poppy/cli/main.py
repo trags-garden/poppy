@@ -103,16 +103,70 @@ def _parse_since_option(since: str | None) -> datetime.datetime | None:
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+# Top-level command groups that must never stop to ask the telemetry question.
+# Hooks, the MCP server and the daemon run with nobody watching and inherit the
+# terminal of whatever started them, so the interactivity check alone would not
+# hold. `telemetry` is excluded because the user is already standing at the
+# switch. (`hook` is defined in its own module with plain click classes, so its
+# subcommands cannot reach the question at all; it is named here so the rule
+# stays true if that ever changes.)
+_NO_CONSENT_PROMPT_COMMANDS = frozenset({"daemon", "hook", "serve", "telemetry"})
+# Parameters that mean "do not stop to ask me": `--json` output has to stay
+# machine-readable, and `--yes` is how an unattended install says it will not
+# be answering questions.
+_NO_CONSENT_PROMPT_PARAMS = ("as_json", "yes")
+
+
+def _invocation_path(ctx: click.Context) -> tuple[str, ...]:
+    """Subcommand names below the root group, e.g. ("sync", "push")."""
+    names: list[str] = []
+    while ctx.parent is not None:
+        names.append(ctx.info_name or "")
+        ctx = ctx.parent
+    return tuple(reversed(names))
+
+
+def _may_ask_about_telemetry(ctx: click.Context) -> bool:
+    """Whether this fully parsed invocation is one a person could answer during."""
+    path = _invocation_path(ctx)
+    if path[:1] and path[0] in _NO_CONSENT_PROMPT_COMMANDS:
+        return False
+    # Detached workers are the hidden underscore-prefixed commands Poppy spawns
+    # for itself (`sync _auto-worker`, the capture workers). Keying on the
+    # naming convention means a new worker is covered the day it is added.
+    if any(name.startswith("_") for name in path):
+        return False
+    return not any(ctx.params.get(name) for name in _NO_CONSENT_PROMPT_PARAMS)
+
+
+class _AskAboutTelemetryCommand(click.Command):
+    """A command that asks the one-time telemetry question before it runs.
+
+    The question lives here, not in the root group callback, because click runs
+    a group callback before it builds the subcommand's context: asking there
+    meant `poppy recall --help` and plain usage errors stopped for a question
+    first. `Command.invoke` runs after every argument has been parsed and
+    validated, so help output and usage errors are already handled by click,
+    and the parsed parameters can be read instead of guessed from argv.
+    """
+
+    def invoke(self, ctx: click.Context):
+        if _may_ask_about_telemetry(ctx):
+            telemetry.maybe_prompt_for_consent(_get_poppy_dir())
+        return super().invoke(ctx)
+
+
+class _PoppyGroup(click.Group):
+    """Root group whose commands, and nested groups' commands, ask before running."""
+
+    command_class = _AskAboutTelemetryCommand
+    group_class = type  # click sentinel: subgroups are this same class
+
+
+@click.group(cls=_PoppyGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, "-v", "--version", prog_name="poppy")
-@click.pass_context
-def cli(ctx: click.Context):
+def cli():
     """Poppy -- remember what matters."""
-    # One-time telemetry disclosure (stderr only, never when telemetry is off,
-    # never twice, never raises). Skipped for `poppy telemetry ...` itself:
-    # the user is already looking at the switch.
-    if ctx.invoked_subcommand != "telemetry":
-        telemetry.maybe_print_first_run_notice(_get_poppy_dir())
 
 
 @cli.result_callback()
@@ -682,7 +736,10 @@ def config_set(key: str, value: str):
     # which mirrors analytics.json and latches the first-run notice); everything
     # else applies to a freshly loaded config and is saved once here.
     if entry.self_persist:
-        entry.apply(PoppyConfig(poppy_dir=poppy_dir), parsed)
+        try:
+            entry.apply(PoppyConfig(poppy_dir=poppy_dir), parsed)
+        except telemetry.TelemetryChoiceError as exc:
+            raise click.ClickException(str(exc)) from exc
     else:
         cfg = load_config(poppy_dir=poppy_dir)
         entry.apply(cfg, parsed)
@@ -1001,18 +1058,24 @@ def telemetry_group(ctx: click.Context):
 @telemetry_group.command("status")
 def telemetry_status():
     """Show whether telemetry is on, and why."""
-    enabled, reason = telemetry.status(_get_poppy_dir())
+    poppy_dir = _get_poppy_dir()
+    enabled, reason = telemetry.status(poppy_dir)
     click.echo(f"Telemetry: {'on' if enabled else 'off'} ({reason})")
     if enabled:
         click.echo("Anonymous usage events only. Memory content, queries, and project names are never sent.")
         click.echo("Turn off with: poppy telemetry off")
+    elif telemetry.is_unanswered(poppy_dir):
+        click.echo("Nothing is sent until you answer. Turn it on with: poppy telemetry on")
 
 
 @telemetry_group.command("on")
 def telemetry_on():
     """Enable anonymous usage telemetry (persists in ~/.poppy/config.json)."""
     poppy_dir = _get_poppy_dir()
-    telemetry.set_enabled(poppy_dir, True)
+    try:
+        telemetry.set_enabled(poppy_dir, True)
+    except telemetry.TelemetryChoiceError as exc:
+        raise click.ClickException(str(exc)) from exc
     # Report the effective state, not just the persisted flag: an environment
     # override can keep telemetry off even after enabling it in config, and the
     # confirmation must match `poppy telemetry status`.
@@ -1026,7 +1089,10 @@ def telemetry_on():
 @telemetry_group.command("off")
 def telemetry_off():
     """Disable anonymous usage telemetry (persists in ~/.poppy/config.json)."""
-    telemetry.set_enabled(_get_poppy_dir(), False)
+    try:
+        telemetry.set_enabled(_get_poppy_dir(), False)
+    except telemetry.TelemetryChoiceError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo("Telemetry is off.")
 
 
@@ -2065,7 +2131,6 @@ def import_hermes_memories_cmd(dry_run: bool, memories_dir: Path | None):
 @cli.group("sync")
 def sync_group():
     """Sync memories to/from a Trags instance."""
-    pass
 
 
 def _sync_client():

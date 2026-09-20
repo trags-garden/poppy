@@ -80,8 +80,8 @@ class PoppyConfig:
     # Retrieval engine for recall/remember on the runtime surface. Validated
     # against the registry in the engine key's parser. See `poppy engines`.
     engine: str = "bloom"
-    # Anonymous usage telemetry. Tri-state: None = unset (defaults to
-    # on), True/False = explicit user choice via `poppy telemetry on|off`.
+    # Anonymous usage telemetry. None = unanswered (off); True/False = an
+    # explicit choice from the first-run prompt or `poppy telemetry on|off`.
     # POPPY_TELEMETRY_OFF=1 in the environment overrides this at read time;
     # see poppy.telemetry.is_enabled() for the full precedence.
     telemetry_enabled: bool | None = None
@@ -308,6 +308,19 @@ def _parse_telemetry(value: str, key: str) -> bool:
     raise ValueError("telemetry must be on or off")
 
 
+def _load_telemetry_enabled(config: "PoppyConfig", data: dict) -> None:
+    """Read the stored answer, accepting only a real JSON boolean.
+
+    The generic loader coerces with ``bool()``, where every non-empty string is
+    true, so a hand-edited ``"false"`` or ``"off"`` would have read as an
+    opt-in and turned telemetry on. Anything that is not a boolean, ``null``
+    included, means the question is still unanswered: telemetry stays off and
+    the user is asked once rather than being held to a choice they never made.
+    """
+    value = data.get("telemetry_enabled")
+    config.telemetry_enabled = value if isinstance(value, bool) else None
+
+
 def _apply_telemetry(config: "PoppyConfig", enabled: object) -> None:
     # telemetry.set_enabled writes telemetry_enabled through config AND mirrors
     # analytics.json (+ latches the first-run notice), so the switch keeps its
@@ -505,9 +518,9 @@ _REGISTRY: tuple[ConfigKey, ...] = (
         "telemetry_enabled",
         settings_name="telemetry",
         default=None,
-        coerce=bool,
         parse=_parse_telemetry,
         apply=_apply_telemetry,
+        load=_load_telemetry_enabled,
         display=lambda parsed: "on" if parsed else "off",
         self_persist=True,
     ),

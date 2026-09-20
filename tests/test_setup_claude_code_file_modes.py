@@ -1,9 +1,11 @@
-"""Client config writes and backups preserve permissions."""
+"""Client config writes keep daemon tokens private."""
 
 import json
 import os
 import stat
+from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -13,7 +15,9 @@ from poppy.setup import claude_code as claude_code_module
 
 
 @pytest.mark.parametrize("daemon", [False, True], ids=["stdio", "daemon"])
-@pytest.mark.parametrize("existing_mode", [None, 0o600, 0o640], ids=["new", "private", "group-readable"])
+@pytest.mark.parametrize(
+    "existing_mode", [None, 0o600, 0o640, 0o644], ids=["new", "private", "group-readable", "world-readable"]
+)
 def test_setup_preserves_config_and_backup_modes(tmp_path, monkeypatch, daemon, existing_mode):
     claude_dir = tmp_path / "claude"
     claude_dir.mkdir()
@@ -41,14 +45,10 @@ def test_setup_preserves_config_and_backup_modes(tmp_path, monkeypatch, daemon, 
     if daemon:
         args.append("--daemon")
     runner = CliRunner()
-    expected_mode = existing_mode if existing_mode is not None else 0o600
+    expected_mode = 0o600 if daemon or existing_mode is None else existing_mode
 
-    # The temp file must already be at its final mode by the time os.replace
-    # publishes it — proves the token/content was never written at a wider,
-    # umask-default mode first (Greptile). `os` is a shared module
-    # object, so filter to the client config's own replace calls; Poppy's own
-    # internal config/token files are correctly always 0600 and aren't the
-    # thing under test here.
+    # Inspect only the client config, since os is shared with other writers.
+    # The replacement must already have its final permissions when published.
     replace_calls = []
     original_replace = os.replace
 
@@ -67,6 +67,12 @@ def test_setup_preserves_config_and_backup_modes(tmp_path, monkeypatch, daemon, 
             result = runner.invoke(cli, args, env=env)
             assert result.exit_code == 0, result.output
             assert stat.S_IMODE(config_path.stat().st_mode) == expected_mode
+            tightened = daemon and existing_mode in (0o640, 0o644) and run == 0
+            # The notice goes to stderr only, so stdout stays parseable.
+            assert result.stderr.count("Tightened permissions") == int(tightened)
+            assert "Tightened permissions" not in result.stdout
+            if tightened:
+                assert f"Tightened permissions on {config_path} to owner-only (0600)" in result.stderr
             settings = json.loads(config_path.read_text())
             entry = settings["mcpServers"]["poppy"]
             if daemon:
@@ -74,6 +80,9 @@ def test_setup_preserves_config_and_backup_modes(tmp_path, monkeypatch, daemon, 
                 assert token
                 assert entry["type"] == "http"
                 assert entry["headers"]["Authorization"] == f"Bearer {token}"
+                # Reporting the change must never echo the credential itself.
+                assert token not in result.stdout
+                assert token not in result.stderr
             else:
                 assert entry["type"] == "stdio"
             if existing_mode is not None:
@@ -81,8 +90,9 @@ def test_setup_preserves_config_and_backup_modes(tmp_path, monkeypatch, daemon, 
 
             backups = sorted(claude_dir.glob(".claude.json.pre-poppy.bak*"))
             assert len(backups) == run + (existing_mode is not None)
-            for backup in backups:
-                assert stat.S_IMODE(backup.stat().st_mode) == expected_mode
+            for index, backup in enumerate(backups):
+                backup_mode = existing_mode if index == 0 and existing_mode is not None else expected_mode
+                assert stat.S_IMODE(backup.stat().st_mode) == backup_mode
             if before is not None:
                 assert backups[-1].read_text() == before
     finally:
@@ -92,3 +102,260 @@ def test_setup_preserves_config_and_backup_modes(tmp_path, monkeypatch, daemon, 
     assert all(captured_mode == expected_mode for captured_mode in replace_calls)
     assert not (tmp_path / "agents").exists()
     assert not (tmp_path / "units").exists()
+
+
+@pytest.mark.parametrize(
+    "client", ["claude-code", "claude-desktop", "cursor", "vscode", "windsurf", "codex", "copilot-cli", "pi", "gemini"]
+)
+@pytest.mark.parametrize("symlink", [False, True], ids=["regular", "symlink"])
+@pytest.mark.parametrize("daemon", [False, True], ids=["stdio", "daemon"])
+@pytest.mark.parametrize("existing_mode", [0o640, 0o644], ids=["group-readable", "world-readable"])
+def test_client_token_permissions(tmp_path, monkeypatch, capsys, client, symlink, daemon, existing_mode):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name, directory in {
+        "CODEX_HOME": "codex",
+        "CURSOR_HOME": "cursor",
+        "COPILOT_HOME": "copilot",
+        "PI_CODING_AGENT_DIR": "pi",
+        "POPPY_CLAUDE_DESKTOP_CONFIG": "desktop.json",
+        "POPPY_VSCODE_MCP_CONFIG": "vscode.json",
+    }.items():
+        monkeypatch.setenv(name, str(tmp_path / directory))
+    claude_dir = tmp_path / "claude"
+    path = claude_code_module._client_settings_path(client, claude_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "dotfile" if symlink else path
+    target.write_text('model = "keep"\n' if client == "codex" else '{"marker": "keep"}\n')
+    target.chmod(existing_mode)
+    if symlink:
+        path.symlink_to(target)
+    inode = target.stat().st_ino
+    expected_mode = 0o600 if daemon else existing_mode
+    original_write = os.write
+
+    def capture_write(fd, data):
+        if os.fstat(fd).st_ino == inode and b"test-token" in bytes(data):
+            assert stat.S_IMODE(os.fstat(fd).st_mode) == 0o600
+        return original_write(fd, data)
+
+    monkeypatch.setattr(claude_code_module.os, "write", capture_write)
+    for run in range(2):
+        claude_code_module.install_mcp_config(claude_dir, client, daemon=daemon, daemon_token="test-token")
+        captured = capsys.readouterr()
+        assert stat.S_IMODE(target.stat().st_mode) == expected_mode
+        # The notice goes to stderr only, and never carries the credential.
+        assert captured.err.count("Tightened permissions") == int(daemon and run == 0)
+        assert "Tightened permissions" not in captured.out
+        assert "test-token" not in captured.err
+        assert "test-token" not in captured.out
+        assert ("test-token" in target.read_text()) == daemon
+        assert "keep" in target.read_text()
+        if symlink:
+            assert path.is_symlink()
+            assert target.stat().st_ino == inode
+
+
+@pytest.mark.parametrize("client", ["cursor", "codex"])
+def test_existing_token_backup_is_private(tmp_path, monkeypatch, client):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    path = claude_code_module.install_mcp_config(client=client, daemon=True, daemon_token="old-token")
+    path.chmod(0o644)
+    claude_code_module.install_mcp_config(client=client, daemon=True, daemon_token="new-token")
+    backup = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    assert "old-token" in backup.read_text()
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_chained_relative_symlink_target_is_tightened(tmp_path, monkeypatch, capsys):
+    """A config reached through two relative links still ends owner-only."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path / "cursor"))
+    claude_dir = tmp_path / "claude"
+    path = claude_code_module._client_settings_path("cursor", claude_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    real = dotfiles / "mcp.json"
+    real.write_text('{"marker": "keep"}\n')
+    real.chmod(0o644)
+    middle = dotfiles / "middle.json"
+    middle.symlink_to("mcp.json")
+    path.symlink_to(os.path.relpath(middle, path.parent))
+    inode = real.stat().st_ino
+
+    claude_code_module.install_mcp_config(claude_dir, "cursor", daemon=True, daemon_token="test-token")
+
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    # Both links survive and the same file was rewritten, not replaced.
+    assert path.is_symlink() and middle.is_symlink()
+    assert real.stat().st_ino == inode
+    assert "test-token" in real.read_text()
+    assert "keep" in real.read_text()
+    # The notice names the file whose mode actually changed.
+    assert f"Tightened permissions on {real} to owner-only (0600)" in capsys.readouterr().err
+
+
+def test_token_write_refused_when_mode_cannot_be_tightened(tmp_path, monkeypatch):
+    """Rather than leave the token in a file it cannot protect, setup aborts.
+
+    A config can be writable through its group while still being owned by
+    another user, and only the owner may change a file's mode.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path / "cursor"))
+    claude_dir = tmp_path / "claude"
+    path = claude_code_module._client_settings_path("cursor", claude_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "dotfile.json"
+    target.write_text('{"marker": "keep"}\n')
+    target.chmod(0o644)
+    path.symlink_to(target)
+    inode = target.stat().st_ino
+    original_fchmod = os.fchmod
+
+    def refuse_fchmod(fd, mode):
+        if os.fstat(fd).st_ino == inode:
+            raise PermissionError(1, "Operation not permitted")
+        return original_fchmod(fd, mode)
+
+    monkeypatch.setattr(claude_code_module.os, "fchmod", refuse_fchmod)
+
+    with pytest.raises(claude_code_module.CorruptConfigError) as excinfo:
+        claude_code_module.install_mcp_config(claude_dir, "cursor", daemon=True, daemon_token="test-token")
+
+    assert "Operation not permitted" in str(excinfo.value)
+    assert "test-token" not in str(excinfo.value)
+    # Nothing was written, so nothing leaked.
+    assert "test-token" not in target.read_text()
+    assert "keep" in target.read_text()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def _token_config(token: str) -> str:
+    entry = {"url": "http://127.0.0.1:7679/mcp", "headers": {"Authorization": f"Bearer {token}"}}
+    return json.dumps({"mcpServers": {"poppy": entry}})
+
+
+def _cursor_config_path(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CURSOR_HOME", str(tmp_path / "cursor"))
+    path = claude_code_module._client_settings_path("cursor", tmp_path / "claude")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+@pytest.mark.parametrize("symlink", [False, True], ids=["regular", "symlink"])
+def test_setup_tightens_older_token_bearing_backups(tmp_path, monkeypatch, capsys, symlink):
+    """A backup left behind by an older version holds a token that still works."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json" if symlink else path
+    target.write_text('{"marker": "keep"}\n')
+    target.chmod(0o644)
+    if symlink:
+        path.symlink_to(target)
+
+    # Written before the fix: the backup inherited the config's own mode.
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o644)
+    # A backup with no token keeps whatever mode the user gave it.
+    innocuous = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX + "-1")
+    innocuous.write_text('{"mcpServers": {"other": {"command": "x"}}}')
+    innocuous.chmod(0o644)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    err = capsys.readouterr().err
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o600
+    assert "stale-token" in stale.read_text(), "tightening must not rewrite the backup"
+    assert stat.S_IMODE(innocuous.stat().st_mode) == 0o644
+    assert str(stale) in err
+    assert "stale-token" not in err
+    assert "new-token" not in err
+
+
+def test_untightenable_backup_is_reported_without_failing_setup(tmp_path, monkeypatch, capsys):
+    """A backup Poppy cannot chmod is named, but setup still finishes."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text('{"marker": "keep"}\n')
+    path.chmod(0o644)
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o644)
+    original_chmod = Path.chmod
+
+    def refuse_chmod(self, mode, **kwargs):
+        if self == stale:
+            raise PermissionError(1, "Operation not permitted")
+        return original_chmod(self, mode, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", refuse_chmod)
+
+    written = claude_code_module.install_mcp_config(
+        tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token"
+    )
+
+    err = capsys.readouterr().err
+    assert "Could not narrow permissions on the older backup" in err
+    assert str(stale) in err
+    assert "stale-token" not in err
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o644
+    # Setup itself completed.
+    assert "new-token" in written.read_text()
+    assert stat.S_IMODE(written.stat().st_mode) == 0o600
+
+
+def test_regular_config_write_reports_a_chmod_failure_cleanly(tmp_path, monkeypatch):
+    """The temp-file writer must not let a raw PermissionError escape."""
+    config = tmp_path / "mcp.json"
+    config.write_text("{}\n")
+    config.chmod(0o644)
+
+    def refuse_fchmod(fd, mode):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(claude_code_module.os, "fchmod", refuse_fchmod)
+
+    with pytest.raises(claude_code_module.CorruptConfigError) as excinfo:
+        claude_code_module._write_text(config, _token_config("test-token"), target=config)
+
+    assert "Operation not permitted" in str(excinfo.value)
+    assert "test-token" not in str(excinfo.value)
+    # Nothing reached disk, and the temp file was still cleaned up.
+    assert "test-token" not in config.read_text()
+    assert list(tmp_path.glob("*.poppy-tmp-*")) == []
+
+
+def test_backup_write_reports_a_chmod_failure_cleanly(tmp_path, monkeypatch):
+    """Same for the backup writer, and it leaves no half-made rotation slot."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("stale-token"))
+    source.chmod(0o644)
+
+    def refuse_fchmod(fd, mode):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(claude_code_module.os, "fchmod", refuse_fchmod)
+
+    with pytest.raises(claude_code_module.CorruptConfigError) as excinfo:
+        claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert "Operation not permitted" in str(excinfo.value)
+    assert list(tmp_path.glob("*.pre-poppy.bak*")) == []
+
+
+def test_cli_turns_a_permission_failure_into_a_plain_error(monkeypatch):
+    """`poppy setup` reports the reason instead of printing a stack trace."""
+    from poppy.cli import main as cli_main
+
+    def boom(**kwargs):
+        raise claude_code_module.CorruptConfigError("its permissions could not be set to 0o600")
+
+    monkeypatch.setattr(claude_code_module, "install_for_client", boom)
+
+    with pytest.raises(click.ClickException) as excinfo:
+        cli_main._install_or_abort(client="cursor")
+
+    assert "permissions could not be set" in str(excinfo.value)
