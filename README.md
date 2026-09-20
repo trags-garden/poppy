@@ -25,7 +25,8 @@ poppy setup claude-code   # or: claude-desktop, cursor, vscode, windsurf, codex,
 - **`recall`** pulls the few memories most relevant to a query.
 - **MCP server**: agents call `remember`/`recall`/`forget`/`consolidate`
   directly. Works with Claude Code, Claude Desktop, Cursor, VS Code, Windsurf,
-  Codex, Gemini CLI, Copilot CLI, Pi, Goose, and Hermes Agent.
+  Codex, Gemini CLI, Copilot CLI, Pi, and Goose. Hermes Agent gets a memory
+  provider plugin instead.
 - **Hooks**: Claude Code, Cursor, and Codex hooks surface relevant memories and
   capture new ones. Claude Code and Cursor use end-of-session and compaction
   backstops; Codex uses cadence-only capture.
@@ -43,6 +44,26 @@ poppy recall "python package manager"
 #   we always use uv for python deps
 #     preference | 2026-05-25 | score: 0.91
 ```
+
+## Supported clients
+
+`poppy setup <client>` wires Poppy into a coding agent. Eleven clients have an
+integration today:
+
+- **MCP server plus zero-touch capture hooks**: Claude Code, Cursor, Codex.
+- **MCP server**: Claude Desktop, VS Code, Windsurf, Gemini CLI, GitHub Copilot
+  CLI, Pi, Goose. Most also get a short primer file so the agent knows the
+  memory tools are there.
+- **Memory provider plugin** that calls the Poppy CLI: Hermes Agent.
+
+What supported means here: each integration is verified against its client at
+release time, and maintained best-effort between releases. These clients change
+on their own schedule, so when one of them breaks Poppy, that is a bug worth
+reporting as a
+[GitHub issue](https://github.com/trags-garden/poppy/issues/new/choose) rather
+than something that holds the next release back.
+
+`poppy doctor` checks the integrations installed on your machine.
 
 ## Zero-touch capture
 
