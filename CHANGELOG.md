@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The OpenAI-compatible backend works on a default install. It called the
+  endpoint through an SDK that Poppy does not depend on, so configuring a model
+  and an API key produced empty consolidation and conflict results behind one
+  generic log line. It now uses the HTTP client Poppy already ships, and names
+  what actually went wrong (connection refused, authentication failed, rate
+  limited, an unreadable response) in the worker log and in `poppy doctor`,
+  never writing the credential to either. Requests do not follow redirects, so
+  the key is never replayed to a host the endpoint names, and a plaintext
+  endpoint on another machine warns that the key crosses the network in clear
+  text. A host CLI and this fallback now share one time budget per call rather
+  than taking one each, keeping a capture pass inside its lock. Short conflict
+  checks still leave extraction-backend health unchanged.
 - Conflict detection now reaches a backend and keeps the answer it gets back, so
   `remember --check-conflicts` reports real candidates and auto-supersede
   replaces a contradicted memory instead of quietly storing both. It picks a

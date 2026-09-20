@@ -1,15 +1,21 @@
 import json
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
-from poppy.config import PoppyConfig
+from poppy.capture import health
+from poppy.config import PoppyConfig, resolved_consolidate_settings
 from poppy.consolidation import (
+    OpenAICompatError,
     _compact_event_id,
     call_host_cli,
     call_llm,
+    call_openai_compat,
     consolidate_compact_event,
     consolidate_stop_event,
     detect_host_cli,
@@ -22,6 +28,216 @@ from poppy.consolidation import (
 from poppy.models import Filters
 
 CURSOR_FIXTURE = Path(__file__).parent / "fixtures" / "cursor" / "run-shell.jsonl"
+
+
+@pytest.fixture
+def remote_backend(monkeypatch):
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: None)
+    monkeypatch.setitem(sys.modules, "openai", None)
+    for name in ("POPPY_CONSOLIDATE_MODEL", "POPPY_CONSOLIDATE_BASE_URL", "POPPY_CONSOLIDATE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    return PoppyConfig(consolidate_model="test-model", consolidate_api_key="test-key")
+
+
+@pytest.mark.parametrize("base_url", [None, "https://llm.test/v1", "https://llm.test/prefix/v1/"])
+def test_openai_compat_uses_httpx_without_sdk(monkeypatch, remote_backend, base_url):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        assert (
+            call_openai_compat("extract", model="test-model", base_url=base_url, api_key="test-key", max_tokens=42)
+            == "[]"
+        )
+    (request,) = requests
+    assert str(request.url) == (base_url or "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
+    assert request.headers["Authorization"] == "Bearer test-key"
+    assert json.loads(request.content) == {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "extract"}],
+        "temperature": 0.2,
+        "max_tokens": 42,
+    }
+    assert set(request.extensions["timeout"].values()) == {120}
+
+
+def test_openai_compat_falls_back_to_the_openai_base_url_env(monkeypatch):
+    """A shell already pointed at a compatible server keeps working unconfigured."""
+    for name in ("POPPY_CONSOLIDATE_BASE_URL", "POPPY_CONSOLIDATE_MODEL", "POPPY_CONSOLIDATE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.test/v1")
+    assert resolved_consolidate_settings(PoppyConfig()).base_url == "https://env.test/v1"
+    explicit = PoppyConfig(consolidate_base_url="https://config.test/v1")
+    assert resolved_consolidate_settings(explicit).base_url == "https://config.test/v1"
+
+
+def test_openai_compat_does_not_follow_a_redirect(monkeypatch, remote_backend):
+    """A redirect can point at any host, and the Authorization header must not go there."""
+    seen = []
+
+    def respond(request):
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"location": "https://attacker.test/v1/chat/completions"})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        with pytest.raises(OpenAICompatError) as excinfo:
+            call_openai_compat("extract", model="test-model", base_url="https://llm.test/v1", api_key="test-key")
+    assert seen == ["https://llm.test/v1/chat/completions"]
+    assert "HTTP 302" in str(excinfo.value)
+    assert "attacker.test" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "warns"),
+    [
+        ("https://llm.test/v1", False),
+        ("http://localhost:11434/v1", False),
+        ("http://127.0.0.1:1234/v1", False),
+        ("http://192.168.1.9:11434/v1", True),
+        ("http://llm.test/v1", True),
+    ],
+)
+def test_openai_compat_warns_only_for_a_remote_plaintext_endpoint(monkeypatch, capsys, endpoint, warns):
+    """A model server on loopback needs no TLS; one across the network does."""
+
+    def respond(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        call_openai_compat("extract", model="test-model", base_url=endpoint, api_key="test-key")
+    stderr = capsys.readouterr().err
+    assert ("sent in clear text" in stderr) is warns
+    assert "test-key" not in stderr
+
+
+@pytest.mark.parametrize("record_health", [True, False])
+@pytest.mark.parametrize("items", [[], [{"type": "fact", "content": "Use pytest."}]])
+def test_openai_compat_success_health_and_timeout(monkeypatch, remote_backend, record_health, items):
+    health.record_failure("openai-compat", "HTTP 401: authentication failed")
+    before = health.load()
+
+    def respond(request):
+        # The budget covers the whole call, so the fallback gets what is left of it.
+        assert all(0 < value <= 20 for value in request.extensions["timeout"].values())
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(items)}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        assert (
+            call_llm(
+                "extract", transcript_path=None, cfg=remote_backend, host_timeout_s=20, record_health=record_health
+            )
+            == items
+        )
+    assert health.load() == (health.BackendHealth() if record_health else before)
+
+
+@pytest.mark.parametrize("record_health", [True, False])
+@pytest.mark.parametrize(
+    ("failure", "detail"),
+    [
+        (401, "HTTP 401: authentication failed"),
+        (403, "HTTP 403: access denied"),
+        (429, "HTTP 429: rate limit exceeded"),
+        (500, "HTTP 500: server error"),
+        (httpx.ConnectError, "connection failed (ConnectError)"),
+        (httpx.ReadTimeout, "timed out after 20s (ReadTimeout)"),
+        ("invalid-json", "response is not valid JSON"),
+        ("missing-content", "response has no text in choices[0].message.content"),
+        ("null-content", "response has no text in choices[0].message.content"),
+        ("blank-content", "response has no text in choices[0].message.content"),
+    ],
+)
+def test_openai_compat_failure_is_specific(monkeypatch, capsys, remote_backend, record_health, failure, detail):
+    health.record_failure("claude", "previous failure")
+    before = health.load()
+
+    def respond(request):
+        if isinstance(failure, type):
+            raise failure("private endpoint and credentials", request=request)
+        if isinstance(failure, int):
+            return httpx.Response(failure, json={"error": {"message": "private endpoint and credentials"}})
+        if failure == "invalid-json":
+            return httpx.Response(200, text="private endpoint and credentials")
+        if failure in ("null-content", "blank-content"):
+            content = None if failure == "null-content" else "   "
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+        return httpx.Response(200, json={"choices": []})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        assert (
+            call_llm(
+                "extract", transcript_path=None, cfg=remote_backend, host_timeout_s=20, record_health=record_health
+            )
+            == []
+        )
+    stderr = capsys.readouterr().err
+    assert f"openai-compat {detail}" in stderr
+    assert "private endpoint and credentials" not in stderr
+    assert "returned no text" not in stderr
+    assert "test-key" not in stderr
+    if record_health:
+        recorded = health.load().clis["openai-compat"].last_error
+        assert recorded == detail
+        assert "test-key" not in recorded
+    else:
+        assert health.load() == before
+
+
+def test_openai_compat_output_we_cannot_parse_does_not_mark_the_backend_healthy(monkeypatch, capsys, remote_backend):
+    """Text back is not proof the fallback works: a server can return an error page as prose."""
+    health.record_failure("openai-compat", "HTTP 500: server error")
+    before = health.load()
+
+    def respond(request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": "Sorry, I cannot help with that."}}]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        assert call_llm("extract", transcript_path=None, cfg=remote_backend) == []
+    assert "openai-compat output yielded 0 items" in capsys.readouterr().err
+    assert health.load() == before
+
+
+@pytest.mark.parametrize("cli_is_slow", [True, False])
+def test_the_fallback_gets_what_is_left_of_the_budget(monkeypatch, capsys, remote_backend, cli_is_slow):
+    """Both backends share one budget, so a capture pass cannot outlive its lock.
+
+    A host CLI that burns the whole budget leaves nothing to call the fallback
+    with; one that fails immediately leaves almost all of it.
+    """
+    budget = 0.2
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: "claude")
+    monkeypatch.setattr("poppy.consolidation.MIN_FALLBACK_TIMEOUT_S", 0.01)
+    timeouts = []
+
+    def cli(prompt, *, cli, timeout_s, record_health=True):
+        if cli_is_slow:
+            time.sleep(timeout_s)
+        return None
+
+    def respond(request):
+        timeouts.append(max(request.extensions["timeout"].values()))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "[]"}}]})
+
+    monkeypatch.setattr("poppy.consolidation.call_host_cli", cli)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        assert call_llm("extract", transcript_path=None, cfg=remote_backend, host_timeout_s=budget) == []
+    stderr = capsys.readouterr().err
+    if cli_is_slow:
+        assert timeouts == [], "the fallback must not start a request the budget cannot cover"
+        assert f"openai-compat skipped, claude used the {budget}s budget" in stderr
+    else:
+        assert timeouts and timeouts[0] <= budget
+        assert "skipped" not in stderr
 
 
 def test_is_enabled_respects_env(tmp_path, monkeypatch):

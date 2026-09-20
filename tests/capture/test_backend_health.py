@@ -21,6 +21,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -440,6 +441,46 @@ def _doctor(poppy_dir: Path, tmp_path: Path):  # type: ignore[no-untyped-def]
         ["doctor"],
         env={"POPPY_DIR": str(poppy_dir), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude-config")},
     )
+
+
+@pytest.mark.parametrize("forced", [False, True])
+@pytest.mark.parametrize("failure", [401, httpx.ConnectError])
+@pytest.mark.parametrize("attempts", [1, health.FAILURE_THRESHOLD])
+def test_doctor_reports_remote_failure(tmp_path, monkeypatch, capsys, forced, failure, attempts):
+    poppy_dir = _consented_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/poppy" if name == "poppy" else None)
+    if forced:
+        monkeypatch.setenv("POPPY_CONSOLIDATE", "1")
+    cfg = PoppyConfig(consolidate_model="test-model", consolidate_api_key="test-key")
+    (poppy_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "engine": "seed",
+                "consent": "granted",
+                "consolidate_model": cfg.consolidate_model,
+                "consolidate_api_key": cfg.consolidate_api_key,
+            }
+        )
+    )
+    detail = "HTTP 401: authentication failed" if failure == 401 else "connection failed (ConnectError)"
+
+    def respond(request):
+        if failure == 401:
+            return httpx.Response(401)
+        raise failure("connection refused", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr("poppy.consolidation.httpx.post", client.post)
+        for _ in range(attempts):
+            assert call_llm("extract", transcript_path=None, cfg=cfg) == []
+    assert detail in capsys.readouterr().err
+    result = _doctor(poppy_dir, tmp_path)
+    assert result.exit_code == 0, result.output
+    assert "[!] openai-compat: WARN" in result.output
+    assert detail in result.output
+    assert "`openai-compat` runs and is logged in" not in result.output
+    health.record_success()
+    assert "[!] openai-compat: WARN" not in _doctor(poppy_dir, tmp_path).output
 
 
 def test_doctor_redacts_the_stderr_tail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

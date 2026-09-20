@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
 from poppy.capture.reconciler import (
@@ -133,12 +134,16 @@ def test_detect_conflicts_parses_backend_text(
         calls.append("host")
         return raw if backend == "host" else "invalid JSON"
 
-    def remote(prompt, **kwargs):
+    def remote(url, **kwargs):
+        # A verdict's budget covers both backends, so the fallback gets the rest of it.
+        assert 0 < kwargs["timeout"] <= CONFLICT_LLM_TIMEOUT_S
         calls.append("remote")
-        return raw
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": raw}}]}, request=httpx.Request("POST", url)
+        )
 
     monkeypatch.setattr("poppy.consolidation.call_host_cli", host)
-    monkeypatch.setattr("poppy.consolidation.call_openai_compat", remote)
+    monkeypatch.setattr("httpx.post", remote)
     cfg = PoppyConfig(consolidate_model="test-model", consolidate_api_key="test-key")
     conflicts = detect_conflicts(engine, _mk("new", "use bge-large"), cfg=cfg)
 
