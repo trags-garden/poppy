@@ -14,10 +14,14 @@ from poppy.cli.main import cli
 from poppy.config import load_config, save_config
 
 
-def _allow_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+def _allow_checks(monkeypatch: pytest.MonkeyPatch, poppy_dir: Path | None = None) -> None:
     monkeypatch.delenv("POPPY_UPDATE_CHECK_OFF", raising=False)
     monkeypatch.delenv("POPPY_TELEMETRY_OFF", raising=False)
     monkeypatch.delenv("POPPY_TELEMETRY_HOST", raising=False)
+    if poppy_dir is not None:
+        config = load_config(poppy_dir)
+        config.telemetry_enabled = True
+        save_config(config)
 
 
 def _payload(version: str) -> dict[str, object]:
@@ -25,7 +29,7 @@ def _payload(version: str) -> dict[str, object]:
 
 
 def test_check_fetches_once_per_day_and_refetches_after_ttl(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
     calls: list[int] = []
 
@@ -51,7 +55,7 @@ def test_check_fetches_once_per_day_and_refetches_after_ttl(tmp_path, monkeypatc
 
 
 def test_failed_fetch_is_silent_and_latches_checked_at(tmp_path, monkeypatch, capsys):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     now = datetime.datetime(2026, 1, 2, tzinfo=datetime.UTC)
 
     def broken_fetcher():
@@ -68,7 +72,7 @@ def test_failed_fetch_is_silent_and_latches_checked_at(tmp_path, monkeypatch, ca
 
 
 def test_notice_latches_once_for_each_new_version(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
     start = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 
@@ -90,7 +94,7 @@ def test_notice_latches_once_for_each_new_version(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("env_name", ["POPPY_UPDATE_CHECK_OFF", "POPPY_TELEMETRY_OFF"])
 def test_environment_gates_prevent_fetch_and_notice(tmp_path, monkeypatch, env_name):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
     update_check.check(tmp_path, fetcher=lambda: _payload("0.2.3"))
     monkeypatch.setenv(env_name, "1")
@@ -105,7 +109,7 @@ def test_environment_gates_prevent_fetch_and_notice(tmp_path, monkeypatch, env_n
 
 
 def test_config_gate_prevents_fetch_and_notice(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
     update_check.check(tmp_path, fetcher=lambda: _payload("0.2.3"))
     config = load_config(tmp_path)
@@ -123,7 +127,7 @@ def test_config_gate_prevents_fetch_and_notice(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("env_value", [None, "0", "false"])
 def test_telemetry_config_gate_prevents_http_request(tmp_path, monkeypatch, env_value):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     if env_value is not None:
         monkeypatch.setenv("POPPY_TELEMETRY_OFF", env_value)
     config = load_config(tmp_path)
@@ -145,7 +149,7 @@ def test_telemetry_config_gate_prevents_http_request(tmp_path, monkeypatch, env_
 
 
 def test_telemetry_enabled_and_update_check_on_reports_enabled(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     config = load_config(tmp_path)
     config.telemetry_enabled = True
     config.update_check = True
@@ -159,7 +163,7 @@ def test_telemetry_enabled_and_update_check_on_reports_enabled(tmp_path, monkeyp
     [("1", "1", "POPPY_UPDATE_CHECK_OFF=1"), (None, "1", "POPPY_TELEMETRY_OFF=1"), (None, None, None)],
 )
 def test_existing_gates_take_precedence_over_telemetry_config(tmp_path, monkeypatch, update_off, telemetry_off, reason):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     if update_off is not None:
         monkeypatch.setenv("POPPY_UPDATE_CHECK_OFF", update_off)
     if telemetry_off is not None:
@@ -188,7 +192,7 @@ def test_version_comparison_uses_integer_components():
 
 
 def test_unparseable_pypi_version_is_not_cached_as_an_update(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
 
     result = update_check.check(tmp_path, fetcher=lambda: _payload("0.2.3rc1"))
@@ -198,7 +202,7 @@ def test_unparseable_pypi_version_is_not_cached_as_an_update(tmp_path, monkeypat
 
 
 def test_injected_fetcher_may_return_the_latest_version_directly(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
 
     result = update_check.check(tmp_path, fetcher=lambda: "0.2.3")
@@ -247,7 +251,7 @@ def test_production_fetcher_sends_only_version_user_agent(monkeypatch):
     ],
 )
 def test_doctor_reports_version_status(tmp_path, monkeypatch, latest, expected):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
     update_check.check(tmp_path, fetcher=lambda: _payload(latest))
     env = {
@@ -277,7 +281,7 @@ def test_doctor_reports_disabled_update_check_reason(tmp_path, monkeypatch):
 
 
 def test_config_command_sets_update_check_on_and_off(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path), "POPPY_TELEMETRY_OFF": None}
 
@@ -305,7 +309,7 @@ def test_hook_command_skips_update_epilogue(tmp_path, monkeypatch):
 
 
 def test_non_tty_cli_does_not_print_cached_notice(tmp_path, monkeypatch):
-    _allow_checks(monkeypatch)
+    _allow_checks(monkeypatch, tmp_path)
     monkeypatch.setattr(update_check, "installed_version", lambda: "0.2.2")
     update_check.check(tmp_path, fetcher=lambda: _payload("0.2.3"))
 
@@ -318,3 +322,15 @@ def test_non_tty_cli_does_not_print_cached_notice(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "poppy 0.2.3 is available" not in result.stderr
     assert json.loads((tmp_path / "update_check.json").read_text())["notified_version"] is None
+
+
+def test_unanswered_telemetry_consent_prevents_update_request(tmp_path, monkeypatch):
+    _allow_checks(monkeypatch)
+
+    def unexpected_fetch():
+        pytest.fail("Unanswered telemetry consent must prevent the PyPI request")
+
+    result = update_check.check(tmp_path, fetcher=unexpected_fetch)
+    assert result.enabled is False
+    assert result.disabled_reason == "telemetry is off: not answered yet"
+    assert not (tmp_path / "update_check.json").exists()

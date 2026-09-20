@@ -100,10 +100,12 @@ jobs:
 
       # The suite forces POPPY_TELEMETRY_OFF=1, so the atexit flush never runs
       # under pytest. Install the built wheel into a fresh venv (a fresh
-      # resolve, like a user's pipx install), run real commands with telemetry
-      # ON against a loopback sink, and fail if anything but the first-run
-      # notice reaches stderr or a telemetry-emitting command takes longer than
-      # a few seconds to exit.
+      # resolve, like a user's pipx install), opt in explicitly (a fresh store
+      # is off until answered, and nothing here is a terminal, so the first-run
+      # question neither fires nor could answer itself), run real commands with
+      # telemetry ON against a loopback sink, and fail if anything at all
+      # reaches stderr or a telemetry-emitting command takes longer than a few
+      # seconds to exit.
       - name: Telemetry-on smoke on the built wheel (fresh resolve)
         env:
           POPPY_TELEMETRY_HOST: http://127.0.0.1:9
@@ -121,6 +123,7 @@ jobs:
           P=/tmp/telemetry-smoke/venv/bin/poppy
           ERR=/tmp/telemetry-smoke/stderr.txt
           : > "$ERR"
+          timeout 15 "$P" telemetry on 2>> "$ERR" || exit 1
           # `engines use` and `--version` emit no event; `remember` and `recall`
           # do, so they exercise the atexit flush. Warm the interpreter/model
           # cache with the first emitting command, then measure the second: its
@@ -138,9 +141,8 @@ jobs:
             exit 1
           fi
           echo "--- stderr ---"; cat "$ERR"
-          NOTICE='poppy: anonymous usage telemetry is on (no memory content is ever sent). Disable: poppy telemetry off'
-          if grep -vxF "$NOTICE" "$ERR" | grep -q .; then
-            echo "::error::telemetry-on commands wrote more than the first-run notice to stderr"
+          if [ -s "$ERR" ]; then
+            echo "::error::telemetry-on commands wrote to stderr"
             exit 1
           fi
 

@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Anonymous usage telemetry is off until you turn it on. Poppy asks once, on
+  the first run in a terminal, and the default is no; `poppy telemetry on|off`
+  answers it too. Nothing is sent, and the daily PyPI update check does not
+  run either, while the question is unanswered, so a fresh install makes no
+  network request until you say yes. The question is only asked when someone
+  can answer it: hooks, the MCP server, daemon commands, detached workers,
+  `--json` output, `--help`, any piped or redirected run, and any terminal
+  driven by a coding agent or a CI runner are never interrupted by it.
+  `poppy telemetry status` reports "not answered yet" separately from a choice
+  you made.
 - Removed experimental local ONNX model-file overrides. Bloom always uses its
   pinned models, including cached models when offline.
 - The local web UI now runs the same design system as the trags.ai dashboard
@@ -56,6 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   background capture pass, and a verdict that runs out of time is logged without
   counting against the backend, so a slow CLI cannot make a working install
   report itself as inactive.
+- A client config that receives the loopback daemon's token now ends up readable
+  only by its owner (mode 0600), even when it was group- or world-readable
+  before, so no other user on the machine can read the token and talk to the
+  memory daemon. Symlinked dotfiles configs and rotated backups are covered too.
+  Setup also narrows backups left behind by earlier versions, which copied the
+  config's own permissions and so can still hold a working token in a readable
+  file. Setup reports each change it makes, and refuses to write the token at
+  all to a file whose permissions it cannot narrow. Configs that carry no token
+  keep the permissions you gave them.
 - `poppy setup` now refuses unparseable or structurally invalid client configs
   before changing files or starting the daemon, preserving Claude Code settings
   instead of silently replacing user permissions, environment, model and hooks
@@ -64,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed JSON; non-UTF-8 configs are refused without changes.
 - `poppy telemetry off` now also disables the daily PyPI update check in
   `poppy doctor`, honoring the persistent telemetry opt-out.
+- A hand-edited `"telemetry_enabled": "false"` or `"off"` in `config.json` no
+  longer reads as an opt-in. Only a real JSON boolean counts as an answer now;
+  anything else leaves the question unanswered, which is off.
 - Trags API keys stay in config.json as a fallback unless an OS keychain write
   can be read back in the same session, preventing background jobs from losing
   access to their configured key. `poppy doctor` now reports the key source, and
