@@ -3576,6 +3576,17 @@ def test_parent_removal_does_not_expose_a_hidden_copys_old_snapshot(tmp_path, en
     store = TombstoneStore(db)
     store.add(copy)
     parent = engine.get("sess-2026-01")
+
+    # While the copy and its snapshot are still stored, both must already read
+    # as missing. Asserting this only after the parent is gone would prove
+    # nothing about the accessors: by then the rows are deleted, so an
+    # unfiltered read answers None too.
+    assert engine.get(copy_id) is not None
+    assert store.get(copy_id) is not None
+    assert engine.get_public(copy_id) is None
+    assert store.get_public(copy_id) is None
+    assert copy.content not in json.dumps([t.memory.content for t in store.list_public()])
+
     if operation == "forget":
         forget(engine, tmp_path, parent.id, tombstones=store)
     elif operation == "edit":
