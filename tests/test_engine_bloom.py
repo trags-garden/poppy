@@ -217,7 +217,7 @@ def test_expires_at_filtered_on_retrieve_and_list(tmp_path: Path) -> None:
 
 
 def test_purge_expired_drops_memory_and_embedding(tmp_path: Path) -> None:
-    """purge_expired must also clean up synthetic closet rows."""
+    """purge_expired must also clean up synthetic derived-copy rows."""
     engine = _make_engine(tmp_path / "t.db")
     past = datetime.now(timezone.utc) - timedelta(days=1)
     turns_json = '[{"speaker":"Alice","dia_id":"D1","text":"hi"},{"speaker":"Bob","dia_id":"D2","text":"yo"}]'
@@ -229,7 +229,7 @@ def test_purge_expired_drops_memory_and_embedding(tmp_path: Path) -> None:
     assert pre == 1
 
     purged = engine.purge_expired()
-    assert purged == 1  # only the parent counts; closet rows are cascade
+    assert purged == 1  # only the parent counts; derived-copy rows are cascade
 
     conn = sqlite3.connect(str(engine._db_path))
     post_mem = conn.execute("SELECT COUNT(*) FROM memories WHERE id LIKE 'session1%'").fetchone()[0]
