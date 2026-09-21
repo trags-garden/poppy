@@ -238,6 +238,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fsync, rename) and created owner-only. A crash, kill or full disk mid-save
   used to leave a truncated file that loaded as empty state, silently resetting
   every remote's sync watermarks and the telemetry device id.
+- The local web UI's content-security-policy no longer allows `unsafe-inline`
+  for scripts or styles. The one inline style it used has moved into a CSS
+  class.
 
 ### Upgrading
 
@@ -269,8 +272,9 @@ as the 0.3.0 Upgrading note says.
 - The torch-backed `bloom` and `sprout` engines, and with them the `[torch]`
   install extra and its `ml` alias. `sentence-transformers` and torch are no
   longer dependencies of poppy-memory in any configuration. These engines live
-  on in the poppy-lab experiment repo; if a future evaluation shows the torch
-  stack materially better, it can come back with published results behind it.
+  on in a separate experiments repository; if a future evaluation shows the
+  torch stack materially better, it can come back with published results
+  behind it.
 
 ### Fixed
 

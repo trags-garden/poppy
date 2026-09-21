@@ -2466,6 +2466,12 @@ def doctor():
         if detail:
             bits.append(f"{separator}{detail}")
         if hint and status != "OK":
+            # A detail that is already a full sentence ends with its own period;
+            # joining that with "<separator>hint" would print a stray ".," right
+            # before the hint. Drop that trailing period so the hint reads as a
+            # continuation instead.
+            if bits and bits[-1].endswith("."):
+                bits[-1] = bits[-1][:-1]
             bits.append(f"{separator}{hint}")
         click.echo("".join(bits))
 
@@ -3400,16 +3406,16 @@ def doctor():
         CaptureStatus.FORCED_ENV: ("OK", ""),
         # Consent pending is the default state of a fresh install, surfaced by
         # the SessionStart notice and `poppy consent`; it is not a problem the
-        # doctor should flag as a WARN. Informational, with the nudge.
-        CaptureStatus.INERT_PENDING: ("INFO", "run `poppy autocapture on --global` to turn it on"),
+        # doctor should flag as a WARN. Informational; the nudge is already in
+        # the status message below, so no separate hint here.
+        CaptureStatus.INERT_PENDING: ("INFO", ""),
         # A deliberate off-state is not a problem the doctor should flag.
         CaptureStatus.DISABLED_OPT_OUT: ("OK", ""),
         CaptureStatus.DISABLED_ENV: ("OK", ""),
         CaptureStatus.DISABLED_PROJECT: ("OK", ""),
-        CaptureStatus.WARN_REMOTE_ONLY: (
-            "WARN",
-            "install a host CLI (claude/cursor-agent/codex/gemini) for free local capture",
-        ),
+        # The status message below already spells out the same "install a host
+        # CLI" instruction, so no separate hint here.
+        CaptureStatus.WARN_REMOTE_ONLY: ("WARN", ""),
         # A host CLI on PATH that fails every extraction: the counter
         # and the last stderr tail come from the recorded backend health.
         CaptureStatus.WARN_BACKEND_BROKEN: (

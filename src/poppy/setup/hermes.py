@@ -73,7 +73,7 @@ shares ``~/.poppy/memories.db`` with Claude Code and any other client wired to
 the same Poppy install.
 
 Config via environment variables (profile-scoped via each profile's .env):
-  POPPY_DIR   — override the Poppy data directory (default ~/.poppy)
+  POPPY_DIR   : override the Poppy data directory (default ~/.poppy)
 
 Working directory: $HERMES_HOME/poppy/ (profile-scoped sentinel only; the
 actual data lives at $POPPY_DIR or ~/.poppy/).

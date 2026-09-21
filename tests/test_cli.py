@@ -591,6 +591,13 @@ def test_doctor_reports_capture_consent_pending(tmp_path, monkeypatch):
     assert "poppy autocapture on --global" in result.output
     # The old, wrong hint must be gone.
     assert "config set consolidate-enabled true" not in result.output
+    # The status message already carries the nudge; doctor must not also
+    # append it a second time as a separate hint.
+    assert result.output.count("poppy autocapture on --global") == 1
+    assert (
+        "  [·] auto-capture: INFO, Auto-capture is pending your consent; "
+        "nothing is captured yet. Run `poppy autocapture on --global` to turn it on."
+    ) in result.output
 
 
 def test_doctor_no_backend_hint_lists_every_supported_host_cli(tmp_path, monkeypatch):
@@ -605,6 +612,48 @@ def test_doctor_no_backend_hint_lists_every_supported_host_cli(tmp_path, monkeyp
 
     assert result.exit_code == 0, result.output
     assert "install a supported host CLI (claude/cursor-agent/codex/gemini)" in result.output
+
+
+def test_doctor_remote_only_hint_not_doubled(tmp_path, monkeypatch):
+    """The WARN_REMOTE_ONLY status message already names the fix; doctor must
+    not also append the same instruction again as a separate hint."""
+    monkeypatch.setattr("poppy.capture.policy.host_cli_available", lambda: False)
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "consent": "granted",
+                "engine": "seed",
+                "consolidate_model": "gpt-test",
+                "consolidate_api_key": "test-key",
+            }
+        )
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["doctor"],
+        env={"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Install a host CLI (claude/cursor-agent/codex/gemini)") == 1
+    assert (
+        "  [!] auto-capture: WARN, Auto-capture is INACTIVE: only a paid remote backend is "
+        "configured, so capture will not auto-spend. Install a host CLI "
+        "(claude/cursor-agent/codex/gemini) for free local capture."
+    ) in result.output
+
+
+def test_doctor_lines_never_leave_a_dot_comma_artifact(tmp_path, monkeypatch):
+    """A doctor detail that is a full sentence must not leave a stray '.,'
+    when a hint is appended after it (the join used to glue a bare comma onto
+    the detail's own trailing period)."""
+    monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}
+    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    result = runner.invoke(cli, ["doctor"], env=env)
+    assert ".," not in result.output
 
 
 def test_doctor_reports_last_capture(tmp_path):
