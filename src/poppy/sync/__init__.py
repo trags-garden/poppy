@@ -819,9 +819,6 @@ def _apply_pulled_row(
     the same gate as the write it leads to, so no concurrent forget, restore or
     edit can invalidate a decision between the two.
     """
-    if tombstones.local_deletion_wins(incoming.id, incoming.updated_at):  # type: ignore[attr-defined]
-        return "stale"
-
     if is_tombstone(row):
         local_live = engine.get(incoming.id)  # type: ignore[attr-defined]
         deleted_at = deletion_time(row)
@@ -899,9 +896,6 @@ def _apply_pulled_row(
             tombstone_preview[incoming.id] = None  # type: ignore[attr-defined]
         return "live"
     engine.ingest(incoming)  # type: ignore[arg-type]
-    # This id now holds a real memory that beat any deletion recorded for it, so
-    # the record has done its job and must not outlive the thing it described.
-    tombstones.clear_local_deletion(incoming.id)  # type: ignore[attr-defined]
     if local_tomb is not None:
         # The live row won over an older local tombstone: a restore
         # (or re-create) that happened elsewhere. Drop the stale

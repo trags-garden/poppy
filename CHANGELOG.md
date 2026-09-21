@@ -38,9 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A conversation transcript is now stored as one memory. Earlier versions also
   derived a separate copy of each speaker's turns, and nothing derives those any
   more. A store that ingested multi-speaker transcripts under 0.3.0 or earlier
-  may still hold those copies. They are ordinary memories now, listed and
-  searchable like any other, and `poppy forget <id>` removes any you do not
-  want.
+  may still hold those copies. They are ordinary memories now, listed,
+  searchable and synced like any other, so they are uploaded on the next sync
+  if you have Trags sync on. `poppy forget <id>` removes any you do not want.
 
 ### Fixed
 

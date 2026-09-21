@@ -451,8 +451,8 @@ def test_pull_does_not_clear_a_tombstone_written_during_the_pull(tmp_path):
     real_ingest = engine.ingest
 
     def racing_ingest(memory, **kwargs):
-        # **kwargs: sync passes `remote_event_ts` to an engine that takes it, and
-        # this stands in for the real method on a real engine.
+        # **kwargs so this stub keeps standing in for the real method if an
+        # engine ever takes keyword arguments sync does not know about.
         real_ingest(memory, **kwargs)
         # Concurrent UI delete lands between the ingest and the cleanup.
         tombstones.add(memory)
@@ -526,8 +526,8 @@ def test_pull_cleanup_keeps_a_same_tick_replacement_tombstone(tmp_path, monkeypa
     real_ingest = engine.ingest
 
     def racing_ingest(memory, **kwargs):
-        # **kwargs: sync passes `remote_event_ts` to an engine that takes it, and
-        # this stands in for the real method on a real engine.
+        # **kwargs so this stub keeps standing in for the real method if an
+        # engine ever takes keyword arguments sync does not know about.
         real_ingest(memory, **kwargs)
         # Concurrent local delete, landing on the same frozen tombstoned_at.
         tombstones.add(memory)

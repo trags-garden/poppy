@@ -15,7 +15,7 @@ Two probes come straight from the issue, one per broken site:
      redacted parent live;
   b. a memory expiring an hour from now, expressed at ``-12:00``: the stored
      string sorted below ``now`` in UTC, so the gated purge hard-deleted a live
-     memory (and its per-speaker copies) on the spot.
+     memory on the spot.
 
 The rest cover the fix itself: writes normalise, the one-off rewrite brings
 existing rows into line exactly once, and the two compare sites still answer

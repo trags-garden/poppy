@@ -21,14 +21,12 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
-from poppy.db import write_txn
 from poppy.engine._timestamps import utc_iso
 from poppy.paths import ensure_poppy_dir, write_text_atomic
 
@@ -363,57 +361,3 @@ def clear_error(poppy_dir: Path, url: str) -> None:
         remote.error_gens.clear()
 
     mutate_remote(poppy_dir, url, _clear)
-
-
-# Ids this store deleted locally and must never accept back from a remote at or
-# below the recorded instant. The stamp is compared as TEXT by the upsert's MAX,
-# so both writers below put it through `utc_iso` first: two spellings of one
-# instant sort the wrong way round and would lower a record instead of raising it.
-LOCAL_DELETIONS_DDL = "CREATE TABLE IF NOT EXISTS sync_local_deletions (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)"
-
-_RECORD_LOCAL_DELETION_SQL = (
-    "INSERT INTO sync_local_deletions (id, deleted_at) VALUES (?, ?) "
-    "ON CONFLICT(id) DO UPDATE SET deleted_at = MAX(deleted_at, excluded.deleted_at)"
-)
-
-
-def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
-
-
-def local_deletion_at(conn: sqlite3.Connection | None, memory_id: str) -> datetime | None:
-    """When this store deleted ``memory_id`` locally, or None if it never did."""
-    if conn is None or not _table_exists(conn, "sync_local_deletions"):
-        return None
-    row = conn.execute("SELECT deleted_at FROM sync_local_deletions WHERE id = ?", (memory_id,)).fetchone()
-    if row is None:
-        return None
-    try:
-        return datetime.fromisoformat(row[0])
-    except (TypeError, ValueError, OverflowError):  # pragma: no cover - both writers spell it
-        return None
-
-
-def local_deletion_wins(conn: sqlite3.Connection | None, memory_id: str, updated_at: datetime) -> bool:
-    """Whether a durable local deletion supersedes this incoming version."""
-    deleted_at = local_deletion_at(conn, memory_id)
-    if deleted_at is None:
-        return False
-    if updated_at.tzinfo is None:
-        updated_at = updated_at.replace(tzinfo=timezone.utc)
-    return deleted_at >= updated_at
-
-
-def clear_local_deletion(conn: sqlite3.Connection, memory_id: str) -> None:
-    """Drop the record for an id a real memory has legitimately taken back."""
-    if not _table_exists(conn, "sync_local_deletions"):
-        return
-    with write_txn(conn):
-        conn.execute("DELETE FROM sync_local_deletions WHERE id = ?", (memory_id,))
-
-
-def record_local_deletion(conn: sqlite3.Connection, memory_id: str, deleted_at: datetime) -> None:
-    """Remember a non-restorable deletion without queuing a cloud write."""
-    with write_txn(conn):
-        conn.execute(LOCAL_DELETIONS_DDL)
-        conn.execute(_RECORD_LOCAL_DELETION_SQL, (memory_id, utc_iso(deleted_at)))
