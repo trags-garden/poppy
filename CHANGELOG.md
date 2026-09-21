@@ -46,7 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is left untouched, nothing you wrote yourself is removed, and none of the
   copies are uploaded on the way out. A copy that an earlier version had
   already uploaded stays out of this store and never comes back to it, and it
-  never appears in Trash as something to restore.
+  never appears in Trash as something to restore. A row the cleanup cannot read
+  is left alone and stays visible, and the store still opens.
 
 ### Fixed
 

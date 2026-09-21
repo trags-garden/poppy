@@ -7,6 +7,7 @@ from pathlib import Path
 from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
 from poppy.engine._legacy_copies import (
+    clear_copy_snapshot,
     clear_marked_copies,
     clear_retired_records,
     ensure_legacy_copy_tables,
@@ -343,7 +344,12 @@ class SeedEngine(RetrievalEngine):
                 # A copy an older release left behind holds the text this write
                 # is replacing, so it is being redacted too. A metadata-only
                 # write replays the same body and leaves them alone.
-                clear_marked_copies(self._conn, memory.id, has_embeddings=_has_memory_embeddings(self._conn))
+                clear_marked_copies(
+                    self._conn,
+                    memory.id,
+                    remote_event_ts=remote_event_ts,
+                    has_embeddings=_has_memory_embeddings(self._conn),
+                )
                 # Gated on content change alone, not on enriched_schema:
                 # ``_invalidate_parent_embedding`` self-guards a missing table
                 # or column, and a store that has ``memory_embeddings`` but not
@@ -445,7 +451,12 @@ class SeedEngine(RetrievalEngine):
         with self._lock, write_txn(self._conn):
             # Copies an older release left behind go with it: nothing derives
             # them any more, and a copy of deleted text must not outlive it.
-            clear_marked_copies(self._conn, memory_id, has_embeddings=_has_memory_embeddings(self._conn))
+            clear_marked_copies(
+                self._conn,
+                memory_id,
+                remote_event_ts=remote_event_ts,
+                has_embeddings=_has_memory_embeddings(self._conn),
+            )
             # Delete the parent row. Its own ``memory_embeddings`` vector is
             # local-only (never synced, recomputed per engine), so it goes here:
             # leaving it lets a later seed insert of the same id silently inherit
@@ -507,6 +518,9 @@ class SeedEngine(RetrievalEngine):
             memories = [mid for mid, is_memory in expired if is_memory]
             for mid in memories:
                 clear_marked_copies(self._conn, mid, has_embeddings=has_embeddings, tombstone=False)
+            for mid, is_memory in expired:
+                if not is_memory:
+                    clear_copy_snapshot(self._conn, mid)
             for batch in chunked([mid for mid, _ in expired]):
                 placeholders = ",".join("?" * len(batch))
                 if has_embeddings:

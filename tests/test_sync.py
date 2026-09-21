@@ -4080,7 +4080,12 @@ def test_cleanup_retires_the_upload_queue_including_orphans(tmp_path):
     # No marked rows at all, so the cleanup must still reach the queue.
     SeedEngine(tmp_path / "memories.db")._conn.close()
 
-    assert TombstoneStore(tmp_path / "memories.db").pending_legacy_announcements() == []
+    assert (
+        TombstoneStore(tmp_path / "memories.db")
+        ._conn.execute("SELECT id FROM legacy_closet_ids WHERE announce_pending = 1")
+        .fetchall()
+        == []
+    )
 
 
 def test_a_reclaimed_id_drops_its_deletion_record(tmp_path):

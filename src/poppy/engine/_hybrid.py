@@ -19,6 +19,7 @@ import numpy as np
 from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
 from poppy.engine._legacy_copies import (
+    clear_copy_snapshot,
     clear_marked_copies,
     clear_retired_records,
     ensure_legacy_copy_tables,
@@ -384,7 +385,7 @@ class HybridEngine(RetrievalEngine):
                 # text left over from an older release is being redacted too. A
                 # write that only changes metadata replays the same body and
                 # leaves them alone.
-                clear_marked_copies(self._conn, memory.id, has_embeddings=True)
+                clear_marked_copies(self._conn, memory.id, remote_event_ts=remote_event_ts, has_embeddings=True)
             self._insert_memory(
                 memory.id,
                 memory.content,
@@ -500,7 +501,7 @@ class HybridEngine(RetrievalEngine):
         # One transaction: a failure between the copies and the memory itself
         # would otherwise commit half a redaction.
         with self._lock, write_txn(self._conn):
-            clear_marked_copies(self._conn, memory_id, has_embeddings=True)
+            clear_marked_copies(self._conn, memory_id, remote_event_ts=remote_event_ts, has_embeddings=True)
             cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             self._conn.execute("DELETE FROM memory_embeddings WHERE id = ?", (memory_id,))
             return cursor.rowcount > 0
@@ -556,6 +557,9 @@ class HybridEngine(RetrievalEngine):
             memories = [mid for mid, is_memory in expired if is_memory]
             for mid in memories:
                 clear_marked_copies(self._conn, mid, has_embeddings=True, tombstone=False)
+            for mid, is_memory in expired:
+                if not is_memory:
+                    clear_copy_snapshot(self._conn, mid)
             for batch in chunked([mid for mid, _ in expired]):
                 placeholders = ",".join("?" * len(batch))
                 self._conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)

@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from poppy.db import write_gate
-from poppy.engine._legacy_copies import TIER_PROVEN, is_marked_copy
+from poppy.engine._legacy_copies import TIER_LIKELY, TIER_ORPHAN, TIER_PROVEN, is_marked_copy
 from poppy.engine._timestamps import utc_iso
 from poppy.engine.interface import RetrievalEngine
 from poppy.sync.client import (
@@ -942,27 +942,6 @@ def _apply_pulled_row(
     if tombstones.local_deletion_wins(incoming.id, incoming.updated_at):  # type: ignore[attr-defined]
         return "stale"
 
-    # Newer than the record, but is it really someone reclaiming the id? A device
-    # still on the older release goes on deriving these copies and publishing
-    # them, and each publication carries a fresher stamp than the row this store
-    # removed, so the record's own timestamp cannot tell the two apart. Taken at
-    # face value the speaker text comes back as an ordinary memory, drops the
-    # record, and is pushed up again.
-    #
-    # So it is graded against the live parent, the same conjunctive test used
-    # everywhere else: provably the same derived copy is still ours to refuse,
-    # and the record moves up to the stamp just seen so the next publication of
-    # it is covered without grading again. Anything else is a real memory at that
-    # id and takes the ordinary path below, which clears the record as it lands.
-    if (
-        not is_tombstone(row)
-        and tombstones.local_deletion_at(incoming.id) is not None  # type: ignore[attr-defined]
-        and tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN  # type: ignore[arg-type]
-    ):
-        if not dry_run:
-            tombstones.record_local_deletion(incoming.id, incoming.updated_at)  # type: ignore[attr-defined]
-        return "redacted"
-
     # Retained copies from older releases must stay hidden. Applying a cloud
     # row at a marked id would clear its marker and expose the retained text.
     # Deletion evidence also rejects stale copies while allowing real notes
@@ -975,6 +954,31 @@ def _apply_pulled_row(
         dry_run=dry_run,
     ):
         return "copy"
+
+    # Grade the row itself, independently of any local deletion record: a first
+    # pull into a store that never held this id has none, and that is exactly
+    # the case where an old account's leaked copies arrive.
+    #
+    # A row carrying a legacy copy's full provenance is refused whatever its
+    # text grades as. PROVEN is byte-equal to what the live parent projects.
+    # The two weaker outcomes are refused for the same reason the kept-copy
+    # rule hides a drifted row rather than publishing it: the text differs from
+    # the parent's projection, or the parent is absent or has been edited since,
+    # so nothing here can vouch for it, and ingesting it would put speaker text
+    # in front of the user and push it back up. Provenance is narrow enough to
+    # carry that: an exact back-reference to the memory whose id this one
+    # extends, a single-speaker turn list, and a slug that matches that
+    # speaker. A memory that merely shares the id shape earns no tier and takes
+    # the ordinary path below.
+    #
+    # Only a PROVEN one leaves a deletion record. An unproven id must not be
+    # suppressed for the future: a real memory written there later would be
+    # refused and the sync position would move past it.
+    tier = tombstones.grade_incoming_copy(incoming)  # type: ignore[arg-type]
+    if tier in (TIER_LIKELY, TIER_ORPHAN) or (tier == TIER_PROVEN and not is_tombstone(row)):
+        if not dry_run and tier == TIER_PROVEN:
+            tombstones.record_local_deletion(incoming.id, incoming.updated_at)  # type: ignore[attr-defined]
+        return "redacted"
 
     if is_tombstone(row):
         local_live = engine.get(incoming.id)  # type: ignore[attr-defined]
@@ -1023,16 +1027,14 @@ def _apply_pulled_row(
             )
             return "tombstone"
         if local_live is not None:
-            # engine.delete clears the parent's derived copies and
-            # records their content-free tombstones itself, so a
-            # deletion pulled from another device also removes any
-            # cloud copy of them. It is told WHEN the deletion
-            # happened, so every record it writes — for copies it had
-            # marked and for unmarked ones it grades on the way — is
-            # dated from the event rather than from this device's
-            # clock. Receipt time would make them look newer than a
-            # recreation of one of those ids that came after, and the
-            # freshness rule would then skip it for good.
+            # engine.delete clears the copies this parent left behind
+            # and keeps content-free evidence of each one, so a
+            # deletion pulled from another device takes them with it.
+            # It is told WHEN the deletion happened, so every record it
+            # writes is dated from the event rather than from this
+            # device's clock. Receipt time would make them look newer
+            # than a recreation of one of those ids that came after,
+            # and the freshness rule would then skip it for good.
             deletion_ts = deletion_time(row) or incoming.updated_at  # type: ignore[attr-defined]
             engine.delete(incoming.id, **_remote_kwargs(engine, deletion_ts))  # type: ignore[attr-defined]
         # A soft-delete carrying a COPY's text. Only a 0.2.4 client deleting a
@@ -1041,9 +1043,8 @@ def _apply_pulled_row(
         # the speaker text as restorable, and once the parent was forgotten
         # nothing could tell what the entry was any more. Graded here, while the
         # parent is still present, a PROVEN one is recorded as what it is —
-        # content-free, dated from the deletion. A likely one keeps its
-        # entry; restoring it is the user's call, as it is for any row short of
-        # proof.
+        # content-free, dated from the deletion. Drifted incoming candidates
+        # have already been refused above.
         if local_live is None and tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN:  # type: ignore[arg-type]
             copy_deleted_at = deleted_at or incoming.updated_at  # type: ignore[attr-defined]
             tombstones.add_copy_deletions([incoming.id], now=copy_deleted_at)  # type: ignore[attr-defined]

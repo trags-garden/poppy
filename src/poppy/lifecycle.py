@@ -303,8 +303,7 @@ def _supersede_memory(
     tombstones = TombstoneStore(db_path)
     tombstones.add(old, superseded_by=new_memory.id)
     # Superseding redacts the old text, so its derived per-speaker copies go with
-    # it. engine.delete clears them and records their content-free tombstones,
-    # which is what drops any cloud copy.
+    # it. engine.delete clears them and retains content-free deletion evidence.
     engine.delete(old_id)
 
     related = list(new_memory.related_to)

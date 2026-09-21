@@ -253,8 +253,7 @@ def forget(
             mem = None
         else:
             # engine.delete also clears the derived per-speaker copies and
-            # records their content-free tombstones, so the deletion of any
-            # cloud copy travels without this flow tracking their ids.
+            # retains content-free deletion evidence to reject stale sync rows.
             # Snapshot the memory before the live row goes. Push checks the
             # per-ID remote provenance recorded by uploads, pulls, or upgrade.
             ts = store.add(mem)
@@ -351,10 +350,8 @@ def restore(
         #
         # ONLY when nothing is live at the id. With a live row the question is not
         # what the Trash entry is: the already-live branch below simply clears the
-        # entry, and it has to stay that way. Grading first deleted the entry and
-        # queued a cloud cleanup stamped with ITS deletion time — against the id of
-        # an independent note the user or an importer had written there, which push
-        # then overwrote with the placeholder on every device.
+        # entry. Grading that snapshot must not create a copy claim against an
+        # independent note the user or an importer has since written at the id.
         if live is None:
             parent = store.refuse_restorable_copy_snapshot(memory_id)
             if parent is not None:
