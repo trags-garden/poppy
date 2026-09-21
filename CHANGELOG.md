@@ -50,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Removed em dashes from user-facing CLI, dashboard, setup prompt, and MCP copy.
+- Removed em dashes from user-facing CLI, dashboard, setup prompt, and MCP
+  copy. `poppy doctor` status lines now read `label: OK, detail` where they
+  used a dash.
 - Exact-id reads and edits now treat hidden copies retained from earlier
   releases as missing, including MCP recall, CLI confirmations, and dashboard
   details and Trash. Internal cleanup still removes them without exposing text.
