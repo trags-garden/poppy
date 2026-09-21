@@ -15,17 +15,14 @@ parent last pushed at ``12:00+02:00``, so push skipped the newer deletion and th
 cloud kept the redacted parent live; a memory expiring an hour from now expressed
 at ``-12:00`` sorted below ``now`` and was purged on the spot.
 
-PR #81 fixed the spelling for the closet side tables and
-``ui_tombstones.tombstoned_at``. This is the rest of the store, and it works two
-ways on purpose:
+Timestamp normalization applies to live rows and retained deletion records:
 
   * WRITE TIME is the rule. Every engine write puts ``source_timestamp``,
     ``created_at``, ``updated_at`` and ``expires_at`` through
-    :func:`poppy.engine._closet_marker.utc_iso` — the one canonical spelling PR
-    #81 already uses — so nothing deviant enters the store.
+    :func:`utc_iso` so writes share one spelling.
   * A ONE-OFF REWRITE brings the rows already there into that spelling.
     :func:`normalise_stored_timestamps` runs once per store, from the engine
-    constructors next to the marker migration.
+    constructors after legacy cleanup.
 
 Where a compare site can afford to, it ALSO parses rather than trusting the
 spelling, so a row that arrives some other way (a 0.2.4 client sharing
@@ -35,13 +32,9 @@ both sides of its comparison. Trash's seven-day window still compares text in
 SQL, which is correct because both sides of it are now canonical UTC. That is
 belt-and-braces; the write-time rule is what keeps the store consistent.
 
-The rewrite needs its OWN run-once record. The marker migration's signal is the
-presence of ``memories.is_closet``, which says nothing about timestamps: every
-0.3.0-dev store already has that column and still holds unnormalised text. So
-this introduces ``poppy_migrations``, a name-keyed log of one-off data
-migrations, and records itself there in the same transaction that does the
-rewriting — the pair can never diverge, and a crash half way leaves no record and
-retries on the next open.
+The rewrite records completion in the same transaction as the changed rows,
+so an interrupted migration retries on the next open.
+
 """
 
 from __future__ import annotations
@@ -49,14 +42,38 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from poppy.engine._closet_marker import (
-    CLOSET_BACKUP_TABLE,
-    CLOSET_TOMBSTONE_TABLE,
-    LEGACY_CLOSET_TABLE,
-    _columns,
-    _table_exists,
-    utc_iso,
-)
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+
+def utc_iso(value: str | datetime | None) -> str | None:
+    """Canonical UTC text; preserve unreadable or out-of-range legacy values."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(value)
+        except (ValueError, OverflowError):
+            return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        return dt.astimezone(timezone.utc).isoformat()
+    except OverflowError:
+        return value if isinstance(value, str) else value.isoformat()
+
+
+def chunked(items: list[str], size: int | None = None) -> list[list[str]]:
+    limit = size or 500
+    return [items[i : i + limit] for i in range(0, len(items), limit)]
+
 
 # Name-keyed log of one-off DATA migrations — the ones whose having-run is not
 # visible in the schema. Schema-shaped migrations stay as they are: a column's
@@ -103,7 +120,7 @@ TIMESTAMP_MIGRATION = "utc_timestamp_text"
 REPUSH_MARKER = "utc_timestamp_text_repush"
 
 # The tables push enumerates: ``memories`` (live rows) and ``ui_tombstones``
-# (deletions). A rewrite confined to the closet side tables cannot have moved a
+# (deletions). A rewrite confined to the legacy copy tables cannot have moved a
 # push candidate, so it asks for no re-push.
 PUSH_SOURCE_TABLES = ("memories", "ui_tombstones")
 
@@ -124,9 +141,9 @@ TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
         "tombstoned_at",
         "memory_expires_at",
     ),
-    CLOSET_TOMBSTONE_TABLE: ("tombstoned_at",),
-    CLOSET_BACKUP_TABLE: ("created_at", "updated_at", "migrated_at"),
-    LEGACY_CLOSET_TABLE: ("legacy_updated_at", "announced_at"),
+    "closet_tombstones": ("tombstoned_at",),
+    "closet_migration_backup": ("created_at", "updated_at", "migrated_at"),
+    "legacy_closet_ids": ("legacy_updated_at", "announced_at"),
 }
 
 
