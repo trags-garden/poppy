@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from poppy.db import write_gate
-from poppy.engine._legacy_copies import TIER_LIKELY, TIER_ORPHAN, TIER_PROVEN, is_marked_copy
 from poppy.engine._timestamps import utc_iso
 from poppy.engine.interface import RetrievalEngine
 from poppy.sync.client import (
@@ -48,7 +47,6 @@ from poppy.sync.client import (
 )
 from poppy.sync.serializer import (
     deletion_time,
-    is_redacted_deletion,
     is_tombstone,
     memory_to_wire,
     tombstone_to_wire,
@@ -97,10 +95,6 @@ class PullResult:
     applied_tombstones: int
     skipped_stale: int
     errors: int
-    # Incoming rows for ids this device holds as derived per-speaker copies, or
-    # has just deleted as one. Never applied in either direction.
-    # Defaulted so existing call sites and tests are unaffected.
-    skipped_copies: int = 0
     # This store's OWN deletions, served back by the inclusive pull watermark.
     # Counted apart from `skipped_stale`, which means "local state is newer" and
     # is a different thing, and deliberately absent from what `poppy sync run`
@@ -152,35 +146,17 @@ def _note_transport_progress(
     return exc
 
 
-def _remote_kwargs(engine: RetrievalEngine, when: datetime | None) -> dict:
-    """``remote_event_ts`` for engines that take it, nothing for those that do not.
-
-    Sync applies another device's writes through the ordinary ``ingest`` and
-    ``delete``, and the engine has to date anything it removes from the event
-    rather than from this device's clock. Passing it unconditionally would break
-    an engine that predates the argument, and catching TypeError would swallow
-    real ones from inside the call, so the engines advertise it instead.
-    """
-    if when is None or not getattr(engine, "accepts_remote_event_ts", False):
-        return {}
-    return {"remote_event_ts": when}
-
-
 def _fresh_row_to_push(engine: RetrievalEngine, memory: object) -> object | None:
     """Re-read a row snapshotted by push's candidate scan: the row to send, or None.
 
     ``list_all`` materialises every candidate before the first upsert, and the
     uploads that follow take as long as the network does. A forget landing in that
     window is invisible: its own tombstone is newer and the cloud converges on the
-    next cycle, but the row is uploaded once MORE after the user deleted it — and
-    for a legacy unmarked copy of a multi-speaker memory that means the speaker
-    text reaching the cloud after the parent was redacted.
+    next cycle, but the row is uploaded once MORE after the user deleted it.
 
     Re-read immediately before the upsert, so the window is a database read rather
-    than a whole push. Two ways a candidate stops being a memory to send: the row
-    is gone, or migration has marked the row as a retained legacy copy. Both are
-    the same question ``list_all`` answered at scan time, asked again at the
-    last possible moment.
+    than a whole push. This is the same question ``list_all`` answered at scan
+    time, asked again at the last possible moment.
 
     The FRESH row is what gets sent, not the scanned one. An edit landing in the same
     window (redacting text, say) would otherwise put the old text on the wire once
@@ -195,55 +171,7 @@ def _fresh_row_to_push(engine: RetrievalEngine, memory: object) -> object | None
     Errors are NOT swallowed. The caller treats a failure here as a local read
     failure: recorded, watermark frozen, retried next cycle.
     """
-    memory_id = memory.id  # type: ignore[attr-defined]
-    fresh = engine.get(memory_id)  # type: ignore[attr-defined]
-    if fresh is None or is_marked_copy(engine, memory_id):
-        return None
-    return fresh
-
-
-def _copy_deletion_wins(
-    engine: RetrievalEngine,
-    tombstones: TombstoneStore,
-    memory_id: str,
-    incoming: object,
-    *,
-    dry_run: bool,
-) -> bool:
-    """Apply legacy deletion evidence without changing last-writer-wins policy.
-
-    A recorded deletion suppresses an incoming row at or below its timestamp.
-    A strictly newer real memory can reclaim the id. A legacy claim is only
-    evidence that the id once held a copy, not a clock: a row proven against its
-    live parent stays suppressed regardless of its incoming timestamp.
-
-    Retain claims for proven sightings so purging the ordinary deletion record
-    cannot make an old speaker snapshot restorable after its parent disappears.
-    No claim is uploaded; store-open cleanup transfers it to the sync ledger.
-    """
-    # Side-table lookups first, and the ROW only if one of them hit: on a large
-    # first pull this runs for every incoming row, and the engine read is the
-    # expensive one.
-    deletion = tombstones.get_copy_deletion(memory_id)
-    claim = tombstones.announced_copy_claim(memory_id)
-    if deletion is None and claim is None:
-        return False
-    if engine.get(memory_id) is not None:  # type: ignore[attr-defined]
-        return False
-
-    incoming_updated_at: datetime = incoming.updated_at  # type: ignore[attr-defined]
-    by_record = deletion is not None and incoming_updated_at <= deletion.tombstoned_at
-    if claim is None:
-        return by_record
-    if tombstones.grade_copy_snapshot(incoming) != TIER_PROVEN:  # type: ignore[arg-type]
-        # A claim alone cannot suppress a row without proof. The deletion's
-        # own timestamp still decides under the ordinary freshness rule.
-        return by_record
-    if not dry_run:
-        # The sighting IS the proof, for the same reasons a marked copy's is: the leak
-        # is still in the cloud, and this is the stamp it carries now.
-        tombstones.claim_leaked_copy(memory_id, incoming_updated_at)
-    return True
+    return engine.get(memory.id)  # type: ignore[attr-defined]
 
 
 def push(
@@ -460,9 +388,6 @@ def push(
     for ts in local_tombstones.values():
         if ts is None:
             continue
-        if is_marked_copy(engine, ts.memory.id):
-            skipped += 1
-            continue
         iso = utc_iso(ts.tombstoned_at)
         if ts.memory.id not in known_ids or remote_url in ts.sent_remotes:
             skipped += 1
@@ -512,25 +437,23 @@ def push(
                     first_fail_iso = iso
                 continue
             if payload is None:
-                # Deleted or marked as a legacy copy since the candidate scan. Not an
-                # error and not a failure: nothing to send, and the watermark moves
-                # on exactly as it would have.
+                # Deleted since the candidate scan. Not an error and not a
+                # failure: nothing to send, and the watermark moves on exactly
+                # as it would have.
                 skipped += 1
                 if not watermark_locked:
                     new_watermark = advanced(new_watermark, iso)
                 continue
 
         if kind == "tomb":
-            # An older client can leave a snapshot beside a hidden row. Its
-            # parent may also have been redacted since the scan, clearing both
-            # the row and the snapshot. Send only the same still-visible
-            # snapshot. Like the live re-read above this touches the LOCAL
-            # store, so a failure here is recorded as a soft error rather than
-            # raised out of the loop, where it would leave push before its
-            # state is persisted. Tombstones never move the watermark, so
-            # there is nothing to freeze.
+            # A restore or a fresh delete can replace the scanned entry, so send
+            # only the one still sitting there. Like the live re-read above this
+            # touches the LOCAL store, so a failure here is recorded as a soft
+            # error rather than raised out of the loop, where it would leave push
+            # before its state is persisted. Tombstones never move the watermark,
+            # so there is nothing to freeze.
             try:
-                current = tombstones.get_public(payload.memory.id)
+                current = tombstones.get(payload.memory.id)
             except Exception as exc:
                 errors += 1
                 last_soft_error = f"local read failed: {exc}"
@@ -843,7 +766,6 @@ def _same_deletion_snapshot(record, incoming, deleted_at: datetime, superseded_b
 
 
 def _deletion_already_held(
-    tombstones: TombstoneStore,
     incoming: object,
     record,
     deleted_at: datetime | None,
@@ -864,10 +786,7 @@ def _deletion_already_held(
 
     Both answers require nothing live at the id, which is why the caller reads
     ``record`` only then: with a live row present the deletion applies whatever
-    Trash holds. And neither answer survives a snapshot that grades PROVEN. That
-    one is a leaked per-speaker copy, and the copy-cleanup branch in the caller
-    replaces the entry with a content-free record and claims the cloud row, which
-    is work rather than a no-op.
+    Trash holds.
     """
     if record is None or deleted_at is None:
         return None
@@ -875,14 +794,10 @@ def _deletion_already_held(
     if deleted_at > stored_at:
         return None
     if deleted_at < stored_at:
-        outcome = "stale"
-    elif _same_deletion_snapshot(record, incoming, deleted_at, superseded_by):
-        outcome = "echo"
-    else:
-        return None
-    if tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN:  # type: ignore[arg-type]
-        return None
-    return outcome
+        return "stale"
+    if _same_deletion_snapshot(record, incoming, deleted_at, superseded_by):
+        return "echo"
+    return None
 
 
 def _apply_pulled_row(
@@ -898,87 +813,14 @@ def _apply_pulled_row(
 ) -> str:
     """Decide and apply one pulled row. Caller holds the write gate (unless dry run).
 
-    Returns ``"copy"`` (skipped: local derived data or a copy deletion wins),
-    ``"stale"`` (skipped: local state is newer), ``"echo"`` (skipped: this store
-    already holds exactly this deletion), ``"redacted"`` (a non-restorable
-    deletion), ``"tombstone"`` or ``"live"`` (applied).
-    Every local read here happens under
+    Returns ``"stale"`` (skipped: local state is newer), ``"echo"`` (skipped:
+    this store already holds exactly this deletion), ``"tombstone"`` or
+    ``"live"`` (applied). Every local read here happens under
     the same gate as the write it leads to, so no concurrent forget, restore or
     edit can invalidate a decision between the two.
     """
-    # A deletion in the retired format, for an id this device holds nothing live
-    # at. Recorded as what it is: filing it in ``ui_tombstones`` would put a
-    # restorable Trash entry in front of the user whose body is the placeholder,
-    # and restoring that would create junk and push it back up.
-    #
-    # The live-row check is what keeps this safe, and it is not optional. The
-    # shape match is a strong hint, not proof: a real memory that happened to
-    # match would otherwise be deleted here with no Trash entry and its id
-    # suppressed for good. With a live row present the ordinary tombstone branch
-    # below runs instead, freshness checks and all.
-    if is_redacted_deletion(row):
-        local_live = engine.get(incoming.id)  # type: ignore[attr-defined]
-        # Applied to a LIVE row only on proof that the row really is a derived
-        # copy. The shape match says the deletion came from an older client; it
-        # says nothing about what this device holds at the id. A real memory
-        # whose body happened to match would otherwise be destroyed here with no
-        # Trash entry and its id suppressed for good, so proof is the local
-        # conjunctive test against the live parent, never the body.
-        if local_live is None or tombstones.is_proven_unmarked_copy(incoming.id):  # type: ignore[attr-defined]
-            if local_live is not None and local_live.updated_at > incoming.updated_at:
-                return "stale"
-            if not dry_run:
-                # The DELETION's timestamp, not this device's clock, so a
-                # recreation of the id written after it is not refused.
-                deleted_at = deletion_time(row) or incoming.updated_at  # type: ignore[attr-defined]
-                tombstones.record_local_deletion(incoming.id, deleted_at)  # type: ignore[attr-defined]
-                if local_live is not None:
-                    engine.delete(incoming.id, **_remote_kwargs(engine, deleted_at))  # type: ignore[attr-defined]
-                previous = tombstones.get(incoming.id)  # type: ignore[attr-defined]
-                if previous is not None and previous.tombstoned_at <= deleted_at:
-                    tombstones.remove(incoming.id, token=previous.token)  # type: ignore[attr-defined]
-            return "redacted"
-
     if tombstones.local_deletion_wins(incoming.id, incoming.updated_at):  # type: ignore[attr-defined]
         return "stale"
-
-    # Retained copies from older releases must stay hidden. Applying a cloud
-    # row at a marked id would clear its marker and expose the retained text.
-    # Deletion evidence also rejects stale copies while allowing real notes
-    # recreated at the same id under the permanent freshness rules.
-    if is_marked_copy(engine, incoming.id) or _copy_deletion_wins(  # type: ignore[attr-defined]
-        engine,
-        tombstones,
-        incoming.id,  # type: ignore[attr-defined]
-        incoming,
-        dry_run=dry_run,
-    ):
-        return "copy"
-
-    # Grade the row itself, independently of any local deletion record: a first
-    # pull into a store that never held this id has none, and that is exactly
-    # the case where an old account's leaked copies arrive.
-    #
-    # A row carrying a legacy copy's full provenance is refused whatever its
-    # text grades as. PROVEN is byte-equal to what the live parent projects.
-    # The two weaker outcomes are refused for the same reason the kept-copy
-    # rule hides a drifted row rather than publishing it: the text differs from
-    # the parent's projection, or the parent is absent or has been edited since,
-    # so nothing here can vouch for it, and ingesting it would put speaker text
-    # in front of the user and push it back up. Provenance is narrow enough to
-    # carry that: an exact back-reference to the memory whose id this one
-    # extends, a single-speaker turn list, and a slug that matches that
-    # speaker. A memory that merely shares the id shape earns no tier and takes
-    # the ordinary path below.
-    #
-    # Only a PROVEN one leaves a deletion record. An unproven id must not be
-    # suppressed for the future: a real memory written there later would be
-    # refused and the sync position would move past it.
-    tier = tombstones.grade_incoming_copy(incoming)  # type: ignore[arg-type]
-    if tier in (TIER_LIKELY, TIER_ORPHAN) or (tier == TIER_PROVEN and not is_tombstone(row)):
-        if not dry_run and tier == TIER_PROVEN:
-            tombstones.record_local_deletion(incoming.id, incoming.updated_at)  # type: ignore[attr-defined]
-        return "redacted"
 
     if is_tombstone(row):
         local_live = engine.get(incoming.id)  # type: ignore[attr-defined]
@@ -995,7 +837,7 @@ def _apply_pulled_row(
         # `poppy sync run --dry-run` reports a deletion this store already holds
         # the way the real run does, instead of promising a tombstone it would
         # never apply.
-        held = _deletion_already_held(tombstones, incoming, existing_record, deleted_at, superseded_by)
+        held = _deletion_already_held(incoming, existing_record, deleted_at, superseded_by)
         if held is not None:
             if held == "echo" and remote_url not in existing_record.sent_remotes:
                 # This exact deletion is already at R, including when it was
@@ -1011,11 +853,7 @@ def _apply_pulled_row(
         # lets the DELETION win, matching the server's own rule
         # (migration 032): an equal-timestamp delete of a live row
         # applies. The two must agree, or a row the cloud has already
-        # deleted survives here and the next push re-uploads it —
-        # which is exactly how a device that pulled leaked copies
-        # from a 0.2.4 account re-published the redacted text, since
-        # the cleanup announcement carries the copy's own timestamp
-        # and so ties with the local row.
+        # deleted survives here and the next push re-uploads it.
         if local_live is not None and local_live.updated_at > incoming.updated_at:  # type: ignore[attr-defined]
             return "stale"
         if dry_run:
@@ -1027,43 +865,7 @@ def _apply_pulled_row(
             )
             return "tombstone"
         if local_live is not None:
-            # engine.delete clears the copies this parent left behind
-            # and keeps content-free evidence of each one, so a
-            # deletion pulled from another device takes them with it.
-            # It is told WHEN the deletion happened, so every record it
-            # writes is dated from the event rather than from this
-            # device's clock. Receipt time would make them look newer
-            # than a recreation of one of those ids that came after,
-            # and the freshness rule would then skip it for good.
-            deletion_ts = deletion_time(row) or incoming.updated_at  # type: ignore[attr-defined]
-            engine.delete(incoming.id, **_remote_kwargs(engine, deletion_ts))  # type: ignore[attr-defined]
-        # A soft-delete carrying a COPY's text. Only a 0.2.4 client deleting a
-        # copy row by hand produces one, and with no local row at the id the
-        # branch below filed it as an ordinary Trash entry: the user was offered
-        # the speaker text as restorable, and once the parent was forgotten
-        # nothing could tell what the entry was any more. Graded here, while the
-        # parent is still present, a PROVEN one is recorded as what it is —
-        # content-free, dated from the deletion. Drifted incoming candidates
-        # have already been refused above.
-        if local_live is None and tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN:  # type: ignore[arg-type]
-            copy_deleted_at = deleted_at or incoming.updated_at  # type: ignore[attr-defined]
-            tombstones.add_copy_deletions([incoming.id], now=copy_deleted_at)  # type: ignore[attr-defined]
-            # Retain the claim while this parent still proves the snapshot's
-            # origin. Otherwise it could become restorable after the parent is
-            # deleted and the ordinary deletion record ages out.
-            tombstones.claim_leaked_copy(
-                incoming.id,  # type: ignore[attr-defined]
-                max(copy_deleted_at, incoming.updated_at),  # type: ignore[attr-defined]
-            )
-            # An entry may already sit at this id, and ``tombstones.add`` — what ran
-            # here before — would have REPLACED it. Recording content-free beside it
-            # would leave the older text restorable and pushable, so it goes; unless
-            # it is strictly newer than this deletion, which is the one case add
-            # would have kept (a real note deleted at that id since).
-            existing_entry = tombstones.get(incoming.id)  # type: ignore[attr-defined]
-            if existing_entry is not None and existing_entry.tombstoned_at <= copy_deleted_at:
-                tombstones.remove(incoming.id, token=existing_entry.token)  # type: ignore[attr-defined]
-            return "tombstone"
+            engine.delete(incoming.id)  # type: ignore[attr-defined]
         # The DELETION's own timestamp, never this device's clock.
         # Receipt time promotes a deletion that happened yesterday
         # into a brand-new one, and the next push sends it back up as
@@ -1096,14 +898,7 @@ def _apply_pulled_row(
         if local_tomb is not None:
             tombstone_preview[incoming.id] = None  # type: ignore[attr-defined]
         return "live"
-    # Applying someone else's EDIT. If it changes the text, the
-    # engine clears the copies of the old text; it is told when
-    # the edit happened so those records are dated from it. Dated
-    # today, a deletion that actually happened in July looks
-    # newer than an independent note written at that id in
-    # between, so the note is skipped and the watermark advances
-    # past it for good.
-    engine.ingest(incoming, **_remote_kwargs(engine, incoming.updated_at))  # type: ignore[arg-type]
+    engine.ingest(incoming)  # type: ignore[arg-type]
     # This id now holds a real memory that beat any deletion recorded for it, so
     # the record has done its job and must not outlive the thing it described.
     tombstones.clear_local_deletion(incoming.id)  # type: ignore[attr-defined]
@@ -1151,7 +946,6 @@ def pull(
     applied_tombstones = 0
     skipped_stale = 0
     errors = 0
-    skipped_copies = 0
     skipped_echoes = 0
     new_watermark = watermark
     watermark_locked = False
@@ -1212,13 +1006,11 @@ def pull(
     for iso, row, incoming in candidates:
         # ONE gate per row, around the WHOLE read-decide-write sequence. Every
         # test below reads local state that another process can change: a
-        # `poppy forget` of the parent between "is this id a marked copy / does
-        # a copy deletion suppress it?" and the ingest would delete the copy and
-        # record its deletion, and a pull that had already decided "ordinary
-        # live row" would then ingest the stale cloud text over it, clearing the
-        # deletion record on the way and pushing the redacted text back up on
-        # the next cycle. A check made outside the gate is a hint; only the one
-        # made inside it is a decision.
+        # `poppy forget` landing between "is anything live at this id?" and the
+        # ingest would delete the row, and a pull that had already decided
+        # "ordinary live row" would then write the stale cloud text back over
+        # it. A check made outside the gate is a hint; only the one made inside
+        # it is a decision.
         gate = nullcontext() if dry_run else write_gate(poppy_dir)
         with gate:
             outcome = _apply_pulled_row(
@@ -1233,11 +1025,8 @@ def pull(
             )
         # Even a stale row proves this ID exists. Pulled deletions are marked
         # sent at creation, so their sightings add no pending work.
-        if outcome not in {"copy", "redacted"}:
-            known_ids.add(incoming.id)
-        if outcome == "copy":
-            skipped_copies += 1
-        elif outcome in {"echo", "redacted"}:
+        known_ids.add(incoming.id)
+        if outcome == "echo":
             skipped_echoes += 1
         elif outcome == "stale":
             skipped_stale += 1
@@ -1285,7 +1074,6 @@ def pull(
         applied_tombstones=applied_tombstones,
         skipped_stale=skipped_stale,
         errors=errors,
-        skipped_copies=skipped_copies,
         skipped_echoes=skipped_echoes,
         tombstone_preview=tombstone_preview,
         known_ids=known_ids,
@@ -1341,11 +1129,11 @@ def sync(
         # cloud row live and the next pull re-ingests the forgotten memory.
         # Sent marks, not the live watermark, prove a deletion is done. Known
         # IDs with an unsent deletion for any remote survive; unknown IDs have
-        # no pending work. Legacy claims have their own retention guard.
+        # no pending work.
         #
         # This runs here because the local web UI's startup was otherwise the
         # only caller, and a user who never opens the dashboard kept expired
-        # records forever, including the migration's plaintext pre-images.
+        # records forever.
         try:
             tombstones.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat(), require_sent=True)
         except Exception as exc:

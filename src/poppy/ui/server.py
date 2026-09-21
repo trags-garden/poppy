@@ -214,7 +214,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
     ) -> dict[str, Any]:
         """List memories. scope=active|tombstoned|all."""
         if scope == "tombstoned":
-            tombs = ctx.tombstones.list_public()
+            tombs = ctx.tombstones.list_all()
             items = [MemoryOut.from_tombstone(t) for t in tombs]
             items = _filter_items(items, type=type, project=project, source=source, q=q)
             return {"items": [i.model_dump() for i in items], "scope": scope}
@@ -232,7 +232,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             items = [i for i in items if i.source_type == source]
 
         if scope == "all":
-            tombs = ctx.tombstones.list_public()
+            tombs = ctx.tombstones.list_all()
             tomb_items = _filter_items(
                 [MemoryOut.from_tombstone(t) for t in tombs],
                 type=type,
@@ -246,10 +246,10 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
 
     @app.get("/api/memories/{memory_id}")
     def get_memory(memory_id: str) -> dict[str, Any]:
-        m = ctx.reader.get_public(memory_id)
+        m = ctx.reader.get(memory_id)
         if m is not None:
             return MemoryOut.from_memory(m).model_dump()
-        t = ctx.tombstones.get_public(memory_id)
+        t = ctx.tombstones.get(memory_id)
         if t is not None:
             return MemoryOut.from_tombstone(t).model_dump()
         raise HTTPException(status_code=404, detail="Memory not found")
@@ -344,11 +344,6 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             reader=ctx.reader,
             tombstones=ctx.tombstones,
         )
-        if result.deleted and result.tombstone is None:
-            # A content-free legacy deletion reports no snapshot to restore and
-            # no memory to render, by design. Answered before the check below so
-            # that a delete which did happen is not reported as a miss.
-            return {"ok": True, "restorable": False}
         if result.memory is None:
             if result.already_tombstoned:
                 # Idempotent: the row is already gone.
@@ -394,7 +389,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
         types = Counter(m.memory_type for m in all_memories)
         projects = Counter(m.project for m in all_memories if m.project)
         sources = Counter(m.source.type for m in all_memories)
-        tombstone_count = len(ctx.tombstones.list_public())
+        tombstone_count = len(ctx.tombstones.list_all())
         return {
             "types": dict(types),
             "projects": dict(projects),
@@ -424,7 +419,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
                 "memory_count": s.memory_count,
                 "storage_bytes": s.storage_bytes,
             },
-            "tombstoned": len(ctx.tombstones.list_public()),
+            "tombstoned": len(ctx.tombstones.list_all()),
             "activity": dict(sorted(activity.items())),
             "ttl_days": TTL_DAYS,
         }

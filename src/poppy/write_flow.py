@@ -212,7 +212,6 @@ def forget(
     ``tombstones`` lets a caller reuse an already-open store.
     """
     from poppy.db import write_gate
-    from poppy.engine._legacy_copies import is_marked_copy
     from poppy.ui.tombstones import TombstoneStore
 
     reader = reader if reader is not None else engine
@@ -234,31 +233,11 @@ def forget(
                 already_tombstoned=existing is not None,
             )
 
-        # Rows retained from older releases must be deleted without snapshotting
-        # their speaker text. The frozen classifier also protects unmarked copies
-        # left by an older client sharing the store.
-        if is_marked_copy(engine, memory_id) or store.claim_proven_unmarked_copy(memory_id):
-            # An older client may already have left a Trash snapshot. Clear it
-            # while the live row still supplies the provenance needed to grade it.
-            store.clear_copy_snapshot(memory_id)
-            deleted = engine.delete(memory_id)
-            if deleted:
-                store.add_copy_deletions([memory_id])
-            ts = None
-            tombstoned = deleted
-            # Content-free applies to what this returns, too. Every adapter
-            # already reports only that the row went, but this is a public
-            # entry point, and the property should not rest on each caller
-            # choosing not to read a field that still holds the text.
-            mem = None
-        else:
-            # engine.delete also clears the derived per-speaker copies and
-            # retains content-free deletion evidence to reject stale sync rows.
-            # Snapshot the memory before the live row goes. Push checks the
-            # per-ID remote provenance recorded by uploads, pulls, or upgrade.
-            ts = store.add(mem)
-            deleted = engine.delete(memory_id)
-            tombstoned = True
+        # Snapshot the memory before the live row goes. Push checks the
+        # per-ID remote provenance recorded by uploads, pulls, or upgrade.
+        ts = store.add(mem)
+        deleted = engine.delete(memory_id)
+        tombstoned = True
 
     if deleted:
         _trigger_autosync(poppy_dir)
@@ -320,7 +299,6 @@ def restore(
     Returns a :class:`RestoreResult`; ``found=False`` when no tombstone exists.
     """
     from poppy.db import write_gate
-    from poppy.lifecycle import refuse_if_legacy_copy
     from poppy.ui.tombstones import TombstoneStore
 
     store = tombstones if tombstones is not None else TombstoneStore(poppy_dir / "memories.db")
@@ -329,36 +307,11 @@ def restore(
     # the sync worker, or a concurrent forget, cannot land between the check and
     # the ingest.
     with write_gate(poppy_dir):
-        ts = store.get_public(memory_id)
+        ts = store.get(memory_id)
         if ts is None:
             return RestoreResult(found=False)
 
-        # Defence in depth. Nothing writes a per-speaker copy into ui_tombstones
-        # any more, but a tombstone left by an older build could still name one,
-        # and restoring it would re-ingest the copy as an ordinary memory —
-        # unmarked, listed, and pushed live with the redacted text.
-        refuse_if_legacy_copy(engine, memory_id, "restore")
-
-        live = engine.get_public(memory_id)
-
-        # That guard reads the LIVE row, and the case it cannot see is the one
-        # with no live row at all: a 0.2.4 client forgot a copy and KEPT its
-        # parent, so the entry sits there with the speaker text and nothing at
-        # the id to be marked. The SNAPSHOT's own provenance is what decides,
-        # graded against the parent that is still here. PROVEN only — a lesser
-        # grade is a memory of the user's and comes back.
-        #
-        # ONLY when nothing is live at the id. With a live row the question is not
-        # what the Trash entry is: the already-live branch below simply clears the
-        # entry. Grading that snapshot must not create a copy claim against an
-        # independent note the user or an importer has since written at the id.
-        if live is None:
-            parent = store.refuse_restorable_copy_snapshot(memory_id)
-            if parent is not None:
-                raise ValueError(
-                    f"{memory_id} is a derived per-speaker copy of {parent}, not a memory in its own "
-                    "right; it cannot be restored on its own"
-                )
+        live = engine.get(memory_id)
 
         now = now or datetime.now(timezone.utc)
         stamp = max(now, ts.tombstoned_at + timedelta(microseconds=1))

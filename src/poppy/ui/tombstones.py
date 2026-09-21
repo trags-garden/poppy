@@ -20,23 +20,7 @@ from pathlib import Path
 
 from poppy.db import apply_row_factory
 from poppy.db import connect as connect_db
-from poppy.engine._legacy_copies import (
-    BACKUP_DDL,
-    COPY_CLAIM_DDL,
-    COPY_CLAIM_TABLE,
-    COPY_DELETION_DDL,
-    announced_copy_claim,
-    claim_proven_unmarked_copy,
-    classify_legacy_copy,
-    clear_copy_snapshot,
-    grade_copy_snapshot,
-    is_marked_copy,
-    is_proven_unmarked_copy,
-    rearm_legacy_announcement,
-    record_copy_deletions,
-    refuse_restorable_copy_snapshot,
-)
-from poppy.engine._timestamps import chunked, repush_stamp, utc_iso
+from poppy.engine._timestamps import repush_stamp, utc_iso
 from poppy.models import Memory, Source
 
 TTL_DAYS = 7
@@ -67,11 +51,6 @@ CREATE TABLE IF NOT EXISTS sync_remote_memories (
     PRIMARY KEY (id, remote_url)
 );
 """
-
-# Historical copy deletions carry only an id and a timestamp. Keeping them
-# separate from Trash prevents redacted speaker text from becoming restorable.
-# Both engines and the Trash store preserve these on-disk tables for old stores.
-SCHEMA += COPY_DELETION_DDL + BACKUP_DDL + COPY_CLAIM_DDL
 
 
 def _migrate_columns(conn: sqlite3.Connection) -> None:
@@ -129,14 +108,6 @@ class Tombstone:
     @property
     def expires_at(self) -> datetime:
         return self.tombstoned_at + timedelta(days=TTL_DAYS)
-
-
-@dataclass(frozen=True)
-class CopyDeletion:
-    """A historical copy deletion, with no content to expose or restore."""
-
-    id: str
-    tombstoned_at: datetime
 
 
 class TombstoneStore:
@@ -201,10 +172,8 @@ class TombstoneStore:
                     (url,),
                 )
                 if live_cols:
-                    eligible = "WHERE COALESCE(is_closet, 0) = 0" if "is_closet" in live_cols else ""
                     self._conn.execute(
-                        "INSERT OR IGNORE INTO sync_remote_memories (id, remote_url) "
-                        f"SELECT id, ? FROM memories {eligible}",
+                        "INSERT OR IGNORE INTO sync_remote_memories (id, remote_url) SELECT id, ? FROM memories",
                         (url,),
                     )
             # Never infer sent acknowledgements from legacy watermarks: older
@@ -327,157 +296,6 @@ class TombstoneStore:
                 [(path, ts.memory.id, ts.token) for ts in tombstones],
             )
 
-    def add_copy_deletions(
-        self,
-        memory_ids: list[str],
-        *,
-        now: datetime | None = None,
-        applying_remote_deletion: bool = False,
-        authoritative: bool = False,
-    ) -> list[CopyDeletion]:
-        """Retain content-free deletion evidence for copies from older releases.
-
-        Use the event's timestamp for a remote deletion so it cannot suppress a
-        newer real memory at the same id. Local deletions use the current time.
-        """
-        if not memory_ids:
-            return []
-        ids = list(memory_ids)
-        rows = []
-        with self._lock:
-            record_copy_deletions(
-                self._conn,
-                ids,
-                when=now,
-                applying_remote_deletion=applying_remote_deletion,
-                authoritative=authoritative,
-            )
-            self._conn.commit()
-            for batch in chunked(ids):
-                placeholders = ",".join("?" * len(batch))
-                rows.extend(
-                    self._conn.execute(
-                        f"SELECT id, tombstoned_at FROM closet_tombstones WHERE id IN ({placeholders})",
-                        batch,
-                    ).fetchall()
-                )
-        return [CopyDeletion(id=r["id"], tombstoned_at=datetime.fromisoformat(r["tombstoned_at"])) for r in rows]
-
-    def claim_proven_unmarked_copy(self, memory_id: str) -> bool:
-        """Prove an old unmarked copy and retain its deletion evidence if so."""
-        with self._lock:
-            claimed = claim_proven_unmarked_copy(self._conn, memory_id)
-            self._conn.commit()
-        return claimed
-
-    def is_proven_unmarked_copy(self, memory_id: str) -> bool:
-        """Whether a live unmarked row at ``memory_id`` is a PROVEN copy of its live parent."""
-        with self._lock:
-            return is_proven_unmarked_copy(self._conn, memory_id)
-
-    def grade_copy_snapshot(self, memory: Memory) -> str | None:
-        """Grade an INCOMING row against its live parent: a tier, or None.
-
-        Read by pull twice over. Before a content-carrying tombstone becomes a Trash
-        entry (only an old client deleting a copy row by hand produces one, and filing
-        it put the speaker text in front of the user as restorable), and before a live
-        row is suppressed on the strength of an announcement claim, which is an
-        existence hint rather than a clock.
-        """
-        with self._lock:
-            return grade_copy_snapshot(
-                self._conn,
-                memory.id,
-                content=memory.content,
-                related_to=memory.related_to,
-                created_at=memory.created_at.isoformat(),
-            )
-
-    def grade_incoming_copy(self, memory: Memory) -> str:
-        """Grade an INCOMING row and report every tier, not just the provable ones.
-
-        ``grade_copy_snapshot`` answers a narrower question and folds anything
-        short of provenance-plus-text into None. Pull needs the wider answer:
-        a row that carries a legacy copy's full provenance has to be refused
-        even when its text cannot be matched against the parent, because the
-        parent may be absent or may have been edited since.
-        """
-        with self._lock:
-            tier, _ = classify_legacy_copy(
-                self._conn,
-                memory.id,
-                content=memory.content,
-                related_raw=json.dumps(list(memory.related_to)),
-                created_at=memory.created_at.isoformat(),
-            )
-        return tier
-
-    def claim_leaked_copy(self, memory_id: str, seen_at: datetime) -> None:
-        """Retain a proven legacy copy claim at its observed timestamp.
-
-        The claim protects old deletion records from premature Trash purge.
-        Only proven copies qualify; a claim must never hide a real memory.
-        """
-        with self._lock:
-            rearm_legacy_announcement(self._conn, memory_id, seen_at.isoformat())
-            self._conn.commit()
-
-    def refuse_restorable_copy_snapshot(self, memory_id: str) -> str | None:
-        """The parent to name in a refusal if the STORED Trash entry is PROVEN a copy.
-
-        Drops the entry and claims its cloud row on that proof, and answers None for
-        everything else — a LIKELY entry restores, like any row short of proof. Called
-        by ``restore`` only when nothing is live at the id.
-        """
-        with self._lock:
-            parent = refuse_restorable_copy_snapshot(self._conn, memory_id)
-            self._conn.commit()
-        return parent
-
-    def clear_copy_snapshot(self, memory_id: str) -> bool:
-        """Drop a legacy Trash entry at a live marked copy's id if it holds the parent's text.
-
-        Called by ``forget`` BEFORE the copy row is deleted: the row's back-reference
-        is what names the parent whose derivation the entry is compared with.
-        """
-        with self._lock:
-            cleared = clear_copy_snapshot(self._conn, memory_id)
-            self._conn.commit()
-        return cleared
-
-    def get_copy_deletion(self, memory_id: str) -> CopyDeletion | None:
-        """The recorded deletion of ``memory_id`` as a derived copy, if any."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT id, tombstoned_at FROM closet_tombstones WHERE id = ?", (memory_id,)
-            ).fetchone()
-        if row is None:
-            return None
-        return CopyDeletion(id=row["id"], tombstoned_at=datetime.fromisoformat(row["tombstoned_at"]))
-
-    def announced_copy_claim(self, memory_id: str) -> datetime | None:
-        """Whether this store ever PROVED the id to be a leaked copy, and when it was seen.
-
-        Outlives the local deletion record, which is what pull needs when a concurrent
-        push purges that record while pull waits for the write gate. Pull treats the
-        value as an existence hint and decides by evidence; the time is only ever used
-        to raise a bar a deletion record already set.
-        """
-        with self._lock:
-            stamp = announced_copy_claim(self._conn, memory_id)
-        if stamp is None:
-            return None
-        try:
-            claimed = datetime.fromisoformat(stamp)
-        except (ValueError, OverflowError):
-            # `utc_iso` passes a value it cannot parse through verbatim, so this
-            # column is not guaranteed to hold a timestamp. An unusable claim simply
-            # sets no bar.
-            return None
-        # Aware, always: these are compared with parsed row timestamps, and a naive
-        # one would raise rather than answer.
-        return claimed if claimed.tzinfo is not None else claimed.replace(tzinfo=timezone.utc)
-
     def local_deletion_wins(self, memory_id: str, updated_at: datetime) -> bool:
         """Whether a recorded local deletion supersedes an incoming version of this id."""
         from poppy.sync.state import local_deletion_wins
@@ -550,18 +368,6 @@ class TombstoneStore:
             return None
         return self._row_to_tombstone(row)
 
-    def get_public(self, memory_id: str) -> Tombstone | None:
-        """Read Trash without exposing a snapshot of a hidden live row."""
-        with self._lock:
-            if is_marked_copy(self, memory_id):
-                return None
-            return self.get(memory_id)
-
-    def list_public(self) -> list[Tombstone]:
-        """Keep hidden live rows out of Trash and combined dashboard listings."""
-        with self._lock:
-            return [t for t in self.list_all() if not is_marked_copy(self, t.memory.id)]
-
     def list_all(self) -> list[Tombstone]:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM ui_tombstones ORDER BY tombstoned_at DESC").fetchall()
@@ -589,13 +395,10 @@ class TombstoneStore:
           it and the seven-day window applies on age alone — which is what keeps
           Trash from growing without bound for a user who never enables sync.
 
-        The argument is required, with no default. Passing ``None`` touches
-        neither deletion table, which is the safe answer for a caller that cannot
-        tell which situation it is in — but it has to be said out loud, because a
-        caller that silently got the no-op would believe it had aged Trash out.
-
-        The migration's pre-images have nothing to push either way, so they
-        always age out on the window alone.
+        The argument is required, with no default. Passing ``None`` purges
+        nothing, which is the safe answer for a caller that cannot tell which
+        situation it is in — but it has to be said out loud, because a caller
+        that silently got the no-op would believe it had aged Trash out.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=TTL_DAYS)).isoformat()
         # The purge bound is compared with stored UTC text, so it gets the same
@@ -615,19 +418,6 @@ class TombstoneStore:
                     (cutoff, pushed_through, require_sent),
                 )
                 purged = cursor.rowcount
-                # A historical copy deletion record makes pull skip the cloud's
-                # stale copy of that id. Pending legacy claims preserve evidence
-                # for old speaker snapshots even after the ordinary Trash window.
-                # Store-open cleanup retires those claims together with recording
-                # deletion evidence in the sync ledger.
-                self._conn.execute(
-                    f"""DELETE FROM closet_tombstones WHERE tombstoned_at < ? AND tombstoned_at <= ?
-                    AND id NOT IN (SELECT id FROM {COPY_CLAIM_TABLE} WHERE announce_pending = 1)""",
-                    (cutoff, pushed_through),
-                )
-            # Legacy claims outlive the Trash window. Migration pre-images have
-            # no remote work and age out on the window alone.
-            self._conn.execute("DELETE FROM closet_migration_backup WHERE migrated_at < ?", (cutoff,))
             self._conn.commit()
             return purged
 
