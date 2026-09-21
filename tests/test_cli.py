@@ -45,6 +45,11 @@ def test_doctor_omits_retired_copy_counts(hidden_memory_store, tmp_path):
     assert "per-speaker copies" not in result.output.lower()
     assert "closet" not in result.output.lower()
     assert memory.content not in result.stdout + result.stderr
+    # The count and the deadline still get reported, because nothing else tells
+    # a user that recoverable rows are sitting in the store. Count only, never
+    # the rows, and never the name of the feature they came from.
+    assert "kept pre-images" in result.output
+    assert "1 row(s)" in result.output
 
 
 def test_mcp_setup_commands_warn_when_poppy_executable_cannot_be_resolved(tmp_path, monkeypatch):

@@ -476,11 +476,19 @@ def clear_copy_snapshot(conn: sqlite3.Connection, copy_id: str) -> bool:
         return False
     tier, _ = _stored_grade(conn, copy_id, "ui_tombstones")
     if tier != TIER_PROVEN:
-        # A marked inferred copy can have text differing from its live parent.
-        # Preserve its pre-image before clearing an identical Trash snapshot.
+        # A retained copy's text can differ from its live parent's, and a
+        # snapshot an older client left can differ from BOTH: it holds that
+        # copy's text from an earlier point. Requiring the snapshot to match
+        # the stored row byte for byte let those older snapshots through, and
+        # a snapshot only stays hidden while a marked row exists at its id to
+        # hide it. The moment the row went, the snapshot was listed in Trash,
+        # restorable as an ordinary memory, and pushed with the speaker text
+        # in its body. So the snapshot is graded on ITS OWN fields, and any
+        # snapshot at a marked id that proves to be that copy's text goes,
+        # with a recoverable pre-image kept first.
         row = conn.execute(
-            "SELECT m.content, t.related_to, t.created_at, m.related_to FROM memories m "
-            "JOIN ui_tombstones t ON t.id = m.id AND t.content = m.content WHERE m.id = ? AND m.is_closet = 2",
+            "SELECT t.content, t.related_to, t.created_at, m.related_to FROM memories m "
+            "JOIN ui_tombstones t ON t.id = m.id WHERE m.id = ? AND COALESCE(m.is_closet, 0) >= 1",
             (copy_id,),
         ).fetchone()
         if row is None:

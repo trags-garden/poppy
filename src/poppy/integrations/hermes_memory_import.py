@@ -90,6 +90,11 @@ def import_hermes_memories(
         for body in iter_paragraphs(path):
             try:
                 memory_id = stable_id(filename, body)
+                # The unfiltered read is deliberate: this asks whether the id
+                # is occupied at all, and a row hidden by an earlier release's
+                # cleanup occupies it. Reading past one would import over it
+                # and make its retained text an ordinary visible memory.
+                # Nothing is shown either way, only counted.
                 if engine.get(memory_id) is not None:
                     skipped += 1
                     continue

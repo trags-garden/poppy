@@ -246,6 +246,11 @@ def forget(
                 store.add_copy_deletions([memory_id])
             ts = None
             tombstoned = deleted
+            # Content-free applies to what this returns, too. Every adapter
+            # already reports only that the row went, but this is a public
+            # entry point, and the property should not rest on each caller
+            # choosing not to read a field that still holds the text.
+            mem = None
         else:
             # engine.delete also clears the derived per-speaker copies and
             # records their content-free tombstones, so the deletion of any

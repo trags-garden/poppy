@@ -3600,6 +3600,144 @@ def test_parent_removal_does_not_expose_a_hidden_copys_old_snapshot(tmp_path, en
     assert copy.content not in json.dumps([t.memory.content for t in store.list_all()])
 
 
+DRIFTED = "CANARYearlierspeakertext"
+
+
+def _plant_drifted_snapshot(db: Path, copy_id: str, parent_id: str) -> str:
+    """A Trash snapshot an older client left, holding that copy's EARLIER text.
+
+    Same provenance as the copy (the parent's back-reference, the parent's
+    creation instant, the speaker its id names) but text matching neither what
+    the parent projects now nor what the stored row holds now. Returns the text.
+    """
+    text = json.dumps([{"speaker": "Alice", "dia_id": "D1", "text": DRIFTED}])
+    TombstoneStore(db)  # an older client would have created the sidecar tables
+    created, updated = _rows(db, "SELECT created_at, updated_at FROM memories WHERE id = ?", (parent_id,))[0]
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO ui_tombstones (id, content, memory_type, project, source_type, "
+            "source_session_id, source_timestamp, confidence, related_to, created_at, "
+            "updated_at, tombstoned_at, token) "
+            "VALUES (?, ?, 'fact', NULL, 'cli', NULL, ?, 1.0, ?, ?, ?, ?, 'tok')",
+            (copy_id, text, created, json.dumps([parent_id]), created, updated, updated),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return text
+
+
+def _trash_text(store: TombstoneStore) -> str:
+    return json.dumps([t.memory.content for t in store.list_all()])
+
+
+def test_forgetting_a_hidden_copy_clears_an_older_snapshot_of_its_text(tmp_path):
+    """The snapshot only stays hidden while a marked row exists to hide it.
+
+    Deleting the row without clearing the snapshot left the speaker text listed
+    in Trash, restorable as an ordinary memory, and pushable in a body.
+    """
+    from poppy.write_flow import restore
+
+    db = _tier_b_store(tmp_path)
+    engine = SeedEngine(db_path=db)
+    copy_id = "sess-2026-01_closet_alice"
+    text = _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    store = TombstoneStore(db)
+    assert engine.get(copy_id) is not None
+    assert store.get(copy_id) is not None
+    assert store.get_public(copy_id) is None
+
+    assert forget(engine, tmp_path, copy_id, tombstones=store).deleted is True
+
+    assert engine.get(copy_id) is None
+    assert store.get(copy_id) is None
+    assert store.get_public(copy_id) is None
+    assert restore(engine, tmp_path, copy_id, tombstones=store).found is False
+    assert DRIFTED not in _trash_text(store)
+    assert text not in _trash_text(store)
+
+
+def test_a_content_free_forget_returns_no_memory(tmp_path):
+    """The branch is content-free in what it returns, not only in what it writes."""
+    db = _tier_b_store(tmp_path)
+    engine = SeedEngine(db_path=db)
+    store = TombstoneStore(db)
+    copy_id = "sess-2026-01_closet_alice"
+    # The row is there and holds the text, so a result carrying it would be
+    # carrying something: the None below is the branch's choice, not an absence.
+    assert SECRET in engine.get(copy_id).content
+
+    result = forget(engine, tmp_path, copy_id, tombstones=store)
+
+    assert result.deleted is True
+    assert result.memory is None
+    assert result.tombstone is None
+
+
+@pytest.mark.parametrize("operation", ["forget", "edit", "expire"])
+def test_removing_the_parent_clears_an_older_snapshot_of_a_hidden_copy(tmp_path, operation):
+    from dataclasses import replace
+
+    from poppy.write_flow import restore
+
+    db = _tier_b_store(tmp_path)
+    engine = SeedEngine(db_path=db)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    store = TombstoneStore(db)
+    parent = engine.get("sess-2026-01")
+    assert store.get(copy_id) is not None
+
+    if operation == "forget":
+        forget(engine, tmp_path, parent.id, tombstones=store)
+    elif operation == "edit":
+        engine.ingest(replace(parent, content="replacement"))
+    else:
+        engine.ingest(replace(parent, expires_at=datetime.now(timezone.utc) - timedelta(days=1)))
+        engine.purge_expired()
+
+    assert engine.get(copy_id) is None
+    assert store.get(copy_id) is None
+    assert restore(engine, tmp_path, copy_id, tombstones=store).found is False
+    assert DRIFTED not in _trash_text(store)
+
+
+def test_the_first_open_clears_an_older_snapshot_of_a_removed_copy(tmp_path):
+    """Open-time cleanup deletes the row, so it must take the snapshot with it."""
+    from poppy.write_flow import restore
+
+    db = _legacy_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    assert MARKER_COLUMN not in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
+
+    engine = SeedEngine(db_path=db)
+    store = TombstoneStore(db)
+
+    assert engine.get(copy_id) is None
+    assert store.get(copy_id) is None
+    assert restore(engine, tmp_path, copy_id, tombstones=store).found is False
+    assert DRIFTED not in _trash_text(store)
+
+
+def test_push_never_sends_an_older_snapshot_of_a_hidden_copy(tmp_path):
+    """The text must not reach the wire in a tombstone body."""
+    db = _tier_b_store(tmp_path)
+    engine = SeedEngine(db_path=db)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    store = TombstoneStore(db)
+    store.note_remote_memories([copy_id], "https://trags.test")
+    forget(engine, tmp_path, copy_id, tombstones=store)
+
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert DRIFTED not in json.dumps(client.upserts)
+    assert not any(row["id"] == copy_id for row in client.upserts)
+
+
 def test_push_rechecks_a_snapshot_cleared_by_parent_redaction(tmp_path, monkeypatch):
     db = _tier_b_store(tmp_path)
     engine = _bloom(db)

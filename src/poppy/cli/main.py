@@ -2395,6 +2395,41 @@ def sync_auto_worker():
     run_worker(_get_poppy_dir())
 
 
+def _kept_pre_images(poppy_dir: Path) -> tuple[int, str | None]:
+    """(rows, recoverable-until) for pre-images an earlier cleanup saved.
+
+    Returns (0, None) when the store, or the table, is not there. Read through
+    ``poppy.db.connect`` rather than ``sqlite3.connect``: the latter bypasses
+    the encryption gate, so on an encrypted store it would fail to read the
+    table and the notice would vanish on exactly the installs that most need it.
+    """
+    from poppy.db import connect as connect_db
+
+    db_path = poppy_dir / "memories.db"
+    if not db_path.exists():
+        return (0, None)
+    # Opening is inside the guard too: an encrypted store with no usable key
+    # raises here, and a store this notice cannot read is reported as having
+    # nothing rather than taking doctor down before its remaining checks.
+    try:
+        conn = connect_db(db_path)
+    except Exception:
+        return (0, None)
+    try:
+        row = conn.execute("SELECT COUNT(*), MIN(migrated_at) FROM closet_migration_backup").fetchone()
+    except Exception:
+        return (0, None)
+    finally:
+        conn.close()
+    count, oldest = (row[0], row[1]) if row else (0, None)
+    if not count or not oldest:
+        return (0, None)
+    from poppy.ui.tombstones import TTL_DAYS
+
+    deadline = datetime.datetime.fromisoformat(oldest) + datetime.timedelta(days=TTL_DAYS)
+    return (count, deadline.date().isoformat())
+
+
 @cli.command()
 def doctor():
     """Verify the Poppy installation: engine, storage, MCP config, hooks."""
@@ -2521,6 +2556,19 @@ def doctor():
         line("Trags key", "OK", "none (Trags sync not configured; optional)")
     else:
         line("Trags key", "OK", "keychain")
+
+    # Kept pre-images are otherwise invisible. Nothing reads that table on any
+    # surface a user or an agent can reach, so this notice is the only thing
+    # that says recoverable rows are still in the store, and until when. The
+    # count and the date only, never the rows.
+    kept_rows, kept_until = safe_read(lambda: _kept_pre_images(poppy_dir), (0, None))
+    if kept_rows:
+        line(
+            "kept pre-images",
+            "WARN",
+            f"{kept_rows} row(s) saved before an earlier release's cleanup removed them",
+            f"recoverable until {kept_until}, then dropped automatically",
+        )
 
     from poppy.capture.redaction import MIN_CUSTOM_SECRET_LENGTH, load_custom_redaction, valid_env_var_name
 

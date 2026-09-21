@@ -344,6 +344,11 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             reader=ctx.reader,
             tombstones=ctx.tombstones,
         )
+        if result.deleted and result.tombstone is None:
+            # A content-free legacy deletion reports no snapshot to restore and
+            # no memory to render, by design. Answered before the check below so
+            # that a delete which did happen is not reported as a miss.
+            return {"ok": True, "restorable": False}
         if result.memory is None:
             if result.already_tombstoned:
                 # Idempotent: the row is already gone.
@@ -351,8 +356,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             raise HTTPException(status_code=404, detail="Memory not found")
         ts = result.tombstone
         if ts is None:
-            # A content-free legacy deletion has no snapshot to restore. A
-            # deletion that lost a race likewise cannot promise a restore window.
+            # A deletion that lost a race cannot promise a restore window.
             return {"ok": True, "restorable": False}
         return {
             "ok": True,
