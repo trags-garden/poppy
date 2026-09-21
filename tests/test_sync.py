@@ -4179,3 +4179,36 @@ def test_a_real_memory_shaped_like_a_retired_deletion_keeps_its_trash_entry(tmp_
     assert engine.get("deleted") is None  # the deletion still applies
     assert tombstones.get("deleted") is not None  # but it stays restorable
     assert not engine._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sync_local_deletions'").fetchone()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_push_never_sends_a_hidden_rows_old_snapshot(hidden_memory_store, tmp_path, dry_run):
+    from poppy.sync import push
+    from poppy.sync.state import SyncState
+    from poppy.ui.tombstones import TombstoneStore
+
+    engine, memory = hidden_memory_store
+    store = TombstoneStore(tmp_path / "memories.db")
+    store.add(memory)
+    store.note_remote_memories([memory.id], "https://trags.test")
+
+    class Client:
+        base_url = "https://trags.test"
+
+        def __init__(self):
+            self.rows = []
+
+        def upsert(self, row):
+            self.rows.append(row)
+
+        def ping(self):
+            pass
+
+    client = Client()
+    result = push(
+        engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path, dry_run=dry_run
+    )
+    assert result.sent_live == 0
+    assert result.sent_tombstones == 0
+    assert result.errors == 0
+    assert client.rows == []

@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from poppy.engine._closet_marker import CLOSET_SEPARATOR
 from poppy.engine.interface import RetrievalEngine
 from poppy.models import Memory
 
@@ -124,37 +123,29 @@ def resolve_expiry(
     return parse_expires_at(expires_at)  # type: ignore[arg-type]
 
 
-def refuse_if_derived_copy(
+def refuse_if_legacy_copy(
     engine: RetrievalEngine,
     memory_id: str,
     verb: str,
     *,
     existing: Memory | None = None,
 ) -> None:
-    """Reject an operation aimed at one of the default engine's per-speaker copies.
+    """Refuse to turn a proven unmarked copy from an older store into a memory.
 
-    A copy is not a memory in its own right: the engine regenerates it from its
-    parent, and it holds a duplicate of the parent's speaker turns. Every write
-    aimed at one is therefore wrong in the same way, and dangerous in the same
-    way — it either rewrites derived data the next ingest discards, or (worse)
-    launders the copy into a real memory that lists, pushes live with the
-    redacted text, and survives the parent's redaction.
-
-    Raises ``ValueError`` naming the parent to act on instead. Adapters already
-    map ValueError to their own contract (400 / {"error": ...} / BadParameter).
+    A client from an older release can leave unmarked copies in a shared store.
+    Editing or superseding one would expose its speaker text as an independent
+    memory. Only the frozen provenance and exact-content test can refuse it;
+    a real memory at a similar id follows the ordinary rules.
     """
-    from poppy.engine._closet_marker import is_marked_closet
-
-    # Marked, or unmarked but PROVEN: a store that never ran bloom holds a
-    # pulled leaked copy unmarked, and superseding or editing it would snapshot
-    # its speaker text into Trash and push that as the body of a tombstone.
-    # Same bar as forget's content-free path; anything short of proof is a
-    # memory of the user's and is left to the ordinary rules.
     proven = getattr(engine, "is_proven_copy_row", None)
-    if not is_marked_closet(engine, memory_id) and not (proven is not None and proven(memory_id)):
+    if proven is None or not proven(memory_id):
         return
     row = existing if existing is not None else engine.get(memory_id)
-    parent = row.related_to[0] if row is not None and row.related_to else memory_id.rsplit(CLOSET_SEPARATOR, 1)[0]
+    if row is None or not row.related_to:
+        # The row went away between proving it and reading it, so there is no
+        # copy left to refuse and no parent to name instead.
+        return
+    parent = row.related_to[0]
     raise ValueError(
         f"{memory_id} is a derived per-speaker copy, not a memory in its own right; {verb} the parent {parent} instead"
     )
@@ -185,9 +176,8 @@ def edit_memory(
 
     ``poppy_dir`` puts the read-decide-write under the store's write gate. A
     forget in another process landing between the read and the ingest would
-    otherwise be undone: the edit writes the row it read back, and for a
-    multi-speaker memory the engine re-derives its per-speaker copies from it,
-    so text the user just deleted is recallable again. Callers that
+    otherwise be undone: the edit writes the row it read back, so text the
+    user just deleted is recallable again. Callers that
     know the store pass it; library callers without one run ungated as before.
     """
     from poppy.db import write_gate
@@ -216,11 +206,11 @@ def _edit_memory(
     clear_expiry: bool,
     project_unset: bool,
 ) -> EditResult:
-    existing = engine.get(memory_id)
+    existing = engine.get_public(memory_id)
     if existing is None:
         raise KeyError(f"memory not found: {memory_id}")
 
-    refuse_if_derived_copy(engine, memory_id, "edit", existing=existing)
+    refuse_if_legacy_copy(engine, memory_id, "edit", existing=existing)
 
     if expires_at is not None and clear_expiry:
         raise ValueError("expires_at and clear_expiry are mutually exclusive")
@@ -303,17 +293,11 @@ def _supersede_memory(
 ) -> SupersedeResult:
     from poppy.ui.tombstones import TombstoneStore
 
-    old = engine.get(old_id)
+    old = engine.get_public(old_id)
     if old is None:
         raise KeyError(f"memory not found: {old_id}")
 
-    # The unguarded twin of forget's check. Superseding snapshots the old row
-    # into ui_tombstones, so a copy superseded here would put its verbatim
-    # speaker turns in Trash and on the wire, and a later restore would bring
-    # them back as an ordinary memory. Reachable without anyone typing
-    # an id: the UI's Supersede search and auto-supersede both rank from
-    # retrieve(), which still returns copies.
-    refuse_if_derived_copy(engine, old_id, "supersede", existing=old)
+    refuse_if_legacy_copy(engine, old_id, "supersede", existing=old)
 
     db_path = poppy_dir / "memories.db"
     tombstones = TombstoneStore(db_path)

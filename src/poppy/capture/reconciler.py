@@ -173,24 +173,21 @@ def find_candidates(
     with the most recent same-project / same-type memories so the LLM still
     gets a chance to spot a conflict. Filters out the new memory itself.
     """
-    from poppy.engine._closet_marker import is_marked_closet
+    from poppy.engine._legacy_copies import is_marked_copy
 
     filters = Filters(project=new_memory.project, memory_type=new_memory.memory_type)
     seen: set[str] = {new_memory.id}
     out: list[Candidate] = []
 
-    # The default engine's per-speaker copies come back from retrieve() like any
-    # other row, and they carry the parent's project and memory_type so they pass
-    # the filters above. Left in, auto-supersede can pick one with nobody typing
-    # an id, and superseding a copy snapshots its speaker turns into Trash and
-    # onto the wire. A copy is not a memory to supersede; its parent
-    # is, and the parent is a candidate here on its own merits.
+    # Results may have been read before a legacy row was marked by another
+    # process. Re-check both candidate sources so hidden text never reaches
+    # conflict detection or becomes a supersede target.
     try:
         scored = engine.retrieve(new_memory.content, filters=filters, limit=top_k * 2)
     except Exception:
         scored = []
     for s in scored:
-        if s.memory.id in seen or is_marked_closet(engine, s.memory.id):
+        if s.memory.id in seen or is_marked_copy(engine, s.memory.id):
             continue
         if s.score is not None and s.score < min_score:
             continue
@@ -207,7 +204,7 @@ def find_candidates(
     except Exception:
         recent = []
     for m in recent:
-        if m.id in seen or is_marked_closet(engine, m.id):
+        if m.id in seen or is_marked_copy(engine, m.id):
             continue
         out.append(Candidate(memory=m, score=0.0))
         seen.add(m.id)

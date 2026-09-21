@@ -493,6 +493,17 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path, *, gate_held:
                 "DELETE FROM ui_tombstones WHERE id = ?",
                 [(mid,) for mid, saved, live in snapshots if utc_iso(saved) == utc_iso(live)],
             )
+            # The match above is column for column, so it misses a snapshot
+            # holding the same copy's text from an earlier point. Once the row
+            # below is gone there is no marker left at that id to keep such a
+            # snapshot hidden, and it would be listed in Trash, restorable as
+            # an ordinary memory, and pushed with the speaker text in its body.
+            # Clear it here, while the row is still present to identify it and
+            # inside the same transaction that removes it.
+            from poppy.engine._legacy_copies import clear_copy_snapshot
+
+            for memory_id, _ in deletions:
+                clear_copy_snapshot(conn, memory_id)
         for table in ("memory_embeddings", "legacy_closet_ids"):
             if table in tables:
                 conn.execute(f"DELETE FROM {table} WHERE id IN (SELECT id FROM memories WHERE is_closet = 1)")
