@@ -31,8 +31,6 @@ from poppy.engine._legacy_copies import (
     grade_copy_snapshot,
     is_marked_copy,
     is_proven_unmarked_copy,
-    mark_legacy_announced,
-    pending_legacy_announcements,
     rearm_legacy_announcement,
     record_copy_deletions,
     refuse_restorable_copy_snapshot,
@@ -394,6 +392,31 @@ class TombstoneStore:
                 created_at=memory.created_at.isoformat(),
             )
 
+    def grade_incoming_copy(self, memory: Memory) -> tuple[str, bool]:
+        from poppy.sync._legacy_pending import grade_incoming
+
+        with self._lock:
+            return grade_incoming(self._conn, memory)
+
+    def defer_incoming_copy(self, row: dict, remote_url: str) -> None:
+        from poppy.sync._legacy_pending import defer_copy
+
+        with self._lock:
+            defer_copy(self._conn, row, remote_url)
+
+    def ready_incoming_copies(self) -> list[tuple[dict, str]]:
+        from poppy.sync._legacy_pending import grade_pending
+
+        with self._lock:
+            return grade_pending(self._conn)
+
+    def clear_incoming_copy(self, memory_id: str) -> None:
+        from poppy.sync._legacy_pending import clear_pending
+
+        with self._lock:
+            clear_pending(self._conn, memory_id)
+            self._conn.commit()
+
     def claim_leaked_copy(self, memory_id: str, seen_at: datetime) -> None:
         """Retain a proven legacy copy claim at its observed timestamp.
 
@@ -460,24 +483,6 @@ class TombstoneStore:
         # one would raise rather than answer.
         return claimed if claimed.tzinfo is not None else claimed.replace(tzinfo=timezone.utc)
 
-    def has_copy_deletion(self, memory_id: str) -> bool:
-        """Whether this device deleted ``memory_id`` as a derived per-speaker copy.
-
-        Read by sync's pull: while the deletion is inside its retention window,
-        an older cloud row for that id must not be re-ingested, or the redacted
-        speaker text comes straight back as an ordinary memory. Past the window
-        the row is gone and a resurrecting cloud copy is the pre-marker cleanup
-        case.
-        """
-        with self._lock:
-            row = self._conn.execute("SELECT 1 FROM closet_tombstones WHERE id = ?", (memory_id,)).fetchone()
-        return row is not None
-
-    def pending_legacy_announcements(self) -> list[tuple[str, str | None]]:
-        """Legacy claims whose deletion evidence still needs to be retained."""
-        with self._lock:
-            return pending_legacy_announcements(self._conn)
-
     def local_deletion_wins(self, memory_id: str, updated_at: datetime) -> bool:
         """Whether a recorded local deletion supersedes an incoming version of this id."""
         from poppy.sync.state import local_deletion_wins
@@ -521,24 +526,6 @@ class TombstoneStore:
         """
         with self._lock:
             return repush_stamp(self._conn)
-
-    def mark_legacy_announced(
-        self, memory_ids: list[str] | list[tuple[str, str | None]], *, when: datetime | None = None
-    ) -> None:
-        """Clear a legacy pending flag after its deletion evidence is settled.
-
-        Pass ``(id, stamp)`` pairs to clear only the exact claim that was sent.
-        """
-        with self._lock:
-            mark_legacy_announced(self._conn, memory_ids, when=when)
-            self._conn.commit()
-
-    def list_copy_deletions(self) -> list[CopyDeletion]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, tombstoned_at FROM closet_tombstones ORDER BY tombstoned_at DESC"
-            ).fetchall()
-        return [CopyDeletion(id=r["id"], tombstoned_at=datetime.fromisoformat(r["tombstoned_at"])) for r in rows]
 
     def remove(self, memory_id: str, *, token: str | None = None) -> bool:
         """Delete a tombstone; returns whether a row was actually removed.

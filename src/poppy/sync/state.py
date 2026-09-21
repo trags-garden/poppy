@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from poppy.db import write_gate, write_txn
-from poppy.engine._timestamps import utc_iso
+from poppy.engine._timestamps import chunked, decode_text_columns, raw_text_columns, utc_iso
 from poppy.paths import ensure_poppy_dir, write_text_atomic
 
 try:
@@ -386,10 +386,8 @@ _MIN_STAMP = datetime.min.replace(tzinfo=timezone.utc).isoformat()
 def _first_readable(*values: str | None) -> str | None:
     """The first of these stored timestamps that parses, in canonical UTC."""
     for value in values:
-        stamp = utc_iso(value)
-        if stamp is None:
-            continue
         try:
+            stamp = utc_iso(value)
             datetime.fromisoformat(stamp)
         except (TypeError, ValueError, OverflowError):
             continue
@@ -429,42 +427,18 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path, *, gate_held:
     gate = nullcontext() if gate_held else write_gate(poppy_dir)
     with gate, write_txn(conn):
         now_iso = utc_iso(datetime.now(timezone.utc))
-        if _table_exists(conn, "legacy_closet_ids"):
-            # Answered, not deleted, for every id EXCEPT the ones removed below:
-            # those lose their entry along with the row. That is fine, because
-            # what keeps a republished copy out is no longer this table but the
-            # deletion record plus the grading pull does against the live parent.
-            # Clearing the pending flag is what stops an older client sharing
-            # this store from uploading the entry in the retired format.
-            conn.execute(
-                "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE announce_pending = 1",
-                (now_iso,),
-            )
-        rows = conn.execute(
-            "SELECT m.id, COALESCE(l.legacy_updated_at, m.updated_at), m.created_at FROM memories m "
-            "LEFT JOIN legacy_closet_ids l ON l.id = m.id WHERE m.is_closet = 1"
-            if _table_exists(conn, "legacy_closet_ids")
-            else "SELECT id, updated_at, created_at FROM memories WHERE is_closet = 1"
-        ).fetchall()
-        if not rows:
-            return
         conn.execute(LOCAL_DELETIONS_DDL)
+        columns = raw_text_columns("id", "updated_at", "created_at")
+        rows = conn.execute(f"SELECT {columns} FROM memories WHERE is_closet = 1").fetchall()
         deletions = []
-        for memory_id, updated_at, created_at in rows:
-            # The ROW'S OWN time, never this upgrade's clock. A record stamped now
-            # sits above every version of this id written before the upgrade, so a
-            # real memory another device wrote at the id months ago would be
-            # refused on the next pull and the watermark would move past it: the
-            # remote version would be lost here for good. Stamped with what the
-            # row actually carried, the record covers exactly the copy that was
-            # removed and anything newer is graded rather than refused.
-            #
-            # A row whose times cannot be read at all falls back to the earliest
-            # representable instant, never to now: a record in the past can only
-            # let something through, and what it would let through is caught by
-            # the grading on the pull side instead. A record dated now would
-            # silently refuse a legitimate older version of the id for good.
-            stamp = _first_readable(updated_at, created_at) or _MIN_STAMP
+        for row in rows:
+            try:
+                memory_id, updated_at, created_at = decode_text_columns(tuple(row))
+                if not isinstance(memory_id, str):
+                    continue
+                stamp = _first_readable(updated_at, created_at) or _MIN_STAMP
+            except (ValueError, TypeError, OverflowError):
+                continue
             deletions.append((memory_id, stamp))
         conn.executemany(_RECORD_LOCAL_DELETION_SQL, deletions)
         # No pre-image is kept, deliberately. Only rows marked as DERIVED are
@@ -475,24 +449,31 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path, *, gate_held:
         # its own pre-image. Copying the speaker text into a backup table on the
         # way out would put the very text this removal exists to get rid of back
         # into the store.
-        # Subqueries avoid SQLite's parameter limit on large stores. The engine's
-        # existing DELETE trigger removes the corresponding full-text entries.
+        # The engine's DELETE trigger removes corresponding full-text entries.
+        # Only readable ids join the deletion batch; unreadable rows stay intact.
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         if "ui_tombstones" in tables:
             # A snapshot of the same derived row is not a restorable memory.
             # Preserve an independent note that previously occupied this ID.
+            columns = raw_text_columns("t.id", "t.created_at", "m.created_at", "t.tombstoned_at", "t.updated_at")
             snapshots = conn.execute(
-                "SELECT t.id, t.created_at, m.created_at FROM ui_tombstones t "
+                f"SELECT {columns} FROM ui_tombstones t "
                 "JOIN memories m ON m.id = t.id WHERE m.is_closet = 1 "
                 "AND m.content = t.content AND m.related_to = t.related_to "
                 "AND m.source_type = t.source_type "
                 "AND m.source_session_id IS t.source_session_id"
             ).fetchall()
-            # A timestamp can have different UTC offsets in older stores.
-            conn.executemany(
-                "DELETE FROM ui_tombstones WHERE id = ?",
-                [(mid,) for mid, saved, live in snapshots if utc_iso(saved) == utc_iso(live)],
-            )
+            for row in snapshots:
+                try:
+                    mid, saved, live, deleted, updated = decode_text_columns(tuple(row))
+                    saved, live = _first_readable(saved), _first_readable(live)
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                if saved is not None and saved == live:
+                    stamps = [stamp for value in (deleted, updated) if (stamp := _first_readable(value))]
+                    if stamps:
+                        conn.execute(_RECORD_LOCAL_DELETION_SQL, (mid, max(stamps)))
+                    conn.execute("DELETE FROM ui_tombstones WHERE id = ?", (mid,))
             # The match above is column for column, so it misses a snapshot
             # holding the same copy's text from an earlier point. Once the row
             # below is gone there is no marker left at that id to keep such a
@@ -504,10 +485,30 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path, *, gate_held:
 
             for memory_id, _ in deletions:
                 clear_copy_snapshot(conn, memory_id)
-        for table in ("memory_embeddings", "legacy_closet_ids"):
-            if table in tables:
-                conn.execute(f"DELETE FROM {table} WHERE id IN (SELECT id FROM memories WHERE is_closet = 1)")
-        conn.execute("DELETE FROM memories WHERE is_closet = 1")
+        if _table_exists(conn, "legacy_closet_ids"):
+            # A pending claim can outlive both its parent and its retained
+            # deletion. Transfer its event time before retiring the queue, in
+            # the same transaction, so retention cannot erase the evidence.
+            columns = raw_text_columns("id", "legacy_updated_at")
+            claims = conn.execute(f"SELECT {columns} FROM legacy_closet_ids WHERE announce_pending = 1").fetchall()
+            for row in claims:
+                try:
+                    memory_id, observed = decode_text_columns(tuple(row))
+                    stamp = _first_readable(observed)
+                    if not isinstance(memory_id, str) or stamp is None:
+                        continue
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                conn.execute(_RECORD_LOCAL_DELETION_SQL, (memory_id, stamp))
+                conn.execute(
+                    "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE id = ?",
+                    (now_iso, memory_id),
+                )
+        for batch in chunked([mid for mid, _ in deletions]):
+            placeholders = ",".join("?" * len(batch))
+            for table in ("memory_embeddings", "legacy_closet_ids", "memories"):
+                if table in tables:
+                    conn.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", batch)
 
 
 def local_deletion_at(conn: sqlite3.Connection | None, memory_id: str) -> datetime | None:

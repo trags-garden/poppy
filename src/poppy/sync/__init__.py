@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from poppy.db import write_gate
-from poppy.engine._legacy_copies import TIER_PROVEN, is_marked_copy
+from poppy.engine._legacy_copies import TIER_LIKELY, TIER_PROVEN, is_marked_copy
 from poppy.engine._timestamps import utc_iso
 from poppy.engine.interface import RetrievalEngine
 from poppy.sync.client import (
@@ -942,27 +942,6 @@ def _apply_pulled_row(
     if tombstones.local_deletion_wins(incoming.id, incoming.updated_at):  # type: ignore[attr-defined]
         return "stale"
 
-    # Newer than the record, but is it really someone reclaiming the id? A device
-    # still on the older release goes on deriving these copies and publishing
-    # them, and each publication carries a fresher stamp than the row this store
-    # removed, so the record's own timestamp cannot tell the two apart. Taken at
-    # face value the speaker text comes back as an ordinary memory, drops the
-    # record, and is pushed up again.
-    #
-    # So it is graded against the live parent, the same conjunctive test used
-    # everywhere else: provably the same derived copy is still ours to refuse,
-    # and the record moves up to the stamp just seen so the next publication of
-    # it is covered without grading again. Anything else is a real memory at that
-    # id and takes the ordinary path below, which clears the record as it lands.
-    if (
-        not is_tombstone(row)
-        and tombstones.local_deletion_at(incoming.id) is not None  # type: ignore[attr-defined]
-        and tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN  # type: ignore[arg-type]
-    ):
-        if not dry_run:
-            tombstones.record_local_deletion(incoming.id, incoming.updated_at)  # type: ignore[attr-defined]
-        return "redacted"
-
     # Retained copies from older releases must stay hidden. Applying a cloud
     # row at a marked id would clear its marker and expose the retained text.
     # Deletion evidence also rejects stale copies while allowing real notes
@@ -974,6 +953,19 @@ def _apply_pulled_row(
         incoming,
         dry_run=dry_run,
     ):
+        return "copy"
+
+    # Grade independently of deletion history, including a first pull into
+    # an empty store. Refuse drifted candidates without assigning markers;
+    # neither live rows nor Trash snapshots may expose their speaker text.
+    tier, waiting = tombstones.grade_incoming_copy(incoming)
+    if tier == TIER_LIKELY or (tier == TIER_PROVEN and not is_tombstone(row)):
+        if not dry_run and tier == TIER_PROVEN:
+            tombstones.record_local_deletion(incoming.id, incoming.updated_at)
+        return "redacted"
+    if waiting:
+        if not dry_run:
+            tombstones.defer_incoming_copy(row, remote_url)
         return "copy"
 
     if is_tombstone(row):
@@ -1041,9 +1033,8 @@ def _apply_pulled_row(
         # the speaker text as restorable, and once the parent was forgotten
         # nothing could tell what the entry was any more. Graded here, while the
         # parent is still present, a PROVEN one is recorded as what it is —
-        # content-free, dated from the deletion. A likely one keeps its
-        # entry; restoring it is the user's call, as it is for any row short of
-        # proof.
+        # content-free, dated from the deletion. Drifted incoming candidates
+        # have already been refused above.
         if local_live is None and tombstones.grade_copy_snapshot(incoming) == TIER_PROVEN:  # type: ignore[arg-type]
             copy_deleted_at = deleted_at or incoming.updated_at  # type: ignore[attr-defined]
             tombstones.add_copy_deletions([incoming.id], now=copy_deleted_at)  # type: ignore[attr-defined]
@@ -1161,6 +1152,30 @@ def pull(
     known_ids: set[str] = set()
     seen_deletions: list[Tombstone] = []
 
+    def apply_pending() -> None:
+        nonlocal applied_live, applied_tombstones, skipped_stale, skipped_copies, skipped_echoes
+        # The caller holds the write gate. A parent can arrive during this
+        # pull or have been written by another client since the last pull.
+        for pending, origin in tombstones.ready_incoming_copies():
+            outcome = _apply_pulled_row(
+                engine,
+                tombstones,
+                pending,
+                wire_to_memory(pending),
+                dry_run=False,
+                remote_url=origin,
+                tombstone_preview=tombstone_preview,
+                seen_deletions=seen_deletions,
+            )
+            tombstones.clear_incoming_copy(pending["id"])
+            if outcome not in {"copy", "redacted"}:
+                tombstones.note_remote_memories({pending["id"]}, origin)
+            applied_live += outcome == "live"
+            applied_tombstones += outcome == "tombstone"
+            skipped_stale += outcome == "stale"
+            skipped_copies += outcome == "copy"
+            skipped_echoes += outcome == "redacted"
+
     # Collect + parse, then sort oldest-first. Server returns newest-first,
     # so we have to materialize before processing. The pagination itself makes
     # network calls, so guard it (push guards its per-item calls the same way):
@@ -1206,6 +1221,9 @@ def pull(
         watermark_locked = True
         last_pull_error = str(exc)
 
+    if not dry_run:
+        with write_gate(poppy_dir):
+            apply_pending()
     candidates.sort(key=lambda c: c[0])
 
     for iso, row, incoming in candidates:
@@ -1230,6 +1248,8 @@ def pull(
                 tombstone_preview=tombstone_preview,
                 seen_deletions=seen_deletions,
             )
+            if not dry_run:
+                apply_pending()
         # Even a stale row proves this ID exists. Pulled deletions are marked
         # sent at creation, so their sightings add no pending work.
         if outcome not in {"copy", "redacted"}:

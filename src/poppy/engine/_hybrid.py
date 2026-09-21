@@ -19,6 +19,7 @@ import numpy as np
 from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
 from poppy.engine._legacy_copies import (
+    clear_copy_snapshot,
     clear_marked_copies,
     clear_retired_records,
     ensure_legacy_copy_tables,
@@ -222,6 +223,7 @@ class HybridEngine(RetrievalEngine):
             _migrate_expires_at(self._conn)
             _migrate_enriched_content(self._conn)
             _migrate_embedding_model_id(self._conn)
+            from poppy.sync._legacy_pending import grade_pending
             from poppy.sync.state import remove_derived_rows
 
             # Classification and removal share one gate and transaction, so an
@@ -229,6 +231,7 @@ class HybridEngine(RetrievalEngine):
             with write_gate(db_path.parent), write_txn(self._conn):
                 mark_legacy_copies_for_cleanup(self._conn, had_bloom_schema=had_bloom_schema)
                 remove_derived_rows(self._conn, db_path.parent, gate_held=True)
+                grade_pending(self._conn)
             normalise_stored_timestamps(self._conn)
         except Exception:
             rollback_and_close(self._conn)
@@ -384,7 +387,7 @@ class HybridEngine(RetrievalEngine):
                 # text left over from an older release is being redacted too. A
                 # write that only changes metadata replays the same body and
                 # leaves them alone.
-                clear_marked_copies(self._conn, memory.id, has_embeddings=True)
+                clear_marked_copies(self._conn, memory.id, remote_event_ts=remote_event_ts, has_embeddings=True)
             self._insert_memory(
                 memory.id,
                 memory.content,
@@ -400,6 +403,10 @@ class HybridEngine(RetrievalEngine):
                 embedding=embedding,
             )
             clear_retired_records(self._conn, memory.id)
+            from poppy.sync._legacy_pending import clear_pending, grade_pending
+
+            clear_pending(self._conn, memory.id, through=memory.updated_at)
+            grade_pending(self._conn)
         return memory.id
 
     # --- retrieval ---------------------------------------------------------
@@ -500,7 +507,7 @@ class HybridEngine(RetrievalEngine):
         # One transaction: a failure between the copies and the memory itself
         # would otherwise commit half a redaction.
         with self._lock, write_txn(self._conn):
-            clear_marked_copies(self._conn, memory_id, has_embeddings=True)
+            clear_marked_copies(self._conn, memory_id, remote_event_ts=remote_event_ts, has_embeddings=True)
             cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             self._conn.execute("DELETE FROM memory_embeddings WHERE id = ?", (memory_id,))
             return cursor.rowcount > 0
@@ -556,6 +563,9 @@ class HybridEngine(RetrievalEngine):
             memories = [mid for mid, is_memory in expired if is_memory]
             for mid in memories:
                 clear_marked_copies(self._conn, mid, has_embeddings=True, tombstone=False)
+            for mid, is_memory in expired:
+                if not is_memory:
+                    clear_copy_snapshot(self._conn, mid)
             for batch in chunked([mid for mid, _ in expired]):
                 placeholders = ",".join("?" * len(batch))
                 self._conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)

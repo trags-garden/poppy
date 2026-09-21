@@ -16,7 +16,15 @@ import sqlite3
 from datetime import datetime, timezone
 
 from poppy.db import write_txn
-from poppy.engine._timestamps import _columns, _table_exists, chunked, later_stamp, utc_iso
+from poppy.engine._timestamps import (
+    _columns,
+    _table_exists,
+    chunked,
+    decode_text_columns,
+    later_stamp,
+    raw_text_columns,
+    utc_iso,
+)
 
 SEPARATOR = "_closet_"
 MARKER_COLUMN = "is_closet"
@@ -82,8 +90,6 @@ def _parent_splits(memory_id: str) -> list[tuple[str, str]]:
 
 
 def same_instant(left: str | None, right: str | None) -> bool:
-    if left == right:
-        return True
     if left is None or right is None:
         return False
     try:
@@ -132,8 +138,19 @@ def classify_legacy_copy(
     instant, and byte-equal projection from the live parent. LIKELY has the same
     provenance but different text. Text alone earns no grade.
     """
+    if not all(isinstance(value, str) for value in (memory_id, content, related_raw, created_at)):
+        return TIER_NONE, None
+    try:
+        datetime.fromisoformat(created_at)
+    except (ValueError, TypeError, OverflowError):
+        return TIER_NONE, None
     for parent_id, slug in _parent_splits(memory_id):
-        parent = conn.execute("SELECT content, created_at FROM memories WHERE id = ?", (parent_id,)).fetchone()
+        try:
+            parent = _text_row(conn, "memories", parent_id, "content", "created_at")
+            if parent is not None:
+                datetime.fromisoformat(parent[1])
+        except (ValueError, TypeError, OverflowError):
+            return TIER_NONE, None
         if not has_copy_provenance(
             parent_id,
             slug,
@@ -190,55 +207,33 @@ def back_up_cleared_snapshot(conn: sqlite3.Connection, copy_id: str) -> None:
     )
 
 
-def _decoded(value: object) -> str | None:
-    """Text for a column read as raw bytes, or a raise the caller turns into no grade.
-
-    Read as bytes on purpose. A column declared TEXT can still hold bytes that
-    are not valid text, and the database driver raises while BUILDING the result
-    set, which is before any per-row guard can run. Decoding one row at a time
-    moves that failure inside the guard.
-    """
-    if value is None or isinstance(value, str):
-        return value
-    return bytes(value).decode()
+def _text_row(conn: sqlite3.Connection, table: str, memory_id: str, *columns: str) -> tuple | None:
+    row = conn.execute(f"SELECT {raw_text_columns(*columns)} FROM {table} WHERE id = ?", (memory_id,)).fetchone()
+    return decode_text_columns(tuple(row)) if row is not None else None
 
 
 def legacy_copy_grades(conn: sqlite3.Connection) -> list[tuple[str, str]]:
-    """Read unmarked candidates once, before any marker writes change the store.
-
-    Each field is read twice: as raw bytes, and as the storage class the value
-    actually has. Only a value stored AS TEXT is a value a release that wrote
-    copies could have written, so only that is decoded and graded. A row holding
-    anything else in a field this reads gets no grade at all, whatever those
-    bytes would spell: reading it as text would let a row nothing here wrote
-    look like a copy, and the strongest grade authorises deleting it without
-    keeping a pre-image.
-    """
+    """Grade TEXT candidates only; unreadable rows stay unmarked and untouched."""
+    columns = raw_text_columns("id", "content", "related_to", "created_at", "updated_at")
     rows = conn.execute(
-        "SELECT CAST(id AS BLOB), CAST(content AS BLOB), CAST(related_to AS BLOB), "
-        "CAST(created_at AS BLOB), typeof(id), typeof(content), typeof(related_to), "
-        "typeof(created_at) FROM memories "
-        "WHERE instr(id, ?) > 0 AND COALESCE(is_closet, 0) = 0",
+        f"SELECT {columns} FROM memories WHERE instr(id, ?) > 0 AND COALESCE(is_closet, 0) = 0",
         (SEPARATOR,),
     ).fetchall()
     grades = []
-    for raw_id, raw_content, raw_related, raw_created, *storage in rows:
-        if any(kind != "text" for kind in storage):
-            continue
+    for row in rows:
         try:
-            memory_id = _decoded(raw_id)
+            memory_id, content, related, created, updated = decode_text_columns(tuple(row))
+            datetime.fromisoformat(updated)
             tier, _ = classify_legacy_copy(
                 conn,
                 memory_id,
-                content=_decoded(raw_content),
-                related_raw=_decoded(raw_related),
-                created_at=_decoded(raw_created),
+                content=content,
+                related_raw=related,
+                created_at=created,
             )
         except Exception:
-            # Grading runs inside the transaction that adds the marker column, so
-            # a row this cannot read must not raise: that rolls the column back
-            # too, and every later open fails the same way, leaving the store
-            # unopenable. A row that cannot be graded is left exactly as it is.
+            # The marker column is added in this transaction. A bad row must
+            # not roll it back and make every subsequent open fail again.
             continue
         grades.append((memory_id, tier))
     return grades
@@ -291,38 +286,11 @@ def ensure_legacy_copy_tables(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE {COPY_DELETION_TABLE} ADD COLUMN is_local INTEGER NOT NULL DEFAULT 0")
 
 
-def pending_legacy_announcements(conn: sqlite3.Connection) -> list[tuple[str, str | None]]:
-    if not _table_exists(conn, COPY_CLAIM_TABLE):
-        return []
-    rows = conn.execute(f"SELECT id, legacy_updated_at FROM {COPY_CLAIM_TABLE} WHERE announce_pending = 1 ORDER BY id")
-    return [(row[0], row[1]) for row in rows]
-
-
 def announced_copy_claim(conn: sqlite3.Connection, memory_id: str) -> str | None:
     if not _table_exists(conn, COPY_CLAIM_TABLE):
         return None
     row = conn.execute(f"SELECT legacy_updated_at FROM {COPY_CLAIM_TABLE} WHERE id = ?", (memory_id,)).fetchone()
     return row[0] if row is not None else None
-
-
-def mark_legacy_announced(
-    conn: sqlite3.Connection, memory_ids: list[str] | list[tuple[str, str | None]], *, when: datetime | None = None
-) -> None:
-    if not memory_ids or not _table_exists(conn, COPY_CLAIM_TABLE):
-        return
-    stamp = (when or datetime.now(timezone.utc)).isoformat()
-    for entry in memory_ids:
-        if isinstance(entry, tuple):
-            memory_id, sent = entry
-            conn.execute(
-                f"UPDATE {COPY_CLAIM_TABLE} SET announce_pending = 0, announced_at = ? WHERE id = "
-                f"? AND COALESCE(legacy_updated_at, '') = COALESCE(?, '')",
-                (stamp, memory_id, utc_iso(sent)),
-            )
-        else:
-            conn.execute(
-                f"UPDATE {COPY_CLAIM_TABLE} SET announce_pending = 0, announced_at = ? WHERE id = ?", (stamp, entry)
-            )
 
 
 def record_copy_deletions(
@@ -337,8 +305,6 @@ def record_copy_deletions(
         return
     stamp = utc_iso(when or datetime.now(timezone.utc))
     if authoritative and when is not None:
-        capped = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
-        stamp = utc_iso(min(capped, datetime.now(timezone.utc)))
         conn.executemany(
             f"INSERT INTO {COPY_DELETION_TABLE} (id, tombstoned_at, is_local) VALUES (?, ?, 0) ON "
             f"CONFLICT(id) DO UPDATE SET tombstoned_at = MAX({COPY_DELETION_TABLE}.tombstoned_at, "
@@ -395,7 +361,12 @@ def _owned_by(parent_id: str, related_raw: str | None) -> bool:
 
 
 def clear_marked_copies(
-    conn: sqlite3.Connection, parent_id: str, *, has_embeddings: bool, tombstone: bool = True
+    conn: sqlite3.Connection,
+    parent_id: str,
+    *,
+    has_embeddings: bool,
+    tombstone: bool = True,
+    remote_event_ts: datetime | None = None,
 ) -> list[str]:
     """Remove the marked legacy copies of ``parent_id``. The caller holds the write lock.
 
@@ -433,7 +404,7 @@ def clear_marked_copies(
     for memory_id in ids:
         clear_copy_snapshot(conn, memory_id)
     if tombstone:
-        record_copy_deletions(conn, ids)
+        record_copy_deletions(conn, ids, when=remote_event_ts, applying_remote_deletion=remote_event_ts is not None)
     for batch in chunked(ids):
         placeholders = ",".join("?" * len(batch))
         if has_embeddings:
@@ -458,16 +429,22 @@ def rearm_legacy_announcement(conn: sqlite3.Connection, memory_id: str, updated_
 
 
 def _stored_grade(conn: sqlite3.Connection, memory_id: str, table: str) -> tuple[str, str | None]:
-    row = conn.execute(f"SELECT content, related_to, created_at FROM {table} WHERE id = ?", (memory_id,)).fetchone()
+    row = _text_row(conn, table, memory_id, "content", "related_to", "created_at")
     if row is None:
         return TIER_NONE, None
+    if not all(isinstance(value, str) for value in row):
+        raise ValueError("Incomplete legacy row")
+    datetime.fromisoformat(row[2])
     return classify_legacy_copy(conn, memory_id, content=row[0], related_raw=row[1], created_at=row[2])
 
 
 def is_proven_unmarked_copy(conn: sqlite3.Connection, memory_id: str) -> bool:
     if not conn.execute("SELECT 1 FROM memories WHERE id = ? AND COALESCE(is_closet, 0) = 0", (memory_id,)).fetchone():
         return False
-    return _stored_grade(conn, memory_id, "memories")[0] == TIER_PROVEN
+    try:
+        return _stored_grade(conn, memory_id, "memories")[0] == TIER_PROVEN
+    except (ValueError, TypeError, OverflowError):
+        return False
 
 
 def claim_proven_unmarked_copy(conn: sqlite3.Connection, memory_id: str) -> bool:
@@ -490,7 +467,10 @@ def grade_copy_snapshot(
 def refuse_restorable_copy_snapshot(conn: sqlite3.Connection, memory_id: str) -> str | None:
     if not _table_exists(conn, "ui_tombstones"):
         return None
-    tier, parent = _stored_grade(conn, memory_id, "ui_tombstones")
+    try:
+        tier, parent = _stored_grade(conn, memory_id, "ui_tombstones")
+    except (ValueError, TypeError, OverflowError):
+        return None
     if tier != TIER_PROVEN:
         return None
     _claim_snapshot(conn, memory_id)
@@ -501,7 +481,22 @@ def refuse_restorable_copy_snapshot(conn: sqlite3.Connection, memory_id: str) ->
 def clear_copy_snapshot(conn: sqlite3.Connection, copy_id: str) -> bool:
     if not _table_exists(conn, "ui_tombstones"):
         return False
-    tier, _ = _stored_grade(conn, copy_id, "ui_tombstones")
+    try:
+        tier, _ = _stored_grade(conn, copy_id, "ui_tombstones")
+    except (ValueError, TypeError, OverflowError):
+        # An unreadable snapshot cannot be graded. A readable marked copy at
+        # this id still proves that the snapshot must not become public.
+        marked = conn.execute(
+            "SELECT 1 FROM memories WHERE id = ? AND COALESCE(is_closet, 0) >= 1", (copy_id,)
+        ).fetchone()
+        try:
+            live_tier, _ = _stored_grade(conn, copy_id, "memories")
+        except (ValueError, TypeError, OverflowError):
+            return False
+        if not marked or live_tier not in (TIER_PROVEN, TIER_LIKELY):
+            return False
+        conn.execute("DELETE FROM ui_tombstones WHERE id = ?", (copy_id,))
+        return True
     if tier != TIER_PROVEN:
         # A retained copy's text can differ from its live parent's, and a
         # snapshot an older client left can differ from BOTH: it holds that
@@ -513,30 +508,31 @@ def clear_copy_snapshot(conn: sqlite3.Connection, copy_id: str) -> bool:
         # in its body. So the snapshot is graded on ITS OWN fields, and any
         # snapshot at a marked id that proves to be that copy's text goes,
         # with a recoverable pre-image kept first.
-        row = conn.execute(
-            "SELECT t.content, t.related_to, t.created_at, m.related_to FROM memories m "
-            "JOIN ui_tombstones t ON t.id = m.id WHERE m.id = ? AND COALESCE(m.is_closet, 0) >= 1",
-            (copy_id,),
-        ).fetchone()
-        if row is None:
+        if not conn.execute(
+            "SELECT 1 FROM memories WHERE id = ? AND COALESCE(is_closet, 0) >= 1", (copy_id,)
+        ).fetchone():
             return False
         try:
-            parents = json.loads(row[3] or "[]")
-        except (TypeError, ValueError):
-            return False
-        if not isinstance(parents, list) or len(parents) != 1 or not isinstance(parents[0], str):
-            return False
-        parent = conn.execute("SELECT created_at FROM memories WHERE id = ?", (parents[0],)).fetchone()
-        if parent is None or not copy_id.startswith(parents[0] + SEPARATOR):
-            return False
-        if not has_copy_provenance(
-            parents[0],
-            copy_id[len(parents[0] + SEPARATOR) :],
-            content=row[0],
-            related_raw=row[1],
-            created_at=row[2],
-            parent_created_at=parent[0],
-        ):
+            snapshot = _text_row(conn, "ui_tombstones", copy_id, "content", "related_to", "created_at")
+            live = _text_row(conn, "memories", copy_id, "related_to")
+            if snapshot is None or live is None:
+                return False
+            parents = json.loads(live[0] or "[]")
+            if not isinstance(parents, list) or len(parents) != 1 or not isinstance(parents[0], str):
+                return False
+            parent = _text_row(conn, "memories", parents[0], "created_at")
+            if parent is None or not copy_id.startswith(parents[0] + SEPARATOR):
+                return False
+            if not has_copy_provenance(
+                parents[0],
+                copy_id[len(parents[0] + SEPARATOR) :],
+                content=snapshot[0],
+                related_raw=snapshot[1],
+                created_at=snapshot[2],
+                parent_created_at=parent[0],
+            ):
+                return False
+        except (ValueError, TypeError, OverflowError):
             return False
         back_up_cleared_snapshot(conn, copy_id)
     if tier == TIER_PROVEN:
@@ -553,5 +549,10 @@ def clear_retired_records(conn: sqlite3.Connection, memory_id: str) -> None:
 
 
 def _claim_snapshot(conn: sqlite3.Connection, memory_id: str) -> None:
-    row = conn.execute("SELECT tombstoned_at, updated_at FROM ui_tombstones WHERE id = ?", (memory_id,)).fetchone()
-    rearm_legacy_announcement(conn, memory_id, later_stamp(row[0], row[1]))
+    try:
+        row = _text_row(conn, "ui_tombstones", memory_id, "tombstoned_at", "updated_at")
+        stamp = later_stamp(row[0], row[1])
+        datetime.fromisoformat(stamp)
+    except (ValueError, TypeError, OverflowError):
+        return
+    rearm_legacy_announcement(conn, memory_id, stamp)

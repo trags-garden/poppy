@@ -775,9 +775,8 @@ async function deleteSelected() {
   try {
     const res = await api(`/api/memories/${m.id}`, { method: "DELETE" });
     // `restorable: false` means nothing was snapshotted, so there is no undo to
-    // offer: the row was a derived per-speaker copy, which the engine rebuilds
-    // from its parent rather than restoring. Offering Undo anyway would hand the
-    // user a button that 404s.
+    // offer: the row was a legacy per-speaker copy removed without a snapshot.
+    // Offering Undo would hand the user a button that 404s.
     if (res && res.restorable === false) {
       toast("Deleted.");
     } else {

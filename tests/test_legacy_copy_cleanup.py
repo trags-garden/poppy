@@ -193,7 +193,7 @@ def test_forgetting_the_parent_does_not_delete_a_real_lookalike(tmp_path: Path) 
 
     assert _all_ids(db) == ["mem_customer_closet_notes"]
     assert engine.get("mem_customer_closet_notes").content == "the wardrobe budget for Q3"
-    assert TombstoneStore(db).list_copy_deletions() == []
+    assert _copy_records(TombstoneStore(db)) == []
 
 
 def test_a_seed_redaction_does_not_delete_a_real_lookalike(tmp_path: Path) -> None:
@@ -209,7 +209,7 @@ def test_a_seed_redaction_does_not_delete_a_real_lookalike(tmp_path: Path) -> No
 
 
 def test_a_pulled_memory_shaped_like_a_copy_is_ingested_untouched(tmp_path: Path) -> None:
-    """No copy detection at the wire: the marker is local provenance, not a shape."""
+    """An id shape alone supplies no evidence that a memory is a copy."""
     db = tmp_path / "memories.db"
     engine = _bloom(db)
     now = datetime.now(timezone.utc).isoformat()
@@ -317,7 +317,14 @@ def _tier_b_store(tmp_path: Path) -> Path:
 
 def _write_legacy(engine, memory: Memory) -> None:
     """Write the fixed two-speaker fixture in the old on-disk format."""
-    engine.ingest(memory)
+    from poppy.sync.serializer import memory_to_wire
+
+    _insert_wire_legacy(engine, memory_to_wire(memory))
+    with engine._conn:
+        engine._conn.execute(
+            "INSERT INTO memory_embeddings (id, embedding, model_id) VALUES (?, ?, ?)",
+            (memory.id, np.array([1, 0, 0, 0], dtype=np.float32).tobytes(), engine.model_id),
+        )
     turns = json.loads(memory.content)
     for speaker, slug in (("Alice", "alice"), ("Bob", "bob")):
         content = json.dumps([turn for turn in turns if turn["speaker"] == speaker])
@@ -342,6 +349,8 @@ def _legacy_store(tmp_path: Path) -> Path:
     db = tmp_path / "memories.db"
     _write_legacy(_bloom(db), _memory("sess-2026-01", _turns()))
     _strip_marker(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM poppy_migrations")
     return db
 
 
@@ -547,7 +556,7 @@ def test_forgetting_a_copy_id_directly_writes_no_speaker_text(tmp_path: Path) ->
     store = TombstoneStore(db)
     assert store.list_all() == []  # nothing restorable, nothing snapshotted
     assert store.get("sess-2026-01_closet_alice") is None
-    assert {ct.id for ct in store.list_copy_deletions()} == {"sess-2026-01_closet_alice"}
+    assert {ct.id for ct in _copy_records(store)} == {"sess-2026-01_closet_alice"}
     assert engine.get("sess-2026-01_closet_alice") is None
 
     conn = sqlite3.connect(str(db))
@@ -576,7 +585,7 @@ def test_forgetting_a_real_lookalike_still_tombstones_it_normally(tmp_path: Path
     store = TombstoneStore(db)
     assert [t.memory.id for t in store.list_all()] == ["mem_customer_closet_notes"]
     assert store.get("mem_customer_closet_notes").memory.content == "the wardrobe budget for Q3"
-    assert store.list_copy_deletions() == []
+    assert _copy_records(store) == []
 
 
 def _cloud_row(mid: str, content: str, *, deleted: bool = False, when: datetime | None = None) -> dict:
@@ -852,17 +861,20 @@ def test_ingesting_malformed_turns_does_not_crash_the_engine(tmp_path: Path) -> 
     assert SeedEngine(db_path=db).get("sess-2026-01").content == _LIST_SPEAKER
 
 
-def test_expiry_does_not_announce_copy_deletions(tmp_path: Path) -> None:
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_expiry_does_not_announce_copy_deletions(tmp_path: Path, engine_kind: str) -> None:
     """TTL is not a redaction: the cloud row carries the same expires_at."""
     db = tmp_path / "memories.db"
-    engine = _bloom(db)
+    writer = _bloom(db)
+    engine = SeedEngine(db) if engine_kind == "seed" else writer
     expired = _memory("sess-2026-01", _turns())
     expired.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
-    engine.ingest(expired)
+    _write_legacy(writer, expired)
+    assert len(_marked_ids(db)) == 2
 
     assert engine.purge_expired() == 1
     assert _all_ids(db) == []
-    assert TombstoneStore(db).list_copy_deletions() == []
+    assert _copy_records(TombstoneStore(db)) == []
 
 
 def test_forgetting_a_copy_reports_no_restore_window(tmp_path: Path) -> None:
@@ -923,11 +935,11 @@ def test_a_reclaimed_copy_id_still_receives_cloud_updates(tmp_path: Path) -> Non
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
     store = TombstoneStore(db)
     assert forget(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store).deleted is True
-    assert store.has_copy_deletion("sess-2026-01_closet_alice") is True
+    assert store.get_copy_deletion("sess-2026-01_closet_alice") is not None
 
     # The id is reclaimed by an independent note, which drops the stale record.
     SeedEngine(db_path=db).ingest(_memory("sess-2026-01_closet_alice", "a note of my own"))
-    assert store.has_copy_deletion("sess-2026-01_closet_alice") is False
+    assert store.get_copy_deletion("sess-2026-01_closet_alice") is None
 
     newer = _cloud_row(
         "sess-2026-01_closet_alice",
@@ -1009,9 +1021,31 @@ def _stored_updated_at(db: Path, memory_id: str) -> str:
     return _rows(db, "SELECT updated_at FROM memories WHERE id = ?", (memory_id,))[0][0]
 
 
+def _copy_records(store):
+    return [
+        store.get_copy_deletion(row[0])
+        for row in store._conn.execute("SELECT id FROM closet_tombstones ORDER BY tombstoned_at DESC")
+    ]
+
+
+def _pending_claims(store):
+    return store._conn.execute(
+        "SELECT id, legacy_updated_at FROM legacy_closet_ids WHERE announce_pending = 1 ORDER BY id"
+    ).fetchall()
+
+
+def _settle_claims(conn):
+    """Reproduce an older client's acknowledgement before retention runs."""
+    conn.execute(
+        "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE announce_pending = 1",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.commit()
+
+
 def _pending_ids(store: TombstoneStore) -> list[str]:
     """Just the ids from the announcement queue; the timestamp is asserted separately."""
-    return [memory_id for memory_id, _ in store.pending_legacy_announcements()]
+    return [memory_id for memory_id, _ in _pending_claims(store)]
 
 
 def _backup_rows(db: Path) -> dict[str, str]:
@@ -1115,7 +1149,7 @@ def test_an_ordinary_tombstone_is_still_a_restorable_entry(tmp_path: Path) -> No
 
     assert result.applied_tombstones == 1
     assert [t.memory.id for t in store.list_all()] == ["mem_real"]
-    assert store.list_copy_deletions() == []
+    assert _copy_records(store) == []
 
 
 def test_a_real_memory_matching_the_placeholder_still_gets_deleted(tmp_path: Path) -> None:
@@ -1256,7 +1290,7 @@ def test_a_newer_cloud_row_at_a_deleted_copys_id_is_ingested(tmp_path: Path) -> 
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
     store = TombstoneStore(db)
     forget(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store)
-    assert store.has_copy_deletion("sess-2026-01_closet_alice") is True
+    assert store.get_copy_deletion("sess-2026-01_closet_alice") is not None
 
     newer = _cloud_row(
         "sess-2026-01_closet_alice",
@@ -1276,7 +1310,7 @@ def test_a_newer_cloud_row_at_a_deleted_copys_id_is_ingested(tmp_path: Path) -> 
     assert engine.get("sess-2026-01_closet_alice").content == "an independent note from device B"
     assert _marked_ids(db) == ["sess-2026-01_closet_bob"]
     # Reclaiming the id drops the deletion record, so it cannot suppress again.
-    assert store.has_copy_deletion("sess-2026-01_closet_alice") is False
+    assert store.get_copy_deletion("sess-2026-01_closet_alice") is None
 
 
 def test_an_older_cloud_copy_at_a_deleted_copys_id_is_still_skipped(tmp_path: Path) -> None:
@@ -1318,7 +1352,7 @@ def test_sync_ages_out_the_local_side_tables(tmp_path: Path, synced_state) -> No
     store.note_remote_memories({"sess-2026-01"}, _RecordingClient.base_url)
     forget(engine, tmp_path, "sess-2026-01", tombstones=store)
     store.add_copy_deletions(["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"])
-    assert len(store.list_copy_deletions()) == 2
+    assert len(_copy_records(store)) == 2
 
     old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
     conn = sqlite3.connect(str(db))
@@ -1330,7 +1364,7 @@ def test_sync_ages_out_the_local_side_tables(tmp_path: Path, synced_state) -> No
     save(tmp_path, synced_state())  # only a SENT deletion ages out
     run_sync(engine=engine, tombstones=store, client=_RecordingClient(), poppy_dir=tmp_path)
 
-    assert store.list_copy_deletions() == []
+    assert _copy_records(store) == []
     assert store.list_all() == []
 
 
@@ -1386,11 +1420,11 @@ def test_an_unsent_copy_deletion_is_not_purged_by_age(tmp_path: Path) -> None:
 
     # No push watermark: nothing has been sent, so nothing may be dropped.
     assert store.purge_expired(pushed_through=None) == 0
-    assert len(store.list_copy_deletions()) == 2
+    assert len(_copy_records(store)) == 2
 
     # Once a push has covered them, they age out.
     store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
-    assert store.list_copy_deletions() == []
+    assert _copy_records(store) == []
 
 
 def test_the_migration_backup_still_ages_out_without_a_watermark(tmp_path: Path) -> None:
@@ -1488,7 +1522,7 @@ def test_unmarked_legacy_rows_are_not_reclassified_on_reopen(tmp_path: Path) -> 
         _bloom(db)
     assert _marked_ids(db) == []
     assert _backup_rows(db) == {}
-    assert TombstoneStore(db).list_copy_deletions() == []
+    assert _copy_records(TombstoneStore(db)) == []
 
 
 def test_reopening_a_store_with_a_lookalike_never_writes(tmp_path: Path) -> None:
@@ -1560,7 +1594,7 @@ def test_a_fresh_store_pushes_no_copy_deletions(tmp_path: Path, synced_state) ->
 
     forget(engine, tmp_path, "meeting", tombstones=store)
 
-    assert store.list_copy_deletions() == []
+    assert _copy_records(store) == []
     assert _pending_ids(store) == []  # but nothing is announced
 
     client = _RecordingClient()
@@ -1673,7 +1707,7 @@ def test_forgetting_the_parent_leaves_that_real_memory_alone(tmp_path: Path) -> 
     assert engine.get("sess-1_closet_alice").content == "MY OWN NOTE, NOT A COPY"
     assert [m.id for m in engine.list_all()] == ["sess-1_closet_alice"]
     # Never recorded as a deleted copy, so pull cannot skip its cloud updates.
-    assert store.list_copy_deletions() == []
+    assert _copy_records(store) == []
     assert store.get_copy_deletion("sess-1_closet_alice") is None
 
 
@@ -1795,13 +1829,7 @@ def test_an_equal_timestamp_tombstone_deletes_the_local_row(tmp_path: Path) -> N
     when = datetime.now(timezone.utc) - timedelta(days=1)
     _, copy = _leaked_pair(when)
 
-    pull(
-        engine=engine,
-        tombstones=store,
-        client=_RecordingClient(rows=[copy]),
-        state=SyncState(),
-        poppy_dir=tmp_path,
-    )
+    _insert_wire_legacy(engine, copy)
     assert engine.get("p_closet_alice") is not None
 
     # A's cleanup, carrying the copy's own updated_at.
@@ -2102,21 +2130,23 @@ def test_a_local_copy_deletion_is_a_floor_for_pulled_ones(tmp_path: Path) -> Non
     assert store.get_copy_deletion("remote_closet_bob").tombstoned_at == noon
 
 
-def _pull_leaked_pair(tmp_path: Path, engine, store, *, when: datetime) -> None:
-    """What a fresh store receives from an account a <=0.2.4 client synced."""
-    parent = _cloud_row("p", _turns(), when=when)
-    parent["created_at"] = when.isoformat()
-    copy = _cloud_row("p_closet_alice", json.dumps([{"speaker": "Alice", "dia_id": "D1", "text": SECRET}]), when=when)
-    copy["created_at"] = when.isoformat()
-    copy["related_to"] = ["p"]
-    for row in (parent, copy):
-        pull(
-            engine=engine,
-            tombstones=store,
-            client=_RecordingClient(rows=[row]),
-            state=SyncState(),
-            poppy_dir=tmp_path,
+def _insert_wire_legacy(engine, row):
+    values = {key: value for key, value in row.items() if key not in ("deleted_at", "superseded_by")}
+    values["related_to"] = json.dumps(values["related_to"])
+    columns = {r[1] for r in engine._conn.execute("PRAGMA table_info(memories)")}
+    if "enriched_content" in columns:
+        values["enriched_content"] = values["content"]
+    with engine._conn:
+        engine._conn.execute(
+            f"INSERT INTO memories ({', '.join(values)}) VALUES ({', '.join('?' for _ in values)})",
+            list(values.values()),
         )
+
+
+def _plant_leaked_pair(tmp_path: Path, engine, store, *, when: datetime) -> None:
+    """Rows a previous client had already pulled before this engine opened."""
+    for row in _leaked_pair(when):
+        _insert_wire_legacy(engine, row)
 
 
 def test_an_older_pulled_deletion_never_replaces_a_newer_trash_snapshot(tmp_path: Path) -> None:
@@ -2322,7 +2352,7 @@ def test_a_trash_entry_that_is_not_the_parents_text_survives_the_parents_forget(
 
     assert forget(engine, tmp_path, "p", tombstones=store).deleted is True
     assert store.get("p_closet_alice").memory.content == "MY OWN NOTE AT THAT ID"
-    assert "p_closet_alice" not in dict(store.pending_legacy_announcements())
+    assert "p_closet_alice" not in dict(_pending_claims(store))
 
 
 def test_a_trash_entry_with_the_same_text_but_other_provenance_survives(tmp_path: Path) -> None:
@@ -2338,7 +2368,7 @@ def test_a_trash_entry_with_the_same_text_but_other_provenance_survives(tmp_path
     assert forget(engine, tmp_path, "p", tombstones=store).deleted is True
     kept = store.get("p_closet_alice")
     assert kept is not None and kept.memory.related_to == ["independent-record"]
-    assert "p_closet_alice" not in dict(store.pending_legacy_announcements())
+    assert "p_closet_alice" not in dict(_pending_claims(store))
 
 
 @pytest.mark.parametrize("engine_name", ["seed", "bloom"])
@@ -2379,7 +2409,7 @@ def test_forgetting_a_proven_unmarked_copy_on_a_seed_store_is_content_free(tmp_p
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=1)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     assert "p_closet_alice" not in _marked_ids(db)
 
     result = forget(seed, tmp_path, "p_closet_alice", tombstones=store)
@@ -2408,7 +2438,7 @@ def test_forgetting_a_real_lookalike_still_snapshots_it(tmp_path: Path) -> None:
     result = forget(seed, tmp_path, "p_closet_alice", tombstones=store)
     assert result.deleted is True and result.tombstone is not None
     assert store.get("p_closet_alice").memory.content == "MY OWN NOTE"
-    assert "p_closet_alice" not in dict(store.pending_legacy_announcements())
+    assert "p_closet_alice" not in dict(_pending_claims(store))
 
 
 def test_forgetting_a_proven_unmarked_copy_also_clears_its_legacy_trash_entry(tmp_path: Path) -> None:
@@ -2418,7 +2448,7 @@ def test_forgetting_a_proven_unmarked_copy_also_clears_its_legacy_trash_entry(tm
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=1)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     legacy = store.add(seed.get("p_closet_alice"))
 
     assert forget(seed, tmp_path, "p_closet_alice", tombstones=store).deleted is True
@@ -2454,7 +2484,7 @@ def test_a_cleanup_deletion_landing_on_a_live_unmarked_copy_leaves_no_trash_entr
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=1)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     assert seed.get("p_closet_alice") is not None
 
     cleanup = _legacy_deletion_row("p_closet_alice", when)
@@ -2479,7 +2509,7 @@ def test_a_proven_unmarked_copy_is_refused_to_supersede_and_edit(tmp_path: Path,
 
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
-    _pull_leaked_pair(tmp_path, seed, store, when=datetime.now(timezone.utc) - timedelta(days=1))
+    _plant_leaked_pair(tmp_path, seed, store, when=datetime.now(timezone.utc) - timedelta(days=1))
     assert "p_closet_alice" not in _marked_ids(db)
 
     with pytest.raises(ValueError, match="derived per-speaker copy"):
@@ -2713,14 +2743,14 @@ def test_audit_sync_purge_during_wait_does_not_revive_captured_copy(
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=30)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     # The copy is forgotten by id and the PARENT stays: that is what leaves the
     # evidence in place, and the claim is only an existence hint.
     assert forget(seed, tmp_path, "p_closet_alice", tombstones=store).deleted is True
     assert store.announced_copy_claim("p_closet_alice") is not None
     assert "p_closet_alice" in _pending_ids(store)
     # The announcement lands, so the record is free to age out.
-    store.mark_legacy_announced(store.pending_legacy_announcements())
+    _settle_claims(store._conn)
     conn = sqlite3.connect(str(db))
     conn.execute("UPDATE closet_tombstones SET tombstoned_at = ?", (when.isoformat(),))
     conn.commit()
@@ -2766,7 +2796,7 @@ def test_a_real_note_at_an_announced_id_is_still_ingested(tmp_path: Path) -> Non
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=30)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     assert forget(seed, tmp_path, "p", tombstones=store).deleted is True
     conn = sqlite3.connect(str(db))
     conn.execute("DELETE FROM closet_tombstones")  # only the claim is left
@@ -3136,7 +3166,7 @@ def test_the_leaked_copy_itself_is_still_suppressed_under_a_claim(tmp_path: Path
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=30)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     leaked = _cloud_row("p_closet_alice", seed.get("p_closet_alice").content, when=when)
     leaked["created_at"] = seed.get("p").created_at.isoformat()
     leaked["related_to"] = ["p"]
@@ -3187,10 +3217,10 @@ def test_a_republished_copy_stays_suppressed_without_upload(tmp_path: Path) -> N
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=30)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     copy_text = seed.get("p_closet_alice").content
     assert forget(seed, tmp_path, "p_closet_alice", tombstones=store).deleted is True
-    store.mark_legacy_announced(store.pending_legacy_announcements())  # the cloud accepted it
+    _settle_claims(store._conn)  # the cloud accepted it
     conn = sqlite3.connect(str(db))
     conn.execute("DELETE FROM closet_tombstones")  # the record has aged out
     conn.commit()
@@ -3220,7 +3250,7 @@ def test_a_proven_copy_newer_than_the_record_is_still_suppressed(tmp_path: Path)
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     when = datetime.now(timezone.utc) - timedelta(days=30)
-    _pull_leaked_pair(tmp_path, seed, store, when=when)
+    _plant_leaked_pair(tmp_path, seed, store, when=when)
     copy_text = seed.get("p_closet_alice").content
     assert forget(seed, tmp_path, "p_closet_alice", tombstones=store).deleted is True
     record = store.get_copy_deletion("p_closet_alice")
@@ -3531,7 +3561,7 @@ def test_a_copy_deletion_record_outlives_the_window_while_its_announcement_is_pe
     the record that makes pull skip the cloud's stale copy. The next pull then
     re-ingested the leaked copy and that ingest cancelled the announcement.
     """
-    from poppy.engine._legacy_copies import mark_legacy_announced, rearm_legacy_announcement
+    from poppy.engine._legacy_copies import rearm_legacy_announcement
 
     db = tmp_path / "memories.db"
     _bloom(db)
@@ -3546,7 +3576,7 @@ def test_a_copy_deletion_record_outlives_the_window_while_its_announcement_is_pe
     assert store.get_copy_deletion("x_closet_alice") is not None  # announcement still pending
     assert store.get_copy_deletion("y_closet_bob") is None  # nothing pending: window + watermark apply
 
-    mark_legacy_announced(conn, ["x_closet_alice"])
+    _settle_claims(conn)
     conn.commit()
     conn.close()
     store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
@@ -3861,3 +3891,334 @@ def test_sync_preview_uses_open_time_cleanup(tmp_path, monkeypatch, command):
     assert client.upserts == []
     assert "one-time marker migration" not in result.output
     assert not (tmp_path / "sync_state.json").exists()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("operation", ["edit", "delete"])
+def test_pulled_parent_change_dates_copy_deletion_from_event(tmp_path, engine_kind, operation):
+    db = _tier_b_store(tmp_path)
+    before = datetime.now(timezone.utc) - timedelta(days=4)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE memories SET created_at = ?, updated_at = ?", (before.isoformat(), before.isoformat()))
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    event = before + timedelta(days=1)
+    parent = _cloud_row("sess-2026-01", "redacted", deleted=operation == "delete", when=event)
+    copy_id = "sess-2026-01_closet_alice"
+    note = _cloud_row(copy_id, "an independent later note", when=event + timedelta(hours=1))
+
+    pull(engine=engine, tombstones=store, client=_RecordingClient([parent]), state=SyncState(), poppy_dir=tmp_path)
+
+    assert store.get_copy_deletion(copy_id).tombstoned_at == event
+    assert _rows(db, "SELECT is_local FROM closet_tombstones WHERE id = ?", (copy_id,)) == [(0,)]
+    pull(engine=engine, tombstones=store, client=_RecordingClient([note]), state=SyncState(), poppy_dir=tmp_path)
+    assert engine.get_public(copy_id).content == note["content"]
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("pre_marker", [False, True])
+@pytest.mark.parametrize("damage", ["blob_timestamp", "utf8_timestamp", "utf8_snapshot"])
+def test_unreadable_legacy_values_allow_open_and_reopen(tmp_path, engine_kind, pre_marker, damage):
+    db = _legacy_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    with sqlite3.connect(db) as conn:
+        if not pre_marker:
+            conn.execute("ALTER TABLE memories ADD COLUMN is_closet INTEGER NOT NULL DEFAULT 0")
+            conn.execute("UPDATE memories SET is_closet = 1 WHERE id LIKE '%_closet_%'")
+        if damage == "blob_timestamp":
+            conn.execute("UPDATE memories SET updated_at = ? WHERE id = ?", (b"2026-01-01T00:00:00+00:00", copy_id))
+        elif damage == "utf8_timestamp":
+            conn.execute("UPDATE memories SET updated_at = CAST(x'ff' AS TEXT) WHERE id = ?", (copy_id,))
+        else:
+            conn.execute("UPDATE ui_tombstones SET content = CAST(x'ff' AS TEXT) WHERE id = ?", (copy_id,))
+    for _ in range(2):
+        engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+        assert MARKER_COLUMN in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
+        engine.ingest(_memory("usable", "a usable store"))
+        assert engine.get_public("usable").content == "a usable store"
+        engine._conn.close()
+    if damage == "utf8_snapshot":
+        assert _rows(db, "SELECT id FROM ui_tombstones WHERE id = ?", (copy_id,)) == []
+    else:
+        assert copy_id in _all_ids(db)
+        if pre_marker:
+            assert _rows(db, "SELECT is_closet FROM memories WHERE id = ?", (copy_id,)) == [(0,)]
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("arrival", ["parent_first", "child_first", "parent_on_reopen"])
+@pytest.mark.parametrize("drifted", [False, True])
+def test_incoming_copy_is_never_public_without_deletion_evidence(tmp_path, engine_kind, arrival, drifted):
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    when = datetime.now(timezone.utc) - timedelta(days=2)
+    parent = _cloud_row("session", _turns(), when=when)
+    content = json.dumps([json.loads(_turns("earlier text" if drifted else SECRET))[0]])
+    child = _cloud_row("session_closet_alice", content, when=when)
+    child["related_to"] = ["session"]
+
+    def receive(rows):
+        return pull(
+            engine=engine, tombstones=store, client=_RecordingClient(rows), state=SyncState(), poppy_dir=tmp_path
+        )
+
+    if arrival == "parent_first":
+        receive([parent])
+    receive([child])
+    assert engine.get_public(child["id"]) is None
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert child["id"] not in {r["id"] for r in client.upserts}
+    if arrival == "parent_on_reopen":
+        _insert_wire_legacy(engine, parent)
+        engine._conn.close()
+        engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    elif arrival == "child_first":
+        receive([parent])
+    assert engine.get_public(child["id"]) is None
+    if not drifted:
+        assert _local_deletion_time(db, child["id"]) == when
+    assert forget(engine, tmp_path, "session", tombstones=store).deleted
+    assert engine.get_public(child["id"]) is None
+    receive([_cloud_row(child["id"], "my independent note", when=when + timedelta(days=1))])
+    assert engine.get_public(child["id"]).content == "my independent note"
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_reopen_preserves_proven_claim_after_parent_and_retention_are_gone(tmp_path, engine_kind):
+    from poppy.sync.serializer import wire_to_memory
+    from poppy.write_flow import restore
+
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    event = datetime.now(timezone.utc) - timedelta(days=10)
+    parent = _cloud_row("session", _turns(), when=event - timedelta(days=1))
+    engine.ingest(wire_to_memory(parent))
+    child = _cloud_row("session_closet_alice", json.dumps([json.loads(_turns())[0]]), deleted=True, when=event)
+    child["created_at"] = parent["created_at"]
+    child["related_to"] = ["session"]
+    pull(engine=engine, tombstones=store, client=_RecordingClient([child]), state=SyncState(), poppy_dir=tmp_path)
+    assert forget(engine, tmp_path, "session", tombstones=store).deleted
+    engine._conn.close()
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
+    assert store.get_copy_deletion(child["id"]) is None
+    pull(engine=engine, tombstones=store, client=_RecordingClient([child]), state=SyncState(), poppy_dir=tmp_path)
+    assert store.get_public(child["id"]) is None
+    assert not restore(engine, tmp_path, child["id"], tombstones=store).found
+    assert _local_deletion_time(db, child["id"]) == event
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("occupied", [False, True])
+def test_independent_copy_expiry_clears_its_snapshot_atomically(tmp_path, engine_kind, occupied):
+    db = _tier_b_store(tmp_path)
+    expired = datetime.now(timezone.utc) - timedelta(days=1)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE memories SET expires_at = ?", (expired.isoformat(),))
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    copy_id = "sess-2026-01_closet_alice"
+    parent = engine.get("sess-2026-01")
+    parent.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+    engine.ingest(parent)
+    assert engine.get(copy_id).expires_at == expired
+    assert _rows(db, "SELECT is_closet FROM memories WHERE id = ?", (copy_id,)) == [(2,)]
+    snapshot = _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    with sqlite3.connect(db) as conn:
+        if not occupied:
+            conn.execute("DELETE FROM closet_migration_backup WHERE id = ?", (copy_id,))
+        conn.execute(
+            "CREATE TRIGGER stop_expiry BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT, 'expiry interrupted'); END"
+        )
+    before = _rows(db, "SELECT content FROM closet_migration_backup WHERE id = ?", (copy_id,))
+    with pytest.raises(sqlite3.IntegrityError, match="expiry interrupted"):
+        engine.purge_expired()
+    assert engine.get(copy_id) is not None
+    assert _rows(db, "SELECT content FROM ui_tombstones WHERE id = ?", (copy_id,)) == [(snapshot,)]
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TRIGGER stop_expiry")
+    assert engine.purge_expired() == 0
+    assert engine.get(copy_id) is None
+    assert engine.get_public("sess-2026-01") is not None
+    assert TombstoneStore(db).get_public(copy_id) is None
+    expected = before if occupied else [(snapshot,)]
+    assert _rows(db, "SELECT content FROM closet_migration_backup WHERE id = ?", (copy_id,)) == expected
+    client = _RecordingClient()
+    push(engine=engine, tombstones=TombstoneStore(db), client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert copy_id not in {r["id"] for r in client.upserts}
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_authoritative_copy_deletion_keeps_future_event_time(tmp_path, engine_kind):
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    event = datetime.now(timezone.utc) + timedelta(days=2)
+    store.add_copy_deletions(["session_closet_alice"], now=event, authoritative=True)
+    assert store.get_copy_deletion("session_closet_alice").tombstoned_at == event
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("marked", [False, True])
+def test_ungradable_snapshot_is_removed_only_with_live_copy_evidence(tmp_path, engine_kind, marked):
+    db = _legacy_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE memories ADD COLUMN is_closet INTEGER NOT NULL DEFAULT 0")
+        if marked:
+            conn.execute("UPDATE memories SET is_closet = 1 WHERE id = ?", (copy_id,))
+        conn.execute("UPDATE ui_tombstones SET created_at = 'not-a-time' WHERE id = ?", (copy_id,))
+    for _ in range(2):
+        engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+        engine.ingest(_memory("usable", "still usable"))
+        engine._conn.close()
+    expected = [] if marked else [(copy_id,)]
+    assert _rows(db, "SELECT id FROM ui_tombstones WHERE id = ?", (copy_id,)) == expected
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("newer_local", [False, True])
+def test_deferred_genuine_memory_obeys_freshness_when_parent_arrives(tmp_path, engine_kind, newer_local):
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    when = datetime.now(timezone.utc) - timedelta(days=3)
+    child = _cloud_row("session_closet_alice", json.dumps([json.loads(_turns())[0]]), when=when)
+    child["related_to"] = ["session"]
+    pull(engine=engine, tombstones=store, client=_RecordingClient([child]), state=SyncState(), poppy_dir=tmp_path)
+    assert engine.get_public(child["id"]) is None
+    # Different creation times disprove provenance even though the text matches.
+    parent = _cloud_row("session", _turns(), when=when + timedelta(hours=1))
+    _insert_wire_legacy(engine, parent)
+    if newer_local:
+        note = _cloud_row(child["id"], "a newer independent note", when=when + timedelta(days=1))
+        _insert_wire_legacy(engine, note)
+    engine._conn.close()
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    pull(engine=engine, tombstones=store, client=_RecordingClient(), state=SyncState(), poppy_dir=tmp_path)
+    assert engine.get_public(child["id"]).content == (note["content"] if newer_local else child["content"])
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert {row["id"] for row in client.upserts} == {"session", child["id"]}
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_cleanup_keeps_snapshot_event_before_retiring_its_claim(tmp_path, engine_kind):
+    db = _legacy_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    old = datetime.now(timezone.utc) - timedelta(days=10)
+    deleted = old + timedelta(days=1)
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE memories SET created_at = ?, updated_at = ?", (old.isoformat(), old.isoformat()))
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    with sqlite3.connect(db) as conn:
+        content = conn.execute("SELECT content FROM memories WHERE id = ?", (copy_id,)).fetchone()[0]
+        conn.execute(
+            "UPDATE ui_tombstones SET content = ?, tombstoned_at = ? WHERE id = ?",
+            (content, deleted.isoformat(), copy_id),
+        )
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert engine.get(copy_id) is None
+    assert _local_deletion_time(db, copy_id) == deleted
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("content", "CAST(x'ff' AS TEXT)"),
+        ("related_to", "NULL"),
+        ("created_at", "'not-a-time'"),
+        ("source_timestamp", "CAST(x'ff' AS TEXT)"),
+        ("expires_at", "x'ff'"),
+    ],
+)
+def test_open_leaves_unreadable_ordinary_rows_unmarked(tmp_path, engine_kind, column, value):
+    db = _legacy_store(tmp_path)
+    memory_id = "ordinary_closet_note"
+    _insert_legacy(db, memory_id, "an independent note", [])
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"UPDATE memories SET {column} = {value} WHERE id = ?", (memory_id,))
+        original = conn.execute(
+            f"SELECT CAST({column} AS BLOB), typeof({column}) FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+    for _ in range(2):
+        engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+        assert _rows(db, "SELECT is_closet FROM memories WHERE id = ?", (memory_id,)) == [(0,)]
+        assert _rows(
+            db, f"SELECT CAST({column} AS BLOB), typeof({column}) FROM memories WHERE id = ?", (memory_id,)
+        ) == [original]
+        engine.ingest(_memory("usable", "still usable"))
+        assert engine.get_public("usable").content == "still usable"
+        engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_claim_retirement_and_ledger_transfer_roll_back_together(tmp_path, engine_kind):
+    db = _legacy_store(tmp_path)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO legacy_closet_ids (id, legacy_updated_at) VALUES (?, ?)",
+            ("gone_closet_alice", "2020-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "CREATE TRIGGER stop_retirement BEFORE UPDATE ON legacy_closet_ids "
+            "BEGIN SELECT RAISE(ABORT, 'retirement interrupted'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="retirement interrupted"):
+        SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert MARKER_COLUMN not in {row[1] for row in _rows(db, "PRAGMA table_info(memories)")}
+    assert _local_deletion_time(db, "gone_closet_alice") is None
+    assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids") == [(1,)]
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TRIGGER stop_retirement")
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert _local_deletion_time(db, "gone_closet_alice") == datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids") == [(0,)]
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_older_note_cannot_erase_a_newer_deferred_genuine_row(tmp_path, engine_kind):
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    when = datetime.now(timezone.utc) - timedelta(days=3)
+    child = _cloud_row("session_closet_alice", json.dumps([json.loads(_turns())[0]]), when=when + timedelta(days=1))
+    child["related_to"] = ["session"]
+    older = _cloud_row(child["id"], "an older independent note", when=when)
+    parent = _cloud_row("session", _turns(), when=when + timedelta(days=2))
+    for row in (child, older, parent):
+        pull(engine=engine, tombstones=store, client=_RecordingClient([row]), state=SyncState(), poppy_dir=tmp_path)
+    assert engine.get_public(child["id"]).content == child["content"]
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("child_first", [False, True])
+@pytest.mark.parametrize("drifted", [False, True])
+def test_incoming_copy_snapshot_never_becomes_public_trash(tmp_path, engine_kind, child_first, drifted):
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    when = datetime.now(timezone.utc) - timedelta(days=2)
+    parent = _cloud_row("session", _turns(), when=when)
+    child = _cloud_row(
+        "session_closet_alice",
+        json.dumps([json.loads(_turns("old" if drifted else SECRET))[0]]),
+        when=when + timedelta(hours=1),
+        deleted=True,
+    )
+    child["created_at"] = parent["created_at"]
+    child["related_to"] = ["session"]
+    rows = (child, parent) if child_first else (parent, child)
+    for row in rows:
+        pull(engine=engine, tombstones=store, client=_RecordingClient([row]), state=SyncState(), poppy_dir=tmp_path)
+        assert store.get_public(child["id"]) is None
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert child["id"] not in {row["id"] for row in client.upserts}

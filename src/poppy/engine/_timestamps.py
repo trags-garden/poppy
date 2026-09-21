@@ -51,6 +51,23 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
 
 
+def raw_text_columns(*columns: str) -> str:
+    """Fetch bytes and storage classes so decoding happens inside a row guard."""
+    return ", ".join(f"CAST({column} AS BLOB), typeof({column})" for column in columns)
+
+
+def decode_text_columns(row) -> tuple:
+    values = []
+    for value, kind in zip(row[::2], row[1::2]):
+        if kind == "null":
+            values.append(None)
+        elif kind == "text":
+            values.append(value.decode("utf-8"))
+        else:
+            raise ValueError("Expected a stored text value")
+    return tuple(values)
+
+
 def utc_iso(value: str | datetime | None) -> str | None:
     """Canonical UTC text; preserve unreadable or out-of-range legacy values."""
     if value is None:
@@ -60,7 +77,7 @@ def utc_iso(value: str | datetime | None) -> str | None:
     else:
         try:
             dt = datetime.fromisoformat(value)
-        except (ValueError, OverflowError):
+        except (ValueError, TypeError, OverflowError):
             return value
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -210,13 +227,17 @@ def _rewrite_table(conn: sqlite3.Connection, table: str, columns: tuple[str, ...
         return 0
     # Positional access throughout, so this works whether or not the caller set
     # ``row_factory``: both engines do, the migration tests may not.
-    selected = ", ".join(present)
-    rows = conn.execute(f"SELECT id, {selected} FROM {table}").fetchall()
+    selected = raw_text_columns(*present)
+    rows = conn.execute(f"SELECT rowid, {selected} FROM {table}").fetchall()
     changed = 0
     for row in rows:
+        try:
+            values = decode_text_columns(tuple(row)[1:])
+        except (ValueError, TypeError):
+            continue
         updates: list[tuple[str, str]] = []
         for index, column in enumerate(present, start=1):
-            raw = row[index]
+            raw = values[index - 1]
             if raw is None:
                 continue
             canonical = utc_iso(raw)
@@ -229,7 +250,7 @@ def _rewrite_table(conn: sqlite3.Connection, table: str, columns: tuple[str, ...
             continue
         assignments = ", ".join(f"{column} = ?" for column, _ in updates)
         conn.execute(
-            f"UPDATE {table} SET {assignments} WHERE id = ?",
+            f"UPDATE {table} SET {assignments} WHERE rowid = ?",
             [value for _, value in updates] + [row[0]],
         )
         changed += 1
