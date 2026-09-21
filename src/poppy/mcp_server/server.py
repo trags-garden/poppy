@@ -408,10 +408,10 @@ def create_mcp_server(
             memory_type: One of: fact, decision, preference, lesson, summary
             project: Project name (optional, for scoping)
             related_to: IDs of related memories (optional)
-            ttl: Expire after duration (e.g. "30d", "12h", "1w3d") — for time-sensitive facts
+            ttl: Expire after duration (e.g. "30d", "12h", "1w3d") for time-sensitive facts
             expires_at: ISO-8601 datetime to expire at (mutually exclusive with ttl)
-            supersedes: ID of a memory this one replaces — old is tombstoned (restorable for 7 days)
-            check_conflicts: Dry-run LLM conflict detection only — returns candidates, writes nothing
+            supersedes: ID of a memory this one replaces; the old memory is tombstoned (restorable for 7 days)
+            check_conflicts: Dry-run LLM conflict detection only; returns candidates, writes nothing
             auto_supersede: If a high-confidence conflict (>=0.85) is found, supersede that memory
         """
         result = await handler.handle_remember(
@@ -435,7 +435,9 @@ def create_mcp_server(
                 return "No conflict candidates. (Nothing was written.)"
             lines = [f"{len(cs)} conflict candidate(s):"]
             for c in cs:
-                lines.append(f"  {c['id']}  conf={c.get('confidence', 0):.2f}  {c.get('reason') or '—'}")
+                lines.append(
+                    f"  {c['id']}  conf={c.get('confidence', 0):.2f}  {c.get('reason') or 'No reason provided'}"
+                )
             return "\n".join(lines)
         base = (
             f"Remembered: {result['id']} (supersedes {result['supersedes']})"
@@ -471,7 +473,7 @@ def create_mcp_server(
             clear_project: Set project to null
             ttl: Reset expiry to a duration (e.g. "30d")
             expires_at: Reset expiry to an ISO-8601 datetime
-            clear_expiry: Remove expiry — make memory permanent
+            clear_expiry: Remove expiry: make memory permanent
         """
         result = await handler.handle_edit(
             id,
@@ -527,7 +529,7 @@ def create_mcp_server(
         memory_type: str | None = None,
         limit: int = 20,
     ) -> str:
-        """Cheap first pass — returns IDs + snippets only. Pair with recall_full to fetch full content for relevant IDs.
+        """Cheap first pass: returns IDs and snippets only. Pair with recall_full to fetch full content for relevant IDs.
 
         Args:
             query: What to search for

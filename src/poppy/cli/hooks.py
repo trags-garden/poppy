@@ -514,8 +514,8 @@ def pre_tool_use():
     """PreToolUse hook: surface memories about files about to be edited.
 
     Searches FTS5 by file path/basename and injects the top hits. The point
-    is surgical recall before a code change — "have we made decisions about
-    this file before?" — without dumping irrelevant project-wide memories.
+    is surgical recall before a code change ("have we made decisions about
+    this file before?"), without dumping irrelevant project-wide memories.
     """
     try:
         payload = _read_hook_input()
@@ -816,8 +816,8 @@ def post_compact():
 
     The LLM extraction can take longer than Claude Code's 60s hook timeout
     (we got "Hook cancelled" on real fires). So this entry does only fast
-    work synchronously — log the payload, then spawn a detached background
-    worker to run the actual consolidation — and exits within ~100ms.
+    work synchronously (log the payload, then spawn a detached background
+    worker to run the actual consolidation) and exits within ~100ms.
 
     The worker is `poppy hook _post-compact-worker`, invoked with the same
     payload re-piped to its stdin. It runs in a new process group, with
@@ -878,7 +878,7 @@ def replay_compact(n: int):
     """Replay a captured PostCompact payload synchronously, for testing.
 
     Reads ~/.poppy/postcompact-debug.log and re-runs consolidate_compact_event
-    against the chosen entry. Idempotent — re-running on the same payload
+    against the chosen entry. Idempotent: re-running on the same payload
     is a no-op once memories are stored.
     """
     log_path = get_poppy_dir() / "postcompact-debug.log"

@@ -539,7 +539,7 @@ def _today_summary(
 ) -> str:
     """A short editorial line for the Today hero. Generated from the day's data."""
     if todays_count == 0:
-        return "Today is quiet — nothing captured yet. Your agent's been forgetful."
+        return "Today is quiet. Nothing captured yet. Your agent's been forgetful."
     # The summary is rendered as HTML in the Today hero; the <em>/<strong> tags
     # are intentional, but every interpolated value (project/source/type) comes
     # from stored memories and is attacker-controllable, so escape each one so
@@ -552,8 +552,8 @@ def _today_summary(
     if len(sources) == 1:
         only_src = next(iter(sources))
         parts.append(f"from <strong>{html.escape(str(only_src))}</strong>")
-    parts.append(f"— flavor of the day, <em>{html.escape(str(top_type))}</em>.")
-    return " — ".join(parts[:-1]) + " " + parts[-1]
+    parts.append(f"Flavor of the day: <em>{html.escape(str(top_type))}</em>.")
+    return ", ".join(parts[:-1]) + ". " + parts[-1]
 
 
 def _filter_items(

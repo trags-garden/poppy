@@ -785,13 +785,13 @@ def test_doctor_checks_hermes_soul_md_guidance(tmp_path):
 
     missing_result = runner.invoke(cli, ["doctor"], env=env)
     assert missing_result.exit_code == 0
-    assert f"Hermes SOUL.md guidance: WARN — {hermes_home / 'SOUL.md'}" in missing_result.output
+    assert f"Hermes SOUL.md guidance: WARN, {hermes_home / 'SOUL.md'}" in missing_result.output
     assert "install SOUL.md guidance" in missing_result.output
 
     install_for_hermes(hermes_home)
     installed_result = runner.invoke(cli, ["doctor"], env=env)
     assert installed_result.exit_code == 0
-    assert f"Hermes SOUL.md guidance: OK — {hermes_home / 'SOUL.md'}" in installed_result.output
+    assert f"Hermes SOUL.md guidance: OK, {hermes_home / 'SOUL.md'}" in installed_result.output
 
 
 # --- main() console-script wrapper (offline error path) ---

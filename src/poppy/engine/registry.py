@@ -68,7 +68,7 @@ def canonical_name(name: str) -> str:
 
 _DESCRIPTIONS = {
     "bloom": "Default: hybrid retrieval + cross-encoder rerank (local ONNX models).",
-    "seed": "FTS5 only — no ML deps, no model downloads.",
+    "seed": "FTS5 only, no ML deps, no model downloads.",
 }
 
 

@@ -401,7 +401,7 @@ def decide(
             target_id=pick.memory.id,
             reason=pick.reason or "supersedes prior memory",
         )
-    return Decision(Action.ADD, candidate, reason="uncertain — bias to add")
+    return Decision(Action.ADD, candidate, reason="uncertain, bias to add")
 
 
 def reconcile_and_ingest(
