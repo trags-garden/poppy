@@ -529,7 +529,7 @@ def create_mcp_server(
         memory_type: str | None = None,
         limit: int = 20,
     ) -> str:
-        """Cheap first pass: returns IDs and snippets only. Pair with recall_full to fetch full content for relevant IDs.
+        """Cheap first pass: returns IDs and snippets only. Use recall_full to fetch full content for relevant IDs.
 
         Args:
             query: What to search for
