@@ -4388,8 +4388,20 @@ def test_incoming_copy_with_unreadable_parent_stays_unresolved(tmp_path, engine_
 
 
 @pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
-@pytest.mark.parametrize("stamp_sql", ["x'32303230'", "CAST(x'ff' AS TEXT)", "'not-a-time'", "NULL"])
-def test_malformed_pending_claim_is_retired_without_inventing_event_time(tmp_path, engine_kind, stamp_sql):
+@pytest.mark.parametrize(
+    "stamp_sql, expected_event",
+    [
+        ("x'32303230'", None),
+        ("CAST(x'ff' AS TEXT)", None),
+        ("'not-a-time'", None),
+        ("NULL", None),
+        # A claim that does spell an instant still transfers it, unchanged.
+        ("'2026-02-03T04:05:06+00:00'", datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)),
+    ],
+)
+def test_malformed_pending_claim_is_retired_without_inventing_event_time(
+    tmp_path, engine_kind, stamp_sql, expected_event
+):
     db = _legacy_store(tmp_path)
     copy_id = "missing_closet_alice"
     with sqlite3.connect(db) as conn:
@@ -4404,7 +4416,7 @@ def test_malformed_pending_claim_is_retired_without_inventing_event_time(tmp_pat
         # The older client's push reads this queue with SQLite's text decoder.
         assert _rows(db, "SELECT id, legacy_updated_at FROM legacy_closet_ids WHERE announce_pending = 1") == []
         assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids WHERE id = ?", (copy_id,)) == [(0,)]
-        assert _local_deletion_time(db, copy_id) == datetime.min.replace(tzinfo=timezone.utc)
+        assert _local_deletion_time(db, copy_id) == expected_event
         assert _rows(
             db,
             "SELECT CAST(legacy_updated_at AS BLOB), typeof(legacy_updated_at) FROM legacy_closet_ids WHERE id = ?",
@@ -4414,13 +4426,58 @@ def test_malformed_pending_claim_is_retired_without_inventing_event_time(tmp_pat
 
     engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
     store = TombstoneStore(db)
-    note = _cloud_row(copy_id, "an independent memory", when=datetime(2020, 1, 1, tzinfo=timezone.utc))
+    note = _cloud_row(copy_id, "an independent memory", when=datetime(2026, 6, 1, tzinfo=timezone.utc))
     pull(engine=engine, tombstones=store, client=_RecordingClient([note]), state=SyncState(), poppy_dir=tmp_path)
     assert engine.get_public(copy_id).content == note["content"]
     assert _local_deletion_time(db, copy_id) is None
     client = _RecordingClient()
     push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
     assert {row["id"] for row in client.upserts} == {"sess-2026-01", copy_id}
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_retiring_an_unreadable_claim_dates_no_deletion_at_all(tmp_path, engine_kind):
+    """A claim whose time cannot be read leaves the ledger alone.
+
+    The entry says an earlier release proved this id held a copy. It does not say
+    when that happened, and a floor value is not a way of saying so: stored, it
+    is an instant like any other, and a memory arriving at that id carrying
+    exactly that instant is refused for being no newer than it while the sync
+    position moves on past the row. So the entry is retired and nothing is dated
+    for it; the queue keeps the entry itself as the record that it was answered.
+    """
+    db = _legacy_store(tmp_path)
+    copy_id = "missing_closet_alice"
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO legacy_closet_ids (id, legacy_updated_at) VALUES (?, 'not-a-time')", (copy_id,))
+
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids WHERE id = ?", (copy_id,)) == [(0,)]
+    assert _rows(db, "SELECT id FROM sync_local_deletions WHERE id = ?", (copy_id,)) == []
+
+    # The earliest instant a timestamp can spell. Nothing may already hold it.
+    store = TombstoneStore(db)
+    note = _cloud_row(copy_id, "an independent memory", when=datetime.min.replace(tzinfo=timezone.utc))
+    pull(engine=engine, tombstones=store, client=_RecordingClient([note]), state=SyncState(), poppy_dir=tmp_path)
+    assert engine.get_public(copy_id).content == note["content"]
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_retiring_an_unreadable_claim_keeps_an_existing_deletion_record(tmp_path, engine_kind):
+    """Retirement adds no evidence, and it takes none away either."""
+    db = _legacy_store(tmp_path)
+    copy_id = "missing_closet_alice"
+    held = datetime(2026, 4, 5, 6, 7, 8, tzinfo=timezone.utc)
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO legacy_closet_ids (id, legacy_updated_at) VALUES (?, 'not-a-time')", (copy_id,))
+        conn.execute("CREATE TABLE IF NOT EXISTS sync_local_deletions (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO sync_local_deletions (id, deleted_at) VALUES (?, ?)", (copy_id, held.isoformat()))
+
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids WHERE id = ?", (copy_id,)) == [(0,)]
+    assert _local_deletion_time(db, copy_id) == held
     engine._conn.close()
 
 

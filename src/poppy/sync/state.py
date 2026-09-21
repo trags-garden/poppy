@@ -495,19 +495,26 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path, *, gate_held:
             ).fetchall()
             for row in claims:
                 memory_id = None
-                stamp = _MIN_STAMP
+                stamp = None
                 try:
                     (memory_id,) = decode_text_columns(tuple(row)[1:3])
                     (observed,) = decode_text_columns(tuple(row)[3:])
-                    stamp = _first_readable(observed) or _MIN_STAMP
+                    stamp = _first_readable(observed)
                 except (ValueError, TypeError, OverflowError):
                     pass
-                if isinstance(memory_id, str):
+                # Only a time the entry itself spells is transferred. The entry
+                # says this id held a copy, not when it went, and a floor value
+                # is not a way of saying "unknown": stored, it is an instant
+                # like any other, and a memory arriving at this id carrying
+                # exactly that instant would be refused for being no newer than
+                # it. Whatever the ledger already holds for the id stands.
+                if isinstance(memory_id, str) and stamp is not None:
                     conn.execute(_RECORD_LOCAL_DELETION_SQL, (memory_id, stamp))
-                # Retire even a claim whose id or time cannot be decoded. Left
-                # pending it stays in a queue a client on the previous release
-                # still reads, where a value that client cannot read breaks its
-                # push every sync and nothing ever drains the entry.
+                # Retire the entry either way. Left pending it stays in a queue
+                # a client on the previous release still reads, where a value
+                # that client cannot read breaks its push every sync and nothing
+                # ever drains the entry. The entry stays as the record that this
+                # id was claimed, which is the evidence that outlives a purge.
                 conn.execute(
                     "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE rowid = ?",
                     (now_iso, row[0]),
