@@ -1,6 +1,6 @@
-/* Poppy memory UI — the trags.ai dashboard's design system, run locally.
-   Tokens, type scale and chrome mirror web/app/globals.css (anthotype)
-   so the local UI and the hosted dashboard read as one product. */
+/* Poppy memory UI — the hosted dashboard's design system, run locally.
+   Tokens, type scale and chrome follow the product's shared visual language so
+   the local UI and the hosted dashboard read as one product. */
 
 /* Self-hosted fonts: latin subsets of the variable fonts, served
    from the package so the UI never phones a CDN. OFL texts sit next to the
@@ -42,11 +42,11 @@ ul { list-style: none; }
 img, svg { display: block; }
 
 :root {
-  /* ---- Anthotype palette (mirrored from trags.ai) --------------
+  /* ---- Anthotype palette ---------------------------------------
      One pigment, two states. The hosted dashboard prints a chlorophyll
      pigment on a warm cream sheet; the values below are the literal
-     `--an-*` tokens from the web app's globals.css, so the local UI and
-     trags.ai are the same product rather than two dialects of one. Forest
+     `--an-*` tokens used by the local UI, so it and the hosted dashboard are
+     the same product rather than two dialects of one. Forest
      stays reserved for data ink (memory pins, the captures sparkline). */
   --an-paper-lit: #fef3d8;   /* mount board: cards sit above the sheet */
   --an-paper: #f7ecd1;       /* the sheet */

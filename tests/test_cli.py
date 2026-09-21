@@ -274,7 +274,7 @@ def _all_command_paths(cmd, prefix=()):
 
 
 def test_no_internal_ids_in_help(tmp_path):
-    """No internal tracker id (ADR-/TRA-/HP-####) may appear in the rendered
+    """No decision or planning ID (ADR-/TRA-/HP-####) may appear in the rendered
     --help of the root group or any subcommand. These ids are
     meaningless to a PyPI user; keep them in code comments, never on public
     CLI surfaces."""

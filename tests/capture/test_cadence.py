@@ -1,4 +1,4 @@
-"""Tests for TurnCadence (ADR-0001: every-Nth-turn cadence + soft cap)."""
+"""Tests for TurnCadence (ADR-0001: watermark-after-success cadence and soft cap)."""
 
 from __future__ import annotations
 

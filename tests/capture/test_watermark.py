@@ -1,4 +1,4 @@
-"""Tests for per-session capture watermark (ADR-0001)."""
+"""Tests for the ADR-0001 per-session watermark-after-success rule."""
 
 from __future__ import annotations
 

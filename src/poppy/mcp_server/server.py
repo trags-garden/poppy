@@ -32,7 +32,7 @@ def _conflicts_payload(result: RememberResult) -> list[dict]:
     ]
 
 
-# Output bounds (PP-05): a single tool call must not dump the whole store into
+# Output bounds: a single tool call must not dump the whole store into
 # the calling agent's context. `recall` per-memory content is already budgeted
 # by the assembly layer; these clamp the surfaces that layer doesn't:
 # the result count on every search, the batch size on `recall_full`, and the
