@@ -52,6 +52,22 @@ def test_doctor_omits_retired_copy_counts(hidden_memory_store, tmp_path):
     assert "1 row(s)" in result.output
 
 
+@pytest.mark.parametrize("migrated_at", ["9999-12-31T23:59:59+00:00", "not-a-timestamp", ""])
+def test_doctor_finishes_on_an_undateable_pre_image(hidden_memory_store, tmp_path, migrated_at):
+    """One unreadable row in a side table must not cut the check list short."""
+    engine, memory = hidden_memory_store
+    with engine._conn:
+        engine._conn.execute(
+            "INSERT INTO closet_migration_backup (id, content, action, migrated_at) VALUES (?, ?, ?, ?)",
+            (memory.id, memory.content, "adopted", migrated_at),
+        )
+    result = CliRunner().invoke(cli, ["doctor"], env={"POPPY_DIR": str(tmp_path), "HOME": str(tmp_path)})
+    assert result.exit_code == 0, result.output
+    # The checks that come after this line still ran.
+    assert "custom redaction" in result.output
+    assert memory.content not in result.stdout + result.stderr
+
+
 def test_mcp_setup_commands_warn_when_poppy_executable_cannot_be_resolved(tmp_path, monkeypatch):
     monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: None)
     monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(tmp_path / "missing" / "python"))

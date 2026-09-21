@@ -3722,6 +3722,78 @@ def test_the_first_open_clears_an_older_snapshot_of_a_removed_copy(tmp_path):
     assert DRIFTED not in _trash_text(store)
 
 
+def test_a_cleared_snapshot_leaves_its_own_text_recoverable(tmp_path):
+    """The pre-image must hold the body that was deleted, not the stored row's.
+
+    Where the two differ is the only case a pre-image is for, so reading the
+    stored row there kept a copy of something that had not gone anywhere and
+    let the deleted text disappear without trace.
+    """
+    db = _legacy_store(tmp_path)  # tier 1: the migration keeps no pre-image
+    copy_id = "sess-2026-01_closet_alice"
+    text = _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+
+    SeedEngine(db_path=db)  # open-time cleanup removes the row and the snapshot
+
+    kept = _rows(db, "SELECT action, content FROM closet_migration_backup WHERE id = ?", (copy_id,))
+    assert kept == [("cleared", text)]
+    assert DRIFTED in kept[0][1]
+
+
+def test_clearing_a_snapshot_keeps_the_pre_image_already_held(tmp_path):
+    """One pre-image per id, and the earlier one is the text the user had.
+
+    A Trash entry is something already deleted, so it does not displace the
+    stored row's pre-image; it is removed without one instead.
+    """
+    db = _tier_b_store(tmp_path)  # tier 2: the migration kept the row's text
+    engine = SeedEngine(db_path=db)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    before = _rows(db, "SELECT action, content FROM closet_migration_backup WHERE id = ?", (copy_id,))
+    assert before and SECRET in before[0][1]
+
+    forget(engine, tmp_path, copy_id, tombstones=TombstoneStore(db))
+
+    assert _rows(db, "SELECT action, content FROM closet_migration_backup WHERE id = ?", (copy_id,)) == before
+    assert DRIFTED not in json.dumps(_rows(db, "SELECT content FROM closet_migration_backup"))
+
+
+def test_kept_pre_images_never_reach_a_public_surface_or_the_wire(tmp_path):
+    """The pre-image table is storage of last resort, not a readable surface."""
+    db = _legacy_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    engine = SeedEngine(db_path=db)
+    store = TombstoneStore(db)
+    assert DRIFTED in json.dumps(_rows(db, "SELECT content FROM closet_migration_backup"))
+
+    assert engine.get(copy_id) is None
+    assert engine.get_public(copy_id) is None
+    assert store.get(copy_id) is None
+    assert DRIFTED not in json.dumps([m.content for m in engine.list_all(limit=1000)])
+    assert DRIFTED not in json.dumps([s.memory.content for s in engine.retrieve(DRIFTED, limit=50)])
+    assert DRIFTED not in _trash_text(store)
+
+    client = _RecordingClient()
+    store.note_remote_memories([copy_id, "sess-2026-01"], "https://trags.test")
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert DRIFTED not in json.dumps(client.upserts)
+
+    # And it still ages out on the Trash clock rather than living for ever.
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "UPDATE closet_migration_backup SET migrated_at = ?",
+            ((datetime.now(timezone.utc) - timedelta(days=90)).isoformat(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
+    assert _rows(db, "SELECT content FROM closet_migration_backup") == []
+
+
 def test_push_never_sends_an_older_snapshot_of_a_hidden_copy(tmp_path):
     """The text must not reach the wire in a tombstone body."""
     db = _tier_b_store(tmp_path)

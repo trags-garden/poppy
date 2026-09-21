@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import errno
 import json
@@ -2402,32 +2403,37 @@ def _kept_pre_images(poppy_dir: Path) -> tuple[int, str | None]:
     ``poppy.db.connect`` rather than ``sqlite3.connect``: the latter bypasses
     the encryption gate, so on an encrypted store it would fail to read the
     table and the notice would vanish on exactly the installs that most need it.
+
+    This is one line of an installation check, and every step of it can fail on
+    a store this notice does not own: opening an encrypted one without a key,
+    reading a table an older client never created, closing a connection the
+    driver has already lost, or dating a timestamp somebody edited by hand. None
+    of that may take the remaining checks down, so a store that cannot be
+    answered for is reported as holding nothing.
     """
     from poppy.db import connect as connect_db
 
     db_path = poppy_dir / "memories.db"
     if not db_path.exists():
         return (0, None)
-    # Opening is inside the guard too: an encrypted store with no usable key
-    # raises here, and a store this notice cannot read is reported as having
-    # nothing rather than taking doctor down before its remaining checks.
     try:
         conn = connect_db(db_path)
     except Exception:
         return (0, None)
     try:
         row = conn.execute("SELECT COUNT(*), MIN(migrated_at) FROM closet_migration_backup").fetchone()
+        count, oldest = (row[0], row[1]) if row else (0, None)
+        if not count or not oldest:
+            return (0, None)
+        from poppy.ui.tombstones import TTL_DAYS
+
+        deadline = datetime.datetime.fromisoformat(oldest) + datetime.timedelta(days=TTL_DAYS)
+        return (count, deadline.date().isoformat())
     except Exception:
         return (0, None)
     finally:
-        conn.close()
-    count, oldest = (row[0], row[1]) if row else (0, None)
-    if not count or not oldest:
-        return (0, None)
-    from poppy.ui.tombstones import TTL_DAYS
-
-    deadline = datetime.datetime.fromisoformat(oldest) + datetime.timedelta(days=TTL_DAYS)
-    return (count, deadline.date().isoformat())
+        with contextlib.suppress(Exception):
+            conn.close()
 
 
 @cli.command()

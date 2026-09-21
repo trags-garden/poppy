@@ -163,6 +163,33 @@ def back_up_inferred_copy(conn: sqlite3.Connection, memory_id: str, action: str 
     )
 
 
+def back_up_cleared_snapshot(conn: sqlite3.Connection, copy_id: str) -> None:
+    """Keep the Trash body about to be deleted, when nothing is held for this id.
+
+    ``back_up_inferred_copy`` reads the STORED row, which is the right pre-image
+    for a row being removed but the wrong one for a Trash entry: where the two
+    differ, and that is the case this exists for, the entry's own text is what
+    disappears. So this reads the entry.
+
+    One pre-image per id, and the slot may already hold the stored row's text
+    from when it was marked. That earlier pre-image is kept: it is the text the
+    user was working with, where a Trash entry is something already deleted, and
+    replacing one recoverable row with another gains nothing. So when a
+    pre-image already exists for the id, the entry is deleted WITHOUT one.
+
+    Nothing a user or an agent can reach reads this table, and it ages out on
+    the same clock as Trash.
+    """
+    conn.execute(BACKUP_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO closet_migration_backup "
+        "(id, content, enriched_content, related_to, created_at, updated_at, action, migrated_at) "
+        "SELECT id, content, NULL, related_to, created_at, updated_at, 'cleared', ? "
+        "FROM ui_tombstones WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), copy_id),
+    )
+
+
 def _decoded(value: object) -> str | None:
     """Text for a column read as raw bytes, or a raise the caller turns into no grade.
 
@@ -511,7 +538,7 @@ def clear_copy_snapshot(conn: sqlite3.Connection, copy_id: str) -> bool:
             parent_created_at=parent[0],
         ):
             return False
-        back_up_inferred_copy(conn, copy_id, "cleared")
+        back_up_cleared_snapshot(conn, copy_id)
     if tier == TIER_PROVEN:
         _claim_snapshot(conn, copy_id)
     conn.execute("DELETE FROM ui_tombstones WHERE id = ?", (copy_id,))

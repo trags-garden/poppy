@@ -53,6 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exact-id reads and edits now treat hidden copies retained from earlier
   releases as missing, including MCP recall, CLI confirmations, and dashboard
   details and Trash. Internal cleanup still removes them without exposing text.
+- A Trash entry holding a retained per-speaker copy's text no longer becomes
+  readable, restorable and syncable the moment that copy is deleted. It is
+  removed along with the copy, on all three paths that remove one: deleting the
+  copy by id, redacting the memory it came from, and the one-time cleanup on
+  first open. Its text stays recoverable for the usual Trash window unless
+  something recoverable is already held for that id, in which case the earlier
+  one is kept and the entry is removed without one. `poppy doctor` reports how
+  many recoverable rows are held and until when.
 - The OpenAI-compatible backend works on a default install. It called the
   endpoint through an SDK that Poppy does not depend on, so configuring a model
   and an API key produced empty consolidation and conflict results behind one
