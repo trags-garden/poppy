@@ -4,16 +4,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
+from poppy.db import apply_row_factory, rollback_and_close, write_txn
 from poppy.db import connect as connect_db
-from poppy.engine._legacy_copies import (
-    clear_copy_snapshot,
-    clear_marked_copies,
-    clear_retired_records,
-    ensure_legacy_copy_tables,
-    is_proven_unmarked_copy,
-    mark_legacy_copies_for_cleanup,
-)
 from poppy.engine._timestamps import chunked, expiry_passed, normalise_stored_timestamps, utc_iso
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
 from poppy.models import Filters, Memory, ScoredMemory, Source
@@ -31,9 +23,7 @@ CREATE TABLE IF NOT EXISTS memories (
     related_to TEXT DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    expires_at TEXT,
-    -- Retained for cleanup of stores written by older releases.
-    is_closet INTEGER NOT NULL DEFAULT 0
+    expires_at TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -170,10 +160,6 @@ def _has_enriched_content(conn: sqlite3.Connection) -> bool:
 # do; a named sentinel makes the reason legible in the table and in doctor output.
 SEED_INVALIDATED_MODEL_ID = "seed-invalidated"
 
-# Rows an older release marked as derived per-speaker copies. Kept out of
-# listings, counts and recall, and removed with the memory they came from.
-_NOT_MARKED_SQL = "COALESCE(is_closet, 0) = 0"
-
 
 def _has_memory_embeddings(conn: sqlite3.Connection) -> bool:
     """Whether the store has bloom's ``memory_embeddings`` table. Seed never creates it."""
@@ -186,25 +172,22 @@ def _has_memory_embeddings(conn: sqlite3.Connection) -> bool:
 # Two explicit statement variants per operation rather than assembled SQL: the
 # enriched pair targets a store bloom created (NOT NULL enriched_content, FTS
 # triggers indexing it), the plain pair a seed-only store.
-#
-# Writes always leave a normal memory, including an id used by an older release.
 _INSERT_SQL = """INSERT INTO memories (id, content, memory_type, project, source_type,
-    source_session_id, source_timestamp, confidence, related_to, created_at, updated_at, expires_at,
-    is_closet)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)"""
+    source_session_id, source_timestamp, confidence, related_to, created_at, updated_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _INSERT_SQL_ENRICHED = """INSERT INTO memories (id, content, memory_type, project, source_type,
     source_session_id, source_timestamp, confidence, related_to, created_at, updated_at, expires_at,
-    enriched_content, is_closet)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)"""
+    enriched_content)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _UPDATE_SQL = """UPDATE memories SET content=?, memory_type=?, project=?, source_type=?,
-    source_session_id=?, source_timestamp=?, confidence=?, related_to=?, updated_at=?, expires_at=?, is_closet=0
+    source_session_id=?, source_timestamp=?, confidence=?, related_to=?, updated_at=?, expires_at=?
     WHERE id=?"""
 
 _UPDATE_SQL_ENRICHED = """UPDATE memories SET content=?, memory_type=?, project=?, source_type=?,
     source_session_id=?, source_timestamp=?, confidence=?, related_to=?, updated_at=?, expires_at=?,
-    enriched_content=?, is_closet=0
+    enriched_content=?
     WHERE id=?"""
 
 
@@ -237,9 +220,6 @@ class SeedEngine(RetrievalEngine):
     # SeedEngine has no embedding model; migration tooling uses model_id to
     # decide which rows to re-embed, so it must be None here.
     model_id = None
-    # See the note on the default engine: sync checks this rather than the
-    # signature before passing ``remote_event_ts``.
-    accepts_remote_event_ts = True
     _engine_name = "seed"
 
     def __init__(self, db_path: Path) -> None:
@@ -248,20 +228,8 @@ class SeedEngine(RetrievalEngine):
         self._conn = connect_db(db_path, check_same_thread=False)
         try:
             apply_row_factory(self._conn)
-            # Seed never creates either artefact, so this answers "has the
-            # default engine ever written here?". A store that only ever ran
-            # seed cannot hold a per-speaker copy, whatever its ids look like.
-            had_bloom_schema = _has_memory_embeddings(self._conn) or _has_enriched_content(self._conn)
             self._conn.executescript(SCHEMA)
-            # Retained while older caller surfaces still read these tables.
-            ensure_legacy_copy_tables(self._conn)
             _migrate_expires_at(self._conn)
-            from poppy.sync.state import remove_derived_rows
-
-            # Classification and removal must commit together on the first open.
-            with write_gate(db_path.parent), write_txn(self._conn):
-                mark_legacy_copies_for_cleanup(self._conn, had_bloom_schema=had_bloom_schema)
-                remove_derived_rows(self._conn, db_path.parent, gate_held=True)
             normalise_stored_timestamps(self._conn)
         except Exception:
             rollback_and_close(self._conn)
@@ -313,7 +281,7 @@ class SeedEngine(RetrievalEngine):
             expires_at=datetime.fromisoformat(expires_at_raw) if expires_at_raw else None,
         )
 
-    def ingest(self, memory: Memory, *, remote_event_ts: datetime | None = None) -> str:
+    def ingest(self, memory: Memory) -> str:
         # Every timestamp column goes in as UTC text, in the one canonical
         # spelling. These columns are compared AS TEXT by the push watermark
         # filter, the expiry purge and the `since` filter, so a row stamped
@@ -341,15 +309,6 @@ class SeedEngine(RetrievalEngine):
             content_changed = existing is not None and existing.content != memory.content
             write_enriched = enriched_schema and (existing is None or content_changed)
             if content_changed:
-                # A copy an older release left behind holds the text this write
-                # is replacing, so it is being redacted too. A metadata-only
-                # write replays the same body and leaves them alone.
-                clear_marked_copies(
-                    self._conn,
-                    memory.id,
-                    remote_event_ts=remote_event_ts,
-                    has_embeddings=_has_memory_embeddings(self._conn),
-                )
                 # Gated on content change alone, not on enriched_schema:
                 # ``_invalidate_parent_embedding`` self-guards a missing table
                 # or column, and a store that has ``memory_embeddings`` but not
@@ -395,7 +354,6 @@ class SeedEngine(RetrievalEngine):
                     self._conn.execute(_INSERT_SQL_ENRICHED, (*params, memory.content))
                 else:
                     self._conn.execute(_INSERT_SQL, params)
-            clear_retired_records(self._conn, memory.id)
             return memory.id
 
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
@@ -405,7 +363,7 @@ class SeedEngine(RetrievalEngine):
                 rows = self._conn.execute(
                     """SELECT m.*, rank FROM memory_fts fts
                        JOIN memories m ON fts.id = m.id
-                       WHERE memory_fts MATCH ? AND COALESCE(m.is_closet, 0) = 0
+                       WHERE memory_fts MATCH ?
                        ORDER BY rank
                        LIMIT ?""",
                     (escaped_query, limit * 3),
@@ -442,22 +400,9 @@ class SeedEngine(RetrievalEngine):
             return None
         return self._row_to_memory(row)
 
-    def is_proven_copy_row(self, memory_id: str) -> bool:
-        """Compatibility check for lifecycle callers inspecting old copies."""
-        with self._lock:
-            return is_proven_unmarked_copy(self._conn, memory_id)
-
-    def delete(self, memory_id: str, *, remote_event_ts: datetime | None = None) -> bool:
+    def delete(self, memory_id: str) -> bool:
         with self._lock, write_txn(self._conn):
-            # Copies an older release left behind go with it: nothing derives
-            # them any more, and a copy of deleted text must not outlive it.
-            clear_marked_copies(
-                self._conn,
-                memory_id,
-                remote_event_ts=remote_event_ts,
-                has_embeddings=_has_memory_embeddings(self._conn),
-            )
-            # Delete the parent row. Its own ``memory_embeddings`` vector is
+            # Delete the row. Its own ``memory_embeddings`` vector is
             # local-only (never synced, recomputed per engine), so it goes here:
             # leaving it lets a later seed insert of the same id silently inherit
             # a vector computed from the deleted text.
@@ -468,18 +413,14 @@ class SeedEngine(RetrievalEngine):
         return deleted
 
     def list_all(self, filters: Filters | None = None, limit: int = 50) -> list[Memory]:
-        # A store the default engine wrote can hold rows an older release marked
-        # as per-speaker copies. Excluded here, from stats and from recall, so
-        # they never reach a listing or a push. Keyed on the marker, so a real
-        # memory whose id merely looks like a copy's is never hidden.
-        query = f"SELECT * FROM memories WHERE {_NOT_MARKED_SQL}"
+        clauses: list[str] = []
         params: list = []
         if filters:
             if filters.project:
-                query += " AND project = ?"
+                clauses.append("project = ?")
                 params.append(filters.project)
             if filters.memory_type:
-                query += " AND memory_type = ?"
+                clauses.append("memory_type = ?")
                 params.append(filters.memory_type)
             if filters.since:
                 # created_at is stored as canonical UTC text, so the SQL string
@@ -487,14 +428,17 @@ class SeedEngine(RetrievalEngine):
                 # way. Through the one helper that does it, so the bound and the
                 # stored values can never drift apart; it also reads a naive bound
                 # as UTC, the convention the rest of the store uses.
-                query += " AND created_at >= ?"
+                clauses.append("created_at >= ?")
                 params.append(utc_iso(filters.since))
             if filters.min_confidence:
-                query += " AND confidence >= ?"
+                clauses.append("confidence >= ?")
                 params.append(filters.min_confidence)
         if not (filters and filters.include_expired):
-            query += " AND (expires_at IS NULL OR expires_at > ?)"
+            clauses.append("(expires_at IS NULL OR expires_at > ?)")
             params.append(datetime.now(timezone.utc).isoformat())
+        query = "SELECT * FROM memories"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         with self._lock:
@@ -506,36 +450,26 @@ class SeedEngine(RetrievalEngine):
         now = datetime.now(timezone.utc)
         with self._lock, write_txn(self._conn):
             expired = [
-                (row[0], bool(row[1]))
+                row[0]
                 for row in self._conn.execute(
-                    f"SELECT id, {_NOT_MARKED_SQL}, expires_at FROM memories WHERE expires_at IS NOT NULL"
+                    "SELECT id, expires_at FROM memories WHERE expires_at IS NOT NULL"
                 ).fetchall()
-                if expiry_passed(row[2], now)
+                if expiry_passed(row[1], now)
             ]
             has_embeddings = _has_memory_embeddings(self._conn)
-            # A leftover copy is not a memory the user lost, and it goes with the
-            # memory it came from. No deletion record: expiry is not a redaction.
-            memories = [mid for mid, is_memory in expired if is_memory]
-            for mid in memories:
-                clear_marked_copies(self._conn, mid, has_embeddings=has_embeddings, tombstone=False)
-            for mid, is_memory in expired:
-                if not is_memory:
-                    clear_copy_snapshot(self._conn, mid)
-            for batch in chunked([mid for mid, _ in expired]):
+            for batch in chunked(expired):
                 placeholders = ",".join("?" * len(batch))
                 if has_embeddings:
                     self._conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)
                 self._conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", batch)
-            return len(memories)
+            return len(expired)
 
     def consolidate(self) -> ConsolidationResult:
         return ConsolidationResult(merged=0, removed=0, updated=0)
 
     def stats(self) -> EngineStats:
         with self._lock:
-            # Memories, not rows: leftover copies are hidden from list_all, so
-            # counting them here would disagree with what the user can see.
-            count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {_NOT_MARKED_SQL}").fetchone()[0]
+            count = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         storage = self._db_path.stat().st_size if self._db_path.exists() else 0
         return EngineStats(
             memory_count=count,
