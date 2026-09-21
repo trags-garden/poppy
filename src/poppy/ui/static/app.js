@@ -106,8 +106,8 @@ function applyFilterAndJump(stateMutator) {
 
 function renderFacets() {
   const totals = state.facets.totals || {};
-  document.getElementById("count-active").textContent = totals.active ?? "—";
-  document.getElementById("count-tomb").textContent = totals.tombstoned ?? "—";
+  document.getElementById("count-active").textContent = totals.active ?? "…";
+  document.getElementById("count-tomb").textContent = totals.tombstoned ?? "…";
 
   // Types
   const typeNav = document.getElementById("facet-type");
@@ -381,7 +381,7 @@ function renderFeed(feed) {
           const pinClass = ["fact", "decision", "preference", "lesson", "context"].includes(m.memory_type)
             ? m.memory_type
             : "fact";
-          const proj = m.project ? escapeHtml(m.project) : "—";
+          const proj = m.project ? escapeHtml(m.project) : "No project";
           return `
             <div class="feed-item" data-id="${escapeHtml(m.id)}">
               <span class="when">${time}</span>
@@ -525,7 +525,7 @@ function renderDetail() {
        </dd>`;
 
   const projects = Object.keys(state.facets.projects || {}).sort();
-  const projectOptions = [`<option value="">— none —</option>`]
+  const projectOptions = [`<option value="">None</option>`]
     .concat(
       projects.map((p) =>
         `<option value="${escapeHtml(p)}" ${p === m.project ? "selected" : ""}>${escapeHtml(p)}</option>`,
@@ -566,7 +566,7 @@ function renderDetail() {
       </dd>
       <dt>Project</dt>
       <dd>
-        <input id="d-project" type="text" list="proj-list" value="${escapeHtml(m.project || "")}" ${m.tombstoned ? "disabled" : ""} placeholder="—" />
+        <input id="d-project" type="text" list="proj-list" value="${escapeHtml(m.project || "")}" ${m.tombstoned ? "disabled" : ""} placeholder="No project" />
         <datalist id="proj-list">${projects
           .map((p) => `<option value="${escapeHtml(p)}"></option>`)
           .join("")}</datalist>
@@ -692,7 +692,7 @@ function openSupersedeDialog() {
             </div>
             <div>
               <label class="modal-label" for="sup-project">Project</label>
-              <input id="sup-project" type="text" value="${escapeHtml(m.project || "")}" placeholder="—" />
+              <input id="sup-project" type="text" value="${escapeHtml(m.project || "")}" placeholder="No project" />
             </div>
             <div>
               <label class="modal-label" for="sup-ttl">TTL <span class="hint">(e.g. 30d, blank=permanent)</span></label>
@@ -846,7 +846,7 @@ function truncate(s, n) {
 }
 
 function formatDate(iso) {
-  if (!iso) return "—";
+  if (!iso) return "Not available";
   const d = new Date(iso);
   return d.toLocaleString(undefined, {
     year: "numeric", month: "short", day: "numeric",
@@ -855,7 +855,7 @@ function formatDate(iso) {
 }
 
 function ageString(iso, future = false) {
-  if (!iso) return "—";
+  if (!iso) return "Not available";
   const then = new Date(iso).getTime();
   const now = Date.now();
   const ms = future ? then - now : now - then;

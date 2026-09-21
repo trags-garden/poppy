@@ -46,11 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is left untouched, nothing you wrote yourself is removed, and none of the
   copies are uploaded on the way out. A copy that an earlier version had
   already uploaded stays out of this store and never comes back to it, and it
-  never appears in Trash as something to restore.
+  never appears in Trash as something to restore. A row the cleanup cannot read
+  is left alone and stays visible, and the store still opens.
 
 ### Fixed
 
-- Keep legacy speaker copies private through sync, expiry, and upgrades, including stores with unreadable rows.
+- Removed em dashes from user-facing CLI, dashboard, setup prompt, and MCP
+  copy. `poppy doctor` status lines now read `label: OK, detail` where they
+  used a dash.
 - Exact-id reads and edits now treat hidden copies retained from earlier
   releases as missing, including MCP recall, CLI confirmations, and dashboard
   details and Trash. Internal cleanup still removes them without exposing text.

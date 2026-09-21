@@ -73,7 +73,7 @@ def test_build_content_includes_header_and_body(tmp_path):
     )
     parsed = parse_memory_file(path)
     out = build_content(parsed)
-    assert "N — D" in out
+    assert "N: D" in out
     assert "Body." in out
 
 

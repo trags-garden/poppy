@@ -62,7 +62,7 @@ def build_mcpb(repo_root: Path, output_dir: Path) -> Path:
     Raises RuntimeError if the `mcpb` CLI is missing or pack fails.
     """
     if shutil.which("mcpb") is None:
-        raise RuntimeError("`mcpb` CLI not found — install with `npm install -g @anthropic-ai/mcpb`")
+        raise RuntimeError("`mcpb` CLI not found. Install with `npm install -g @anthropic-ai/mcpb`")
 
     version = _read_version(repo_root)
     output_dir.mkdir(parents=True, exist_ok=True)

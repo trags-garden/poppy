@@ -50,7 +50,7 @@ def get_hermes_home() -> Path:
 _PLUGIN_YAML = """\
 name: poppy
 version: 1.0.0
-description: "Poppy — local-first developer memory shared with Claude Code via the poppy CLI."
+description: "Poppy: local-first developer memory shared with Claude Code via the poppy CLI."
 external_dependencies:
   - name: poppy
     install: "pipx install poppy-memory"
@@ -167,7 +167,7 @@ def _run_poppy(args: List[str], timeout: int = _RECALL_TIMEOUT) -> dict:
 RECALL_SCHEMA = {
     "name": "poppy_recall",
     "description": (
-        "Search Poppy's developer memory for relevant context — past decisions, "
+        "Search Poppy's developer memory for relevant context: past decisions, "
         "preferences, lessons learned, project facts. Use BEFORE suggesting an "
         "approach in an unfamiliar area, or when the user references something "
         "from a past session."
@@ -220,7 +220,7 @@ FORGET_SCHEMA = {
 
 STATUS_SCHEMA = {
     "name": "poppy_status",
-    "description": "Check Poppy status — memory count, active engine, install location.",
+    "description": "Check Poppy status: memory count, active engine, install location.",
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 

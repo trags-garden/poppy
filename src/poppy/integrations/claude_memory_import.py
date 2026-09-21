@@ -91,7 +91,7 @@ def stable_id(slug: str, filename_stem: str) -> str:
 def build_content(parsed: ParsedMemory) -> str:
     header = parsed.name
     if parsed.description:
-        header = f"{parsed.name} — {parsed.description}"
+        header = f"{parsed.name}: {parsed.description}"
     if parsed.body:
         return f"{header}\n\n{parsed.body}"
     return header
