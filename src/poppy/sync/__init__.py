@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from poppy.db import write_gate
-from poppy.engine._legacy_copies import TIER_LIKELY, TIER_PROVEN, is_marked_copy
+from poppy.engine._legacy_copies import TIER_LIKELY, TIER_ORPHAN, TIER_PROVEN, is_marked_copy
 from poppy.engine._timestamps import utc_iso
 from poppy.engine.interface import RetrievalEngine
 from poppy.sync.client import (
@@ -955,18 +955,30 @@ def _apply_pulled_row(
     ):
         return "copy"
 
-    # Grade independently of deletion history, including a first pull into
-    # an empty store. Refuse drifted candidates without assigning markers;
-    # neither live rows nor Trash snapshots may expose their speaker text.
-    tier, waiting = tombstones.grade_incoming_copy(incoming)
-    if tier == TIER_LIKELY or (tier == TIER_PROVEN and not is_tombstone(row)):
+    # Grade the row itself, independently of any local deletion record: a first
+    # pull into a store that never held this id has none, and that is exactly
+    # the case where an old account's leaked copies arrive.
+    #
+    # A row carrying a legacy copy's full provenance is refused whatever its
+    # text grades as. PROVEN is byte-equal to what the live parent projects.
+    # The two weaker outcomes are refused for the same reason the kept-copy
+    # rule hides a drifted row rather than publishing it: the text differs from
+    # the parent's projection, or the parent is absent or has been edited since,
+    # so nothing here can vouch for it, and ingesting it would put speaker text
+    # in front of the user and push it back up. Provenance is narrow enough to
+    # carry that: an exact back-reference to the memory whose id this one
+    # extends, a single-speaker turn list, and a slug that matches that
+    # speaker. A memory that merely shares the id shape earns no tier and takes
+    # the ordinary path below.
+    #
+    # Only a PROVEN one leaves a deletion record. An unproven id must not be
+    # suppressed for the future: a real memory written there later would be
+    # refused and the sync position would move past it.
+    tier = tombstones.grade_incoming_copy(incoming)  # type: ignore[arg-type]
+    if tier in (TIER_LIKELY, TIER_ORPHAN) or (tier == TIER_PROVEN and not is_tombstone(row)):
         if not dry_run and tier == TIER_PROVEN:
-            tombstones.record_local_deletion(incoming.id, incoming.updated_at)
+            tombstones.record_local_deletion(incoming.id, incoming.updated_at)  # type: ignore[attr-defined]
         return "redacted"
-    if waiting:
-        if not dry_run:
-            tombstones.defer_incoming_copy(row, remote_url)
-        return "copy"
 
     if is_tombstone(row):
         local_live = engine.get(incoming.id)  # type: ignore[attr-defined]
@@ -1015,16 +1027,14 @@ def _apply_pulled_row(
             )
             return "tombstone"
         if local_live is not None:
-            # engine.delete clears the parent's derived copies and
-            # records their content-free tombstones itself, so a
-            # deletion pulled from another device also removes any
-            # cloud copy of them. It is told WHEN the deletion
-            # happened, so every record it writes — for copies it had
-            # marked and for unmarked ones it grades on the way — is
-            # dated from the event rather than from this device's
-            # clock. Receipt time would make them look newer than a
-            # recreation of one of those ids that came after, and the
-            # freshness rule would then skip it for good.
+            # engine.delete clears the copies this parent left behind
+            # and keeps content-free evidence of each one, so a
+            # deletion pulled from another device takes them with it.
+            # It is told WHEN the deletion happened, so every record it
+            # writes is dated from the event rather than from this
+            # device's clock. Receipt time would make them look newer
+            # than a recreation of one of those ids that came after,
+            # and the freshness rule would then skip it for good.
             deletion_ts = deletion_time(row) or incoming.updated_at  # type: ignore[attr-defined]
             engine.delete(incoming.id, **_remote_kwargs(engine, deletion_ts))  # type: ignore[attr-defined]
         # A soft-delete carrying a COPY's text. Only a 0.2.4 client deleting a
@@ -1152,30 +1162,6 @@ def pull(
     known_ids: set[str] = set()
     seen_deletions: list[Tombstone] = []
 
-    def apply_pending() -> None:
-        nonlocal applied_live, applied_tombstones, skipped_stale, skipped_copies, skipped_echoes
-        # The caller holds the write gate. A parent can arrive during this
-        # pull or have been written by another client since the last pull.
-        for pending, origin in tombstones.ready_incoming_copies():
-            outcome = _apply_pulled_row(
-                engine,
-                tombstones,
-                pending,
-                wire_to_memory(pending),
-                dry_run=False,
-                remote_url=origin,
-                tombstone_preview=tombstone_preview,
-                seen_deletions=seen_deletions,
-            )
-            tombstones.clear_incoming_copy(pending["id"])
-            if outcome not in {"copy", "redacted"}:
-                tombstones.note_remote_memories({pending["id"]}, origin)
-            applied_live += outcome == "live"
-            applied_tombstones += outcome == "tombstone"
-            skipped_stale += outcome == "stale"
-            skipped_copies += outcome == "copy"
-            skipped_echoes += outcome == "redacted"
-
     # Collect + parse, then sort oldest-first. Server returns newest-first,
     # so we have to materialize before processing. The pagination itself makes
     # network calls, so guard it (push guards its per-item calls the same way):
@@ -1221,9 +1207,6 @@ def pull(
         watermark_locked = True
         last_pull_error = str(exc)
 
-    if not dry_run:
-        with write_gate(poppy_dir):
-            apply_pending()
     candidates.sort(key=lambda c: c[0])
 
     for iso, row, incoming in candidates:
@@ -1248,8 +1231,6 @@ def pull(
                 tombstone_preview=tombstone_preview,
                 seen_deletions=seen_deletions,
             )
-            if not dry_run:
-                apply_pending()
         # Even a stale row proves this ID exists. Pulled deletions are marked
         # sent at creation, so their sightings add no pending work.
         if outcome not in {"copy", "redacted"}:

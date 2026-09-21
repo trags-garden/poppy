@@ -90,6 +90,8 @@ def _parent_splits(memory_id: str) -> list[tuple[str, str]]:
 
 
 def same_instant(left: str | None, right: str | None) -> bool:
+    if left == right:
+        return True
     if left is None or right is None:
         return False
     try:
@@ -138,19 +140,22 @@ def classify_legacy_copy(
     instant, and byte-equal projection from the live parent. LIKELY has the same
     provenance but different text. Text alone earns no grade.
     """
-    if not all(isinstance(value, str) for value in (memory_id, content, related_raw, created_at)):
-        return TIER_NONE, None
-    try:
-        datetime.fromisoformat(created_at)
-    except (ValueError, TypeError, OverflowError):
+    # The id is the only value this needs to be text: it is split, where every
+    # other value is handed to a helper that already treats an unusable one as
+    # no evidence. Testing the others here would change the grade a stored row
+    # gets, and the grade is what authorises removing it.
+    if not isinstance(memory_id, str):
         return TIER_NONE, None
     for parent_id, slug in _parent_splits(memory_id):
+        # The parent's own columns can hold anything an older release or a
+        # hand-edit left there. Reading them as bytes and decoding here keeps a
+        # parent nobody can read from raising out of engine construction: the
+        # driver raises while BUILDING a result row, which is before any guard
+        # inside the loop could run.
         try:
             parent = _text_row(conn, "memories", parent_id, "content", "created_at")
-            if parent is not None:
-                datetime.fromisoformat(parent[1])
         except (ValueError, TypeError, OverflowError):
-            return TIER_NONE, None
+            continue
         if not has_copy_provenance(
             parent_id,
             slug,
@@ -213,7 +218,22 @@ def _text_row(conn: sqlite3.Connection, table: str, memory_id: str, *columns: st
 
 
 def legacy_copy_grades(conn: sqlite3.Connection) -> list[tuple[str, str]]:
-    """Grade TEXT candidates only; unreadable rows stay unmarked and untouched."""
+    """Read unmarked candidates once, before any marker writes change the store.
+
+    Every field is fetched as raw bytes together with the storage class the
+    value actually has. Only a value stored AS TEXT is one a release that wrote
+    copies could have written, so only that is decoded and graded: reading a
+    field as text whatever it holds would let a row nothing here wrote look
+    like a copy, and the strongest grade authorises deleting it without keeping
+    a pre-image. Decoding one row at a time also keeps the failure inside the
+    guard below, because the driver raises while BUILDING a result row.
+
+    ``updated_at`` is read although the grade does not depend on it, because the
+    removal that a grade authorises needs it: the deletion record is dated from
+    the row's own time. A row this pass could grade but that pass could not read
+    would be marked, and so hidden, and then left behind unremoved for good.
+    Both passes have to agree on which rows are readable.
+    """
     columns = raw_text_columns("id", "content", "related_to", "created_at", "updated_at")
     rows = conn.execute(
         f"SELECT {columns} FROM memories WHERE instr(id, ?) > 0 AND COALESCE(is_closet, 0) = 0",
@@ -222,8 +242,7 @@ def legacy_copy_grades(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     grades = []
     for row in rows:
         try:
-            memory_id, content, related, created, updated = decode_text_columns(tuple(row))
-            datetime.fromisoformat(updated)
+            memory_id, content, related, created, _ = decode_text_columns(tuple(row))
             tier, _ = classify_legacy_copy(
                 conn,
                 memory_id,
@@ -305,6 +324,8 @@ def record_copy_deletions(
         return
     stamp = utc_iso(when or datetime.now(timezone.utc))
     if authoritative and when is not None:
+        capped = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+        stamp = utc_iso(min(capped, datetime.now(timezone.utc)))
         conn.executemany(
             f"INSERT INTO {COPY_DELETION_TABLE} (id, tombstoned_at, is_local) VALUES (?, ?, 0) ON "
             f"CONFLICT(id) DO UPDATE SET tombstoned_at = MAX({COPY_DELETION_TABLE}.tombstoned_at, "

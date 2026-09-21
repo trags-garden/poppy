@@ -27,6 +27,7 @@ from poppy.engine._legacy_copies import (
     COPY_DELETION_DDL,
     announced_copy_claim,
     claim_proven_unmarked_copy,
+    classify_legacy_copy,
     clear_copy_snapshot,
     grade_copy_snapshot,
     is_marked_copy,
@@ -392,30 +393,24 @@ class TombstoneStore:
                 created_at=memory.created_at.isoformat(),
             )
 
-    def grade_incoming_copy(self, memory: Memory) -> tuple[str, bool]:
-        from poppy.sync._legacy_pending import grade_incoming
+    def grade_incoming_copy(self, memory: Memory) -> str:
+        """Grade an INCOMING row and report every tier, not just the provable ones.
 
+        ``grade_copy_snapshot`` answers a narrower question and folds anything
+        short of provenance-plus-text into None. Pull needs the wider answer:
+        a row that carries a legacy copy's full provenance has to be refused
+        even when its text cannot be matched against the parent, because the
+        parent may be absent or may have been edited since.
+        """
         with self._lock:
-            return grade_incoming(self._conn, memory)
-
-    def defer_incoming_copy(self, row: dict, remote_url: str) -> None:
-        from poppy.sync._legacy_pending import defer_copy
-
-        with self._lock:
-            defer_copy(self._conn, row, remote_url)
-
-    def ready_incoming_copies(self) -> list[tuple[dict, str]]:
-        from poppy.sync._legacy_pending import grade_pending
-
-        with self._lock:
-            return grade_pending(self._conn)
-
-    def clear_incoming_copy(self, memory_id: str) -> None:
-        from poppy.sync._legacy_pending import clear_pending
-
-        with self._lock:
-            clear_pending(self._conn, memory_id)
-            self._conn.commit()
+            tier, _ = classify_legacy_copy(
+                self._conn,
+                memory.id,
+                content=memory.content,
+                related_raw=json.dumps(list(memory.related_to)),
+                created_at=memory.created_at.isoformat(),
+            )
+        return tier
 
     def claim_leaked_copy(self, memory_id: str, seen_at: datetime) -> None:
         """Retain a proven legacy copy claim at its observed timestamp.
