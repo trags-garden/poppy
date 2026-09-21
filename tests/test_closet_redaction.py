@@ -53,11 +53,11 @@ def _migrate_only(db: Path, *, had_bloom_schema: bool = True) -> None:
     product behaviour. These tests are about the grading itself, so they run it
     directly instead of through an open.
     """
-    from poppy.engine._closet_marker import ensure_closet_side_tables
+    from poppy.engine._legacy_copies import ensure_legacy_copy_tables
 
     conn = sqlite3.connect(str(db))
     try:
-        ensure_closet_side_tables(conn)
+        ensure_legacy_copy_tables(conn)
         mark_legacy_copies_for_cleanup(conn, had_bloom_schema=had_bloom_schema)
         conn.commit()
     finally:
@@ -193,7 +193,7 @@ def test_forgetting_the_parent_does_not_delete_a_real_lookalike(tmp_path: Path) 
 
     assert _all_ids(db) == ["mem_customer_closet_notes"]
     assert engine.get("mem_customer_closet_notes").content == "the wardrobe budget for Q3"
-    assert TombstoneStore(db).list_closets() == []
+    assert TombstoneStore(db).list_copy_deletions() == []
 
 
 def test_a_seed_redaction_does_not_delete_a_real_lookalike(tmp_path: Path) -> None:
@@ -547,7 +547,7 @@ def test_forgetting_a_closet_id_directly_writes_no_speaker_text(tmp_path: Path) 
     store = TombstoneStore(db)
     assert store.list_all() == []  # nothing restorable, nothing snapshotted
     assert store.get("sess-2026-01_closet_alice") is None
-    assert {ct.id for ct in store.list_closets()} == {"sess-2026-01_closet_alice"}
+    assert {ct.id for ct in store.list_copy_deletions()} == {"sess-2026-01_closet_alice"}
     assert engine.get("sess-2026-01_closet_alice") is None
 
     conn = sqlite3.connect(str(db))
@@ -576,7 +576,7 @@ def test_forgetting_a_real_lookalike_still_tombstones_it_normally(tmp_path: Path
     store = TombstoneStore(db)
     assert [t.memory.id for t in store.list_all()] == ["mem_customer_closet_notes"]
     assert store.get("mem_customer_closet_notes").memory.content == "the wardrobe budget for Q3"
-    assert store.list_closets() == []
+    assert store.list_copy_deletions() == []
 
 
 def _cloud_row(mid: str, content: str, *, deleted: bool = False, when: datetime | None = None) -> dict:
@@ -645,7 +645,7 @@ def test_pull_never_overwrites_a_marked_closet_with_a_live_cloud_row(tmp_path: P
         poppy_dir=tmp_path,
     )
 
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert result.applied_live == 0
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
     assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
@@ -681,7 +681,7 @@ def test_pull_never_deletes_a_marked_closet_via_a_cloud_tombstone(tmp_path: Path
         poppy_dir=tmp_path,
     )
 
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert result.applied_tombstones == 0
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
     assert store.list_all() == []  # no snapshot of the leaked text either
@@ -713,7 +713,7 @@ def test_pull_does_not_resurrect_a_closet_this_device_just_forgot(tmp_path: Path
         poppy_dir=tmp_path,
     )
 
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert result.applied_live == 0
     assert engine.get("sess-2026-01_closet_alice") is None
     assert not [r for r in engine.retrieve(SECRET, limit=10) if r.memory.id.endswith("_closet_alice")]
@@ -739,7 +739,7 @@ def test_pull_applies_a_real_closet_shaped_memory_when_a_parent_is_present(tmp_p
     )
 
     assert result.applied_live == 1
-    assert result.skipped_closets == 0
+    assert result.skipped_copies == 0
     assert engine.get("mem_customer_closet_notes").content == "the wardrobe budget for Q3"
     assert sorted(m.id for m in engine.list_all()) == ["mem_customer", "mem_customer_closet_notes"]
 
@@ -862,7 +862,7 @@ def test_expiry_does_not_announce_closet_deletions(tmp_path: Path) -> None:
 
     assert engine.purge_expired() == 1
     assert _all_ids(db) == []
-    assert TombstoneStore(db).list_closets() == []
+    assert TombstoneStore(db).list_copy_deletions() == []
 
 
 def test_forgetting_a_closet_reports_no_restore_window(tmp_path: Path) -> None:
@@ -892,10 +892,10 @@ def test_edit_memory_refuses_a_marked_closet(tmp_path: Path, engine_name: str) -
     engine = _bloom(db) if engine_name == "bloom" else SeedEngine(db_path=db)
     _write_legacy(writer, _memory("sess-2026-01", _turns()))
 
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(KeyError, match="memory not found: sess-2026-01_closet_alice") as exc:
         edit_memory(engine, "sess-2026-01_closet_alice", project="other")
 
-    assert "sess-2026-01" in str(exc.value)  # points at the parent
+    assert exc.value.args == ("memory not found: sess-2026-01_closet_alice",)
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
     assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
 
@@ -923,11 +923,11 @@ def test_a_reclaimed_closet_id_still_receives_cloud_updates(tmp_path: Path) -> N
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
     store = TombstoneStore(db)
     assert forget(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store).deleted is True
-    assert store.has_closet_tombstone("sess-2026-01_closet_alice") is True
+    assert store.has_copy_deletion("sess-2026-01_closet_alice") is True
 
     # The id is reclaimed by an independent note, which drops the stale record.
     SeedEngine(db_path=db).ingest(_memory("sess-2026-01_closet_alice", "a note of my own"))
-    assert store.has_closet_tombstone("sess-2026-01_closet_alice") is False
+    assert store.has_copy_deletion("sess-2026-01_closet_alice") is False
 
     newer = _cloud_row(
         "sess-2026-01_closet_alice",
@@ -942,7 +942,7 @@ def test_a_reclaimed_closet_id_still_receives_cloud_updates(tmp_path: Path) -> N
         poppy_dir=tmp_path,
     )
 
-    assert result.skipped_closets == 0
+    assert result.skipped_copies == 0
     assert result.applied_live == 1
     assert engine.get("sess-2026-01_closet_alice").content == "the newer version from another device"
 
@@ -955,7 +955,7 @@ def test_a_reclaimed_id_syncs_even_if_the_tombstone_survives(tmp_path: Path) -> 
     store = TombstoneStore(db)
     forget(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store)
     SeedEngine(db_path=db).ingest(_memory("sess-2026-01_closet_alice", "a note of my own"))
-    store.add_closets(["sess-2026-01_closet_alice"])  # re-record it by hand
+    store.add_copy_deletions(["sess-2026-01_closet_alice"])  # re-record it by hand
 
     result = pull(
         engine=engine,
@@ -1115,7 +1115,7 @@ def test_an_ordinary_tombstone_is_still_a_restorable_entry(tmp_path: Path) -> No
 
     assert result.applied_tombstones == 1
     assert [t.memory.id for t in store.list_all()] == ["mem_real"]
-    assert store.list_closets() == []
+    assert store.list_copy_deletions() == []
 
 
 def test_a_real_memory_matching_the_placeholder_still_gets_deleted(tmp_path: Path) -> None:
@@ -1156,10 +1156,10 @@ def test_supersede_refuses_a_marked_closet(tmp_path: Path) -> None:
     engine = _bloom(db)
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
 
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(KeyError, match="memory not found: sess-2026-01_closet_alice") as exc:
         supersede_memory(engine, _memory("mem_new", "replacement"), "sess-2026-01_closet_alice", poppy_dir=tmp_path)
 
-    assert "sess-2026-01" in str(exc.value)
+    assert exc.value.args == ("memory not found: sess-2026-01_closet_alice",)
     store = TombstoneStore(db)
     assert store.list_all() == []  # nothing snapshotted
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
@@ -1173,7 +1173,7 @@ def test_remember_with_supersedes_pointing_at_a_closet_is_refused(tmp_path: Path
     engine = _bloom(db)
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
 
-    with pytest.raises(ValueError):
+    with pytest.raises(KeyError, match="memory not found: sess-2026-01_closet_alice"):
         remember(engine, tmp_path, content="replacement", supersedes="sess-2026-01_closet_alice")
 
     assert TombstoneStore(db).list_all() == []  # no snapshot of the speaker turns
@@ -1215,8 +1215,7 @@ def test_restore_refuses_an_id_that_is_now_a_derived_copy(tmp_path: Path) -> Non
     # A tombstone naming a copy, as the unguarded supersede path used to write.
     store.add(engine.get("sess-2026-01_closet_alice"))
 
-    with pytest.raises(ValueError):
-        restore(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store)
+    assert restore(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store).found is False
 
     assert "sess-2026-01_closet_alice" in _marked_ids(db)
     assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
@@ -1257,7 +1256,7 @@ def test_a_newer_cloud_row_at_a_deleted_copys_id_is_ingested(tmp_path: Path) -> 
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
     store = TombstoneStore(db)
     forget(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store)
-    assert store.has_closet_tombstone("sess-2026-01_closet_alice") is True
+    assert store.has_copy_deletion("sess-2026-01_closet_alice") is True
 
     newer = _cloud_row(
         "sess-2026-01_closet_alice",
@@ -1272,12 +1271,12 @@ def test_a_newer_cloud_row_at_a_deleted_copys_id_is_ingested(tmp_path: Path) -> 
         poppy_dir=tmp_path,
     )
 
-    assert result.skipped_closets == 0
+    assert result.skipped_copies == 0
     assert result.applied_live == 1
     assert engine.get("sess-2026-01_closet_alice").content == "an independent note from device B"
     assert _marked_ids(db) == ["sess-2026-01_closet_bob"]
     # Reclaiming the id drops the deletion record, so it cannot suppress again.
-    assert store.has_closet_tombstone("sess-2026-01_closet_alice") is False
+    assert store.has_copy_deletion("sess-2026-01_closet_alice") is False
 
 
 def test_an_older_cloud_copy_at_a_deleted_copys_id_is_still_skipped(tmp_path: Path) -> None:
@@ -1301,7 +1300,7 @@ def test_an_older_cloud_copy_at_a_deleted_copys_id_is_still_skipped(tmp_path: Pa
         poppy_dir=tmp_path,
     )
 
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert engine.get("sess-2026-01_closet_alice") is None
 
 
@@ -1318,8 +1317,8 @@ def test_sync_ages_out_the_local_side_tables(tmp_path: Path, synced_state) -> No
     store = TombstoneStore(db)
     store.note_remote_memories({"sess-2026-01"}, _RecordingClient.base_url)
     forget(engine, tmp_path, "sess-2026-01", tombstones=store)
-    store.add_closets(["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"])
-    assert len(store.list_closets()) == 2
+    store.add_copy_deletions(["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"])
+    assert len(store.list_copy_deletions()) == 2
 
     old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
     conn = sqlite3.connect(str(db))
@@ -1331,7 +1330,7 @@ def test_sync_ages_out_the_local_side_tables(tmp_path: Path, synced_state) -> No
     save(tmp_path, synced_state())  # only a SENT deletion ages out
     run_sync(engine=engine, tombstones=store, client=_RecordingClient(), poppy_dir=tmp_path)
 
-    assert store.list_closets() == []
+    assert store.list_copy_deletions() == []
     assert store.list_all() == []
 
 
@@ -1377,7 +1376,7 @@ def test_an_unsent_closet_deletion_is_not_purged_by_age(tmp_path: Path) -> None:
     engine.ingest(_memory("sess-2026-01", _turns()))
     store = TombstoneStore(db)
     forget(engine, tmp_path, "sess-2026-01", tombstones=store)
-    store.add_closets(["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"])
+    store.add_copy_deletions(["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"])
 
     old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
     conn = sqlite3.connect(str(db))
@@ -1387,11 +1386,11 @@ def test_an_unsent_closet_deletion_is_not_purged_by_age(tmp_path: Path) -> None:
 
     # No push watermark: nothing has been sent, so nothing may be dropped.
     assert store.purge_expired(pushed_through=None) == 0
-    assert len(store.list_closets()) == 2
+    assert len(store.list_copy_deletions()) == 2
 
     # Once a push has covered them, they age out.
     store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
-    assert store.list_closets() == []
+    assert store.list_copy_deletions() == []
 
 
 def test_the_migration_backup_still_ages_out_without_a_watermark(tmp_path: Path) -> None:
@@ -1470,15 +1469,9 @@ def test_re_pulling_a_copy_deletion_does_not_refresh_its_timestamp(tmp_path: Pat
     assert _local_deletion_time(db, "sess-1_closet_alice") == deleted_at
 
 
-def test_copies_written_by_an_older_client_are_reported_not_repaired(tmp_path: Path) -> None:
-    """Mixed installs are diagnosed, never silently reclassified.
-
-    Marking them means running the migration's inference outside the migration,
-    and every version of that has destroyed rows that merely arrived from the
-    cloud. `poppy doctor` counts them instead; the repair is a separate,
-    explicit command.
-    """
-    from poppy.cli.main import _unmarked_copies_count
+def test_unmarked_legacy_rows_are_not_reclassified_on_reopen(tmp_path: Path) -> None:
+    """Opening a store never reruns inference after the marker migration."""
+    from poppy.engine._legacy_copies import TIER_LIKELY, TIER_PROVEN, legacy_copy_grades
 
     db = tmp_path / "memories.db"
     engine = _bloom(db)
@@ -1488,26 +1481,14 @@ def test_copies_written_by_an_older_client_are_reported_not_repaired(tmp_path: P
     conn.commit()
     conn.close()
 
-    assert _unmarked_copies_count(tmp_path) == 2
+    assert sum(tier in (TIER_PROVEN, TIER_LIKELY) for _, tier in legacy_copy_grades(engine._conn)) == 2
 
     # Reopening never repairs them, and never writes.
     for _ in range(3):
         _bloom(db)
     assert _marked_ids(db) == []
     assert _backup_rows(db) == {}
-    assert TombstoneStore(db).list_closets() == []
-
-
-def test_the_unmarked_count_ignores_a_real_lookalike(tmp_path: Path) -> None:
-    """Only rows a live parent re-derives are counted, so nothing real is reported."""
-    from poppy.cli.main import _unmarked_copies_count
-
-    db = tmp_path / "memories.db"
-    engine = _bloom(db)
-    engine.ingest(_memory("mem_customer", "a plain memory"))
-    engine.ingest(_memory("mem_customer_closet_notes", "the wardrobe budget for Q3"))
-
-    assert _unmarked_copies_count(tmp_path) == 0
+    assert TombstoneStore(db).list_copy_deletions() == []
 
 
 def test_reopening_a_store_with_a_lookalike_never_writes(tmp_path: Path) -> None:
@@ -1567,72 +1548,6 @@ def test_a_bad_supersede_target_skips_one_capture_not_the_batch(tmp_path: Path) 
     assert "sess-2026-01_closet_alice" in _marked_ids(db)
 
 
-def test_doctor_reports_the_migration_backup(tmp_path: Path) -> None:
-    """The line crashed on every store that had backup rows: `import datetime`
-    in the CLI is the MODULE, so `datetime.fromisoformat` was an AttributeError
-    that `safe_read` did not catch."""
-    from poppy.cli.main import _closet_backup_status
-
-    db = _tier_b_store(tmp_path)
-    _bloom(db)  # the migration snapshots the rows it adopts on inference
-    assert _backup_rows(db)
-
-    rows, deadline = _closet_backup_status(tmp_path)
-
-    assert rows == 1
-    assert deadline is not None and len(deadline) == 10  # an ISO date
-
-
-def test_doctor_reads_an_encrypted_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Through poppy.db.connect, not raw sqlite3.
-
-    Raw sqlite3 cannot read a SQLCipher file, so both doctor lines silently
-    reported nothing on exactly the installs that most need them.
-    """
-    pytest.importorskip("sqlcipher3")
-    from poppy import encryption
-    from poppy.cli.main import _closet_backup_status
-
-    # Built inline and closed as we go: encryption refuses to migrate while any
-    # connection still holds the store's gate lock.
-    db = tmp_path / "memories.db"
-    writer = _bloom(db)
-    _write_legacy(writer, _memory("sess-2026-01", _turns()))
-    writer._conn.close()
-    _strip_marker(db)
-    # Drift the parent so one copy lands on the inferential tier, which is the
-    # only one that snapshots.
-    conn = sqlite3.connect(str(db))
-    conn.execute(
-        "UPDATE memories SET content = ?, enriched_content = ? WHERE id = ?",
-        (_turns("harmlessreplacement"), "x", "sess-2026-01"),
-    )
-    conn.commit()
-    conn.close()
-    migrated = _bloom(db)  # the migration snapshots the row it adopts on inference
-    migrated._conn.close()
-
-    monkeypatch.setenv("POPPY_DB_KEY", encryption.generate_key())
-    encryption.enable(tmp_path)
-
-    # A raw connection cannot see the table at all — this is the bug.
-    raw = sqlite3.connect(str(db))
-    try:
-        with pytest.raises(sqlite3.DatabaseError):
-            raw.execute("SELECT COUNT(*) FROM closet_migration_backup").fetchone()
-    finally:
-        raw.close()
-
-    assert _closet_backup_status(tmp_path)[0] == 1
-
-
-def test_doctor_helpers_are_quiet_on_a_store_that_does_not_exist(tmp_path: Path) -> None:
-    from poppy.cli.main import _closet_backup_status, _unmarked_copies_count
-
-    assert _closet_backup_status(tmp_path) == (0, None)
-    assert _unmarked_copies_count(tmp_path) == 0
-
-
 def test_a_fresh_store_pushes_no_copy_deletions(tmp_path: Path, synced_state) -> None:
     """Copies created after the fix are never synced, so the cloud has nothing
     to delete — and announcing their removal would delete any real cloud memory
@@ -1645,7 +1560,7 @@ def test_a_fresh_store_pushes_no_copy_deletions(tmp_path: Path, synced_state) ->
 
     forget(engine, tmp_path, "meeting", tombstones=store)
 
-    assert store.list_closets() == []
+    assert store.list_copy_deletions() == []
     assert _pending_ids(store) == []  # but nothing is announced
 
     client = _RecordingClient()
@@ -1689,10 +1604,10 @@ def test_a_local_deletion_record_keeps_its_earliest_time(tmp_path: Path) -> None
     early = datetime(2026, 7, 1, tzinfo=timezone.utc)
     late = datetime(2026, 8, 1, tzinfo=timezone.utc)
 
-    store.add_closets(["x_closet_alice"], now=early)
-    store.add_closets(["x_closet_alice"], now=late)
+    store.add_copy_deletions(["x_closet_alice"], now=early)
+    store.add_copy_deletions(["x_closet_alice"], now=late)
 
-    assert store.get_closet("x_closet_alice").tombstoned_at == early
+    assert store.get_copy_deletion("x_closet_alice").tombstoned_at == early
 
 
 @pytest.mark.parametrize("engine_name", ["bloom", "seed"])
@@ -1758,8 +1673,8 @@ def test_forgetting_the_parent_leaves_that_real_memory_alone(tmp_path: Path) -> 
     assert engine.get("sess-1_closet_alice").content == "MY OWN NOTE, NOT A COPY"
     assert [m.id for m in engine.list_all()] == ["sess-1_closet_alice"]
     # Never recorded as a deleted copy, so pull cannot skip its cloud updates.
-    assert store.list_closets() == []
-    assert store.get_closet("sess-1_closet_alice") is None
+    assert store.list_copy_deletions() == []
+    assert store.get_copy_deletion("sess-1_closet_alice") is None
 
 
 def test_a_real_memory_at_a_derived_id_still_syncs(tmp_path: Path) -> None:
@@ -2011,25 +1926,6 @@ def test_a_seed_only_store_is_never_graded(tmp_path: Path) -> None:
     assert [m.id for m in engine.list_all()] == ["dialog42_closet_alice"]
 
 
-def test_doctor_reports_the_two_tiers_that_need_a_human(tmp_path: Path) -> None:
-    from poppy.cli.main import _closet_repair_counts
-
-    db = _tier_b_store(tmp_path)
-    _bloom(db)
-    adopted, orphans = _closet_repair_counts(tmp_path)
-    assert (adopted, orphans) == (1, 0)
-
-    other = tmp_path / "orphan"
-    other.mkdir()
-    odb = _legacy_store(other)
-    conn = sqlite3.connect(str(odb))
-    conn.execute("DELETE FROM memories WHERE id = ?", ("sess-2026-01",))
-    conn.commit()
-    conn.close()
-    _bloom(odb)
-    assert _closet_repair_counts(other) == (0, 2)
-
-
 def test_an_independent_record_holding_the_same_turns_is_not_a_copy(tmp_path: Path) -> None:
     """Matching text strengthens the evidence; it never replaces provenance.
 
@@ -2190,20 +2086,20 @@ def test_a_local_copy_deletion_is_a_floor_for_pulled_ones(tmp_path: Path) -> Non
 
     engine.ingest(_memory("sess-1", _turns()))
     forget(engine, tmp_path, "sess-1", tombstones=store)
-    store.add_closets(["sess-1_closet_alice", "sess-1_closet_bob"])
+    store.add_copy_deletions(["sess-1_closet_alice", "sess-1_closet_bob"])
     conn = sqlite3.connect(str(db))
     conn.execute("UPDATE closet_tombstones SET tombstoned_at = ?", (two.isoformat(),))
     conn.commit()
     conn.close()
 
     # An older sighting of the same deletion must not lower it...
-    store.add_closets(["sess-1_closet_alice"], now=noon)
-    assert store.get_closet("sess-1_closet_alice").tombstoned_at == two
+    store.add_copy_deletions(["sess-1_closet_alice"], now=noon)
+    assert store.get_copy_deletion("sess-1_closet_alice").tombstoned_at == two
 
     # ... while between two REMOTE sightings the earliest still wins.
-    store.add_closets(["remote_closet_bob"], now=two)
-    store.add_closets(["remote_closet_bob"], now=noon)
-    assert store.get_closet("remote_closet_bob").tombstoned_at == noon
+    store.add_copy_deletions(["remote_closet_bob"], now=two)
+    store.add_copy_deletions(["remote_closet_bob"], now=noon)
+    assert store.get_copy_deletion("remote_closet_bob").tombstoned_at == noon
 
 
 def _pull_leaked_pair(tmp_path: Path, engine, store, *, when: datetime) -> None:
@@ -2385,7 +2281,7 @@ def test_a_pulled_copy_deletion_is_dated_from_its_deleted_at(tmp_path: Path) -> 
     recreation = _cloud_row("p_closet_alice", "independent note after deletion", when=t0 + timedelta(hours=1))
     pull(engine=engine, tombstones=store, client=_RecordingClient([recreation]), state=SyncState(), poppy_dir=tmp_path)
     assert engine.get("p_closet_alice").content == recreation["content"]
-    assert store.get_closet("p_closet_alice") is None
+    assert store.get_copy_deletion("p_closet_alice") is None
 
 
 def test_purge_boundaries_compare_as_instants(tmp_path: Path) -> None:
@@ -2400,9 +2296,9 @@ def test_purge_boundaries_compare_as_instants(tmp_path: Path) -> None:
     store.purge_expired(pushed_through="2026-07-01T05:00:00+00:00")
     assert store.get("ordinary") is not None  # 06:00Z is after 05:00Z
 
-    store.add_closets(["p_closet_alice"], now=datetime(2026, 7, 1, 11, tzinfo=timezone.utc))
+    store.add_copy_deletions(["p_closet_alice"], now=datetime(2026, 7, 1, 11, tzinfo=timezone.utc))
     store.purge_expired(pushed_through="2026-07-01T12:00:00+02:00")
-    assert store.get_closet("p_closet_alice") is not None  # 11:00Z is after 10:00Z
+    assert store.get_copy_deletion("p_closet_alice") is not None  # 11:00Z is after 10:00Z
 
 
 def test_a_local_forget_always_snapshots_even_past_a_skewed_record(tmp_path: Path) -> None:
@@ -2492,7 +2388,7 @@ def test_forgetting_a_proven_unmarked_copy_on_a_seed_store_is_content_free(tmp_p
 
     assert seed.get("p_closet_alice") is None
     assert store.get("p_closet_alice") is None
-    assert store.get_closet("p_closet_alice") is not None
+    assert store.get_copy_deletion("p_closet_alice") is not None
     assert store.announced_copy_claim("p_closet_alice") == when
 
     client = _RecordingClient()
@@ -2646,7 +2542,7 @@ def test_restore_legacy_snapshot_after_parent_forget(tmp_path: Path) -> None:
 
     assert result.applied_tombstones == 1
     assert _trash_entry(db, "p_closet_alice") is None
-    assert store.get_closet("p_closet_alice") is not None
+    assert store.get_copy_deletion("p_closet_alice") is not None
 
     assert forget(engine, tmp_path, "p", tombstones=store).deleted is True
     assert restore(engine, tmp_path, "p_closet_alice", tombstones=store).found is False
@@ -2769,7 +2665,7 @@ def test_newer_remote_closet_deletion_is_not_retained(tmp_path: Path) -> None:
     t1 = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
     t2 = t1 + timedelta(days=1)
     t3 = t1 + timedelta(days=2)
-    store.add_closets(["sess-1_closet_alice"], now=t1)
+    store.add_copy_deletions(["sess-1_closet_alice"], now=t1)
 
     cleanup = _legacy_deletion_row("sess-1_closet_alice", t3)
     pull(engine=engine, tombstones=store, client=_RecordingClient([cleanup]), state=SyncState(), poppy_dir=tmp_path)
@@ -2792,12 +2688,12 @@ def test_a_cleanup_deletion_never_lowers_a_record(tmp_path: Path) -> None:
     engine, store = _bloom(db), TombstoneStore(db)
     early = datetime(2026, 7, 1, tzinfo=timezone.utc)
     late = datetime(2026, 8, 1, tzinfo=timezone.utc)
-    store.add_closets(["sess-1_closet_alice"], now=late)
+    store.add_copy_deletions(["sess-1_closet_alice"], now=late)
 
     cleanup = _legacy_deletion_row("sess-1_closet_alice", early)
     pull(engine=engine, tombstones=store, client=_RecordingClient([cleanup]), state=SyncState(), poppy_dir=tmp_path)
 
-    assert store.get_closet("sess-1_closet_alice").tombstoned_at == late
+    assert store.get_copy_deletion("sess-1_closet_alice").tombstoned_at == late
 
 
 def test_audit_sync_purge_during_wait_does_not_revive_captured_copy(
@@ -2843,7 +2739,7 @@ def test_audit_sync_purge_during_wait_does_not_revive_captured_copy(
         # The cleanup push gets the lock first and ages the record out.
         if not purged:
             purged.append(store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat()))
-            assert store.get_closet("p_closet_alice") is None
+            assert store.get_copy_deletion("p_closet_alice") is None
         with real_gate(poppy_dir):
             yield
 
@@ -2858,7 +2754,7 @@ def test_audit_sync_purge_during_wait_does_not_revive_captured_copy(
 
     assert purged
     assert result.applied_live == 0
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert seed.get("p_closet_alice") is None
     # The parent is still here, so its own turns are recallable — through the parent
     # only. No second row holds them.
@@ -2896,39 +2792,6 @@ def test_a_same_text_write_does_not_invent_a_link_for_a_real_lookalike(tmp_path:
     engine.ingest(_memory("p_closet_notes", "MY OWN NOTE", related_to=[]))
 
     assert engine.get("p_closet_notes").related_to == []
-
-
-@pytest.mark.parametrize("command", [["sync", "run"], ["sync", "push"], ["sync", "pull"]])
-def test_audit_sync_cli_dry_run_does_not_migrate_legacy_store(tmp_path: Path, command: list[str]) -> None:
-    """Constructing an engine is what runs the one-time migration, and a dry run constructs one.
-
-    It classified every copy-shaped row, rewrote the proven ones and queued cloud
-    cleanup announcements before ``dry_run`` was ever looked at. Lossless and
-    unsent, but a dry run has to be read-only.
-    """
-    from click.testing import CliRunner
-
-    from poppy.cli.main import cli
-
-    poppy_dir = tmp_path / ".poppy"
-    poppy_dir.mkdir()
-    db = _legacy_store(poppy_dir)
-    assert MARKER_COLUMN not in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
-    # A dead local url, so a regression fails on the assertions rather than
-    # reaching a real host.
-    (poppy_dir / "config.json").write_text(
-        json.dumps({"trags_api_key": "usr_test", "trags_api_url": "http://127.0.0.1:9", "engine": "seed"})
-    )
-
-    env = {"HOME": str(tmp_path), "POPPY_DIR": str(poppy_dir), "POPPY_TELEMETRY_OFF": "1"}
-    result = CliRunner().invoke(cli, [*command, "--dry-run"], env=env)
-
-    assert result.exit_code == 0, result.output
-    assert "one-time marker migration" in result.output
-    assert MARKER_COLUMN not in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
-    assert _rows(db, "SELECT id FROM legacy_closet_ids") == []  # nothing queued for the cloud
-    assert _backup_rows(db) == {}
-    assert _all_ids(db) == ["sess-2026-01", "sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
 
 
 def test_a_dry_run_on_a_migrated_store_still_runs(tmp_path: Path) -> None:
@@ -3008,11 +2871,11 @@ def test_a_newer_claim_suppresses_a_copy_an_older_record_would_admit(tmp_path: P
     conn.execute("DELETE FROM memory_embeddings WHERE id = 'p_closet_alice'")
     conn.commit()
     conn.close()
-    store.add_closets(["p_closet_alice"], now=ten)
+    store.add_copy_deletions(["p_closet_alice"], now=ten)
 
     with pytest.raises(ValueError, match="derived per-speaker copy"):
         restore(engine, tmp_path, "p_closet_alice", tombstones=store)
-    assert store.get_closet("p_closet_alice").tombstoned_at == ten  # the older record
+    assert store.get_copy_deletion("p_closet_alice").tombstoned_at == ten  # the older record
     # The claim is the LATER of the entry's own two stamps, so the server's freshness
     # gate cannot answer it stale.
     claimed = store.announced_copy_claim("p_closet_alice")
@@ -3026,7 +2889,7 @@ def test_a_newer_claim_suppresses_a_copy_an_older_record_would_admit(tmp_path: P
     )
 
     assert result.applied_live == 0
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert engine.get("p_closet_alice") is None
     assert store.announced_copy_claim("p_closet_alice") is not None
     assert "p_closet_alice" in _pending_ids(store)
@@ -3035,9 +2898,8 @@ def test_a_newer_claim_suppresses_a_copy_an_older_record_would_admit(tmp_path: P
 def test_a_future_stamped_claim_does_not_hide_a_later_cloud_row(tmp_path: Path) -> None:
     """A claim is an existence hint, never a comparator.
 
-    ``note_leaked_cloud_copy`` advances a claim from an incoming row's own
-    updated_at, and a 0.2.4 client could put any stamp there. Used as a floor — even
-    clamped to now — a claim dated ten days ahead hid every honestly stamped row
+    Earlier clients advanced a claim from an incoming row's own updated_at.
+    Used as a floor, even clamped to now, a claim dated ten days ahead hid every honestly stamped row
     written at that id, and since the queue is never purged it hid them for good,
     with the pull watermark moving past them. The row's own EVIDENCE decides instead.
     """
@@ -3066,7 +2928,7 @@ def test_restore_returns_a_likely_trash_snapshot_to_the_user(tmp_path: Path) -> 
 
     An importer-written per-speaker split: right shape, the parent's creation
     instant, text the parent does not derive. Refusing it for good contradicted
-    ``refuse_if_derived_copy`` and ``_clear_unmarked_copies``, which both leave
+    the frozen provenance guards, which leave
     anything short of proof to the user. The restored row keeps its stored
     related_to, so a later redaction of the parent still grades it.
     """
@@ -3164,7 +3026,7 @@ def test_an_authoritative_deletion_raises_a_local_floor(tmp_path: Path) -> None:
     engine, store = _bloom(db), TombstoneStore(db)
     engine.ingest(_memory("sess-1", _turns()))
     assert forget(engine, tmp_path, "sess-1", tombstones=store).deleted is True
-    store.add_closets(["sess-1_closet_alice", "sess-1_closet_bob"])
+    store.add_copy_deletions(["sess-1_closet_alice", "sess-1_closet_bob"])
     assert _rows(db, "SELECT is_local FROM closet_tombstones WHERE id = 'sess-1_closet_alice'") == [(1,)]
     old = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=3)
     conn = sqlite3.connect(str(db))
@@ -3258,13 +3120,13 @@ def test_a_claim_dated_ahead_does_not_suppress_a_recreation(tmp_path: Path) -> N
     db = tmp_path / "memories.db"
     seed, store = SeedEngine(db_path=db), TombstoneStore(db)
     seed.ingest(_memory("p", _turns()))
-    store.add_closets(["p_closet_alice"], now=datetime.now(timezone.utc) - timedelta(days=1))
+    store.add_copy_deletions(["p_closet_alice"], now=datetime.now(timezone.utc) - timedelta(days=1))
     store.claim_leaked_copy("p_closet_alice", datetime.now(timezone.utc) + timedelta(days=10))
 
     note = _cloud_row("p_closet_alice", "AN INDEPENDENT NOTE", when=datetime.now(timezone.utc) - timedelta(hours=1))
     result = pull(engine=seed, tombstones=store, client=_RecordingClient([note]), state=SyncState(), poppy_dir=tmp_path)
 
-    assert result.skipped_closets == 0
+    assert result.skipped_copies == 0
     assert result.applied_live == 1
     assert seed.get("p_closet_alice").content == "AN INDEPENDENT NOTE"
 
@@ -3290,7 +3152,7 @@ def test_the_leaked_copy_itself_is_still_suppressed_under_a_claim(tmp_path: Path
         engine=seed, tombstones=store, client=_RecordingClient([leaked]), state=SyncState(), poppy_dir=tmp_path
     )
 
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert seed.get("p_closet_alice") is None
 
 
@@ -3341,7 +3203,7 @@ def test_a_republished_copy_stays_suppressed_without_upload(tmp_path: Path) -> N
         engine=seed, tombstones=store, client=_RecordingClient([republished]), state=SyncState(), poppy_dir=tmp_path
     )
 
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert seed.get("p_closet_alice") is None
     assert store.announced_copy_claim("p_closet_alice") is not None
     assert "p_closet_alice" in _pending_ids(store)
@@ -3361,7 +3223,7 @@ def test_a_proven_copy_newer_than_the_record_is_still_suppressed(tmp_path: Path)
     _pull_leaked_pair(tmp_path, seed, store, when=when)
     copy_text = seed.get("p_closet_alice").content
     assert forget(seed, tmp_path, "p_closet_alice", tombstones=store).deleted is True
-    record = store.get_closet("p_closet_alice")
+    record = store.get_copy_deletion("p_closet_alice")
     assert record is not None
 
     ahead = _cloud_row("p_closet_alice", copy_text, when=datetime.now(timezone.utc) + timedelta(days=3))
@@ -3371,7 +3233,7 @@ def test_a_proven_copy_newer_than_the_record_is_still_suppressed(tmp_path: Path)
         engine=seed, tombstones=store, client=_RecordingClient([ahead]), state=SyncState(), poppy_dir=tmp_path
     )
 
-    assert result.skipped_closets == 1
+    assert result.skipped_copies == 1
     assert result.applied_live == 0
     assert seed.get("p_closet_alice") is None
     claimed = store.announced_copy_claim("p_closet_alice")
@@ -3399,7 +3261,7 @@ def test_a_pulled_copy_snapshot_replaces_an_older_entry_at_that_id(tmp_path: Pat
 
     assert store.get("p_closet_alice") is None
     assert restore(seed, tmp_path, "p_closet_alice", tombstones=store).found is False
-    assert store.get_closet("p_closet_alice") is not None
+    assert store.get_copy_deletion("p_closet_alice") is not None
 
 
 def test_a_newer_entry_at_that_id_survives_a_pulled_copy_snapshot(tmp_path: Path) -> None:
@@ -3622,7 +3484,7 @@ def test_reclaiming_an_id_cancels_its_pending_announcement(tmp_path: Path) -> No
     engine.ingest(_memory("sess-2026-01_closet_alice", "an independent note of my own"))
 
     assert _pending_ids(store) == ["sess-2026-01_closet_bob"]
-    assert store.get_closet("sess-2026-01_closet_alice") is None
+    assert store.get_copy_deletion("sess-2026-01_closet_alice") is None
 
     client = _RecordingClient(echo=True)
     push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
@@ -3640,14 +3502,14 @@ def test_reclaiming_an_id_cancels_its_pending_announcement(tmp_path: Path) -> No
         state=SyncState(),
         poppy_dir=tmp_path,
     )
-    assert result.skipped_closets == 0
+    assert result.skipped_copies == 0
     assert _pending_ids(store) == ["sess-2026-01_closet_bob"]
     assert engine.get("sess-2026-01_closet_alice").content == "an independent note of my own"
 
 
 def test_announcement_claims_compare_as_instants_across_offsets(tmp_path: Path) -> None:
     """A claim stamped ``12:00+02:00`` (10:00Z) must be advanced by a proven re-push at ``11:00Z``."""
-    from poppy.engine._closet_marker import LEGACY_CLOSET_TABLE, rearm_legacy_announcement
+    from poppy.engine._legacy_copies import COPY_CLAIM_TABLE, rearm_legacy_announcement
 
     db = tmp_path / "memories.db"
     _bloom(db)
@@ -3655,7 +3517,7 @@ def test_announcement_claims_compare_as_instants_across_offsets(tmp_path: Path) 
     rearm_legacy_announcement(conn, "x_closet_alice", "2026-07-01T12:00:00+02:00")
     rearm_legacy_announcement(conn, "x_closet_alice", "2026-07-01T11:00:00+00:00")
     conn.commit()
-    sql = f"SELECT legacy_updated_at FROM {LEGACY_CLOSET_TABLE} WHERE id = ?"
+    sql = f"SELECT legacy_updated_at FROM {COPY_CLAIM_TABLE} WHERE id = ?"
     (stored,) = conn.execute(sql, ("x_closet_alice",)).fetchone()
     conn.close()
     assert datetime.fromisoformat(stored) == datetime(2026, 7, 1, 11, 0, tzinfo=timezone.utc)
@@ -3669,23 +3531,112 @@ def test_a_copy_deletion_record_outlives_the_window_while_its_announcement_is_pe
     the record that makes pull skip the cloud's stale copy. The next pull then
     re-ingested the leaked copy and that ingest cancelled the announcement.
     """
-    from poppy.engine._closet_marker import mark_legacy_announced, rearm_legacy_announcement
+    from poppy.engine._legacy_copies import mark_legacy_announced, rearm_legacy_announcement
 
     db = tmp_path / "memories.db"
     _bloom(db)
     store = TombstoneStore(db)
     eight_days_ago = datetime.now(timezone.utc) - timedelta(days=8)
-    store.add_closets(["x_closet_alice", "y_closet_bob"], now=eight_days_ago)
+    store.add_copy_deletions(["x_closet_alice", "y_closet_bob"], now=eight_days_ago)
     conn = sqlite3.connect(str(db))
     rearm_legacy_announcement(conn, "x_closet_alice", eight_days_ago.isoformat())
     conn.commit()
 
     store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
-    assert store.get_closet("x_closet_alice") is not None  # announcement still pending
-    assert store.get_closet("y_closet_bob") is None  # nothing pending: window + watermark apply
+    assert store.get_copy_deletion("x_closet_alice") is not None  # announcement still pending
+    assert store.get_copy_deletion("y_closet_bob") is None  # nothing pending: window + watermark apply
 
     mark_legacy_announced(conn, ["x_closet_alice"])
     conn.commit()
     conn.close()
     store.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat())
-    assert store.get_closet("x_closet_alice") is None
+    assert store.get_copy_deletion("x_closet_alice") is None
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_public_accessor_hides_an_inferred_copy(tmp_path, engine_kind):
+    db = _tier_b_store(tmp_path)
+    engine = SeedEngine(db_path=db) if engine_kind == "seed" else _bloom(db)
+    copy_id = "sess-2026-01_closet_alice"
+    assert engine.get(copy_id) is not None
+    assert engine.get_public(copy_id) is None
+    assert engine.get_public("missing") is None
+    assert engine.get_public("sess-2026-01") == engine.get("sess-2026-01")
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("operation", ["forget", "edit", "expire"])
+def test_parent_removal_does_not_expose_a_hidden_copys_old_snapshot(tmp_path, engine_kind, operation):
+    from dataclasses import replace
+
+    db = _tier_b_store(tmp_path)
+    engine = SeedEngine(db_path=db) if engine_kind == "seed" else _bloom(db)
+    copy_id = "sess-2026-01_closet_alice"
+    copy = engine.get(copy_id)
+    store = TombstoneStore(db)
+    store.add(copy)
+    parent = engine.get("sess-2026-01")
+    if operation == "forget":
+        forget(engine, tmp_path, parent.id, tombstones=store)
+    elif operation == "edit":
+        engine.ingest(replace(parent, content="replacement"))
+    else:
+        engine.ingest(replace(parent, expires_at=datetime.now(timezone.utc) - timedelta(days=1)))
+        engine.purge_expired()
+    assert engine.get(copy_id) is None
+    assert store.get(copy_id) is None
+    assert store.get_public(copy_id) is None
+    assert copy.content not in json.dumps([t.memory.content for t in store.list_all()])
+
+
+def test_push_rechecks_a_snapshot_cleared_by_parent_redaction(tmp_path, monkeypatch):
+    db = _tier_b_store(tmp_path)
+    engine = _bloom(db)
+    copy = engine.get("sess-2026-01_closet_alice")
+    store = TombstoneStore(db)
+    store.add(copy)
+    store.note_remote_memories([copy.id], "https://trags.test")
+    original = store.list_all
+
+    def scan_then_redact():
+        snapshots = original()
+        engine.delete("sess-2026-01")
+        return snapshots
+
+    monkeypatch.setattr(store, "list_all", scan_then_redact)
+    client = _RecordingClient()
+    result = push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert result.sent_live == 0
+    assert result.sent_tombstones == 0
+    assert result.errors == 0
+    assert client.upserts == []
+
+
+@pytest.mark.parametrize("command", ["push", "pull", "run"])
+def test_sync_preview_uses_open_time_cleanup(tmp_path, monkeypatch, command):
+    import importlib
+
+    from click.testing import CliRunner
+
+    cli_module = importlib.import_module("poppy.cli.main")
+    db = _legacy_store(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"engine": "seed"}))
+
+    class Client(_RecordingClient):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    client = Client()
+    monkeypatch.setattr(cli_module, "_sync_client", lambda: (client, client.base_url))
+    result = CliRunner().invoke(
+        cli_module.cli, ["sync", command, "--dry-run"], env={"POPPY_DIR": str(tmp_path), "HOME": str(tmp_path)}
+    )
+    assert result.exit_code == 0, result.output
+    assert MARKER_COLUMN in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
+    assert _all_ids(db) == ["sess-2026-01"]
+    assert client.upserts == []
+    assert "one-time marker migration" not in result.output
+    assert not (tmp_path / "sync_state.json").exists()

@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `poppy doctor` no longer reports per-speaker copy counts or the retired
+  migration diagnostics.
+- `poppy sync push|pull|run --dry-run` no longer refuses to run on a store that
+  has not been upgraded yet. Opening a store always applies its pending one-time
+  upgrades, as every other command already did, so a dry run now previews the
+  sync instead of stopping. It still sends nothing and receives nothing.
 - Anonymous usage telemetry is off until you turn it on. Poppy asks once, on
   the first run in a terminal, and the default is no; `poppy telemetry on|off`
   answers it too. Nothing is sent, and the daily PyPI update check does not
@@ -44,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Exact-id reads and edits now treat hidden copies retained from earlier
+  releases as missing, including MCP recall, CLI confirmations, and dashboard
+  details and Trash. Internal cleanup still removes them without exposing text.
 - The OpenAI-compatible backend works on a default install. It called the
   endpoint through an SDK that Poppy does not depend on, so configuring a model
   and an API key produced empty consolidation and conflict results behind one

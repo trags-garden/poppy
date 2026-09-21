@@ -302,7 +302,7 @@ class PoppyMcpServer:
         ids = ids[:MAX_RECALL_FULL_IDS]
         memories = []
         for mem_id in ids:
-            m = self._engine.get(mem_id)
+            m = self._engine.get_public(mem_id)
             if m is None:
                 continue
             memories.append(

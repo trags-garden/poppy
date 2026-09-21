@@ -212,7 +212,7 @@ def forget(
     ``tombstones`` lets a caller reuse an already-open store.
     """
     from poppy.db import write_gate
-    from poppy.engine._closet_marker import is_marked_closet
+    from poppy.engine._legacy_copies import is_marked_copy
     from poppy.ui.tombstones import TombstoneStore
 
     reader = reader if reader is not None else engine
@@ -234,29 +234,16 @@ def forget(
                 already_tombstoned=existing is not None,
             )
 
-        # Marked, or unmarked but PROVEN to be a copy (a store that never ran
-        # bloom holds a pulled leaked copy unmarked; the claim also announces
-        # the cloud row). Either way the id names a derived per-speaker copy,
-        # not a memory of the user's, and it is deleted content-free.
-        if is_marked_closet(engine, memory_id) or store.claim_proven_unmarked_copy(memory_id):
-            # ``retrieve`` still surfaces closets, so an agent can reach
-            # one of these ids and ask to forget it — and the ordinary path below
-            # would snapshot the speaker text into ``ui_tombstones`` and push it
-            # to the cloud as the body of a soft-delete. Delete it and record the
-            # deletion content-free instead.
-            #
-            # ``tombstone`` stays None because there is no restore window to
-            # report: nothing was snapshotted, so nothing can be restored. The
-            # default engine re-derives closets from their parent instead.
-            #
-            # An OLDER client may have snapshotted this very copy into Trash
-            # before it was re-derived. That entry would outlive the row about
-            # to go, restorable and pushable with the speaker text, so it goes
-            # first — while the row is still here to name its parent.
+        # Rows retained from older releases must be deleted without snapshotting
+        # their speaker text. The frozen classifier also protects unmarked copies
+        # left by an older client sharing the store.
+        if is_marked_copy(engine, memory_id) or store.claim_proven_unmarked_copy(memory_id):
+            # An older client may already have left a Trash snapshot. Clear it
+            # while the live row still supplies the provenance needed to grade it.
             store.clear_copy_snapshot(memory_id)
             deleted = engine.delete(memory_id)
             if deleted:
-                store.add_closets([memory_id])
+                store.add_copy_deletions([memory_id])
             ts = None
             tombstoned = deleted
         else:
@@ -329,7 +316,7 @@ def restore(
     Returns a :class:`RestoreResult`; ``found=False`` when no tombstone exists.
     """
     from poppy.db import write_gate
-    from poppy.lifecycle import refuse_if_derived_copy
+    from poppy.lifecycle import refuse_if_legacy_copy
     from poppy.ui.tombstones import TombstoneStore
 
     store = tombstones if tombstones is not None else TombstoneStore(poppy_dir / "memories.db")
@@ -338,7 +325,7 @@ def restore(
     # the sync worker, or a concurrent forget, cannot land between the check and
     # the ingest.
     with write_gate(poppy_dir):
-        ts = store.get(memory_id)
+        ts = store.get_public(memory_id)
         if ts is None:
             return RestoreResult(found=False)
 
@@ -346,9 +333,9 @@ def restore(
         # any more, but a tombstone left by an older build could still name one,
         # and restoring it would re-ingest the copy as an ordinary memory —
         # unmarked, listed, and pushed live with the redacted text.
-        refuse_if_derived_copy(engine, memory_id, "restore")
+        refuse_if_legacy_copy(engine, memory_id, "restore")
 
-        live = engine.get(memory_id)
+        live = engine.get_public(memory_id)
 
         # That guard reads the LIVE row, and the case it cannot see is the one
         # with no live row at all: a 0.2.4 client forgot a copy and KEPT its

@@ -297,3 +297,19 @@ def normalise_stored_timestamps(conn: sqlite3.Connection) -> int:
     if own_txn:
         conn.commit()
     return changed
+
+
+def later_stamp(a: str | None, b: str | None) -> str | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    try:
+        left, right = (datetime.fromisoformat(a), datetime.fromisoformat(b))
+    except (ValueError, OverflowError, TypeError):
+        return a
+    if left.tzinfo is None:
+        left = left.replace(tzinfo=timezone.utc)
+    if right.tzinfo is None:
+        right = right.replace(tzinfo=timezone.utc)
+    return a if left >= right else b

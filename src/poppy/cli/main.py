@@ -1,4 +1,3 @@
-import contextlib
 import datetime
 import errno
 import json
@@ -411,7 +410,7 @@ def list_memories(
 def forget(memory_id: str, yes: bool):
     """Delete a memory by ID."""
     engine = _get_engine()
-    mem = engine.get(memory_id)
+    mem = engine.get_public(memory_id)
     if mem is None:
         click.echo(f"Memory {memory_id} not found.")
         return
@@ -2157,62 +2156,6 @@ def _sync_tombstones():
     return TombstoneStore(_get_poppy_dir() / "memories.db")
 
 
-def _dry_run_stopped_by_pending_migration(dry_run: bool) -> bool:
-    """Whether a ``--dry-run`` sync must stop before it touches the store at all.
-
-    Opening either engine on a PRE-MARKER store runs the one-time per-speaker copy
-    migration as part of construction: it classifies every copy-shaped row,
-    rewrites the proven ones and queues cloud cleanup announcements. All of that is
-    idempotent and lossless, and a dry run sends nothing — but it is not READ-ONLY,
-    and "show me what would happen" has to be.
-
-    Doing half of it is not an option either. The column's presence is what makes
-    the migration run once, so adding it without the classification would leave
-    every legacy copy unmarked for ever: listed, synced, and immune to redaction.
-    So a dry run on such a store does nothing and says why; the next real sync
-    migrates and syncs as usual.
-
-    A store that cannot be opened for the check (an encrypted one with no key
-    available) answers False and takes the ordinary path, which is what it did
-    before this guard existed.
-
-    Called AFTER the remote-configuration check, so a store with no Trags key still
-    gets that error rather than this message: an unconfigured remote is what the user
-    has to fix first either way. Opening the store to ask the question can itself
-    apply ``PRAGMA journal_mode = WAL``, so the message says the store was opened,
-    not that nothing was touched.
-    """
-    if not dry_run:
-        return False
-    from poppy.db import connect as connect_db
-    from poppy.engine._closet_marker import has_marker
-
-    db_path = _get_poppy_dir() / "memories.db"
-    if not db_path.exists():
-        return False
-    try:
-        conn = connect_db(db_path)
-    except Exception:
-        return False
-    try:
-        has_memories = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
-        pending = bool(has_memories) and not has_marker(conn)
-    except Exception:
-        return False
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
-    if not pending:
-        return False
-    click.echo(
-        "This store still needs the one-time marker migration (the column, plus on a "
-        "bloom store the per-speaker copy classification), which a dry run must not "
-        "perform.\nThe store was opened but not migrated, and nothing was sent. Run the "
-        "same command without --dry-run to migrate and sync."
-    )
-    return True
-
-
 def _abort_on_auth_error(exc, url: str, *, record: bool = True) -> None:
     """Turn a 401 from Trags into a clean message + Abort, not a raw traceback.
 
@@ -2317,20 +2260,17 @@ def _print_pull(res) -> None:
     click.echo(
         f"  pull: {res.applied_live} live, {res.applied_tombstones} tombstones, "
         f"{res.skipped_stale} skipped (local newer), "
-        f"{res.skipped_closets} skipped (derived copies), {res.errors} errors"
+        f"{res.skipped_copies} skipped (derived copies), {res.errors} errors"
     )
 
 
 @sync_group.command("push")
-@click.option("--dry-run", is_flag=True, help="Show what would be sent without writing to Trags.")
+@click.option("--dry-run", is_flag=True, help="Preview what would be sent; store upgrades still run on open.")
 def sync_push(dry_run: bool):
     """Send local memories + tombstones to Trags (since the last push watermark)."""
     from poppy.sync import TragsAuthError, TragsQuotaError, TragsTransportError, load, push
 
     client, url = _sync_client()
-    if _dry_run_stopped_by_pending_migration(dry_run):
-        client.close()
-        return
     try:
         with client:
             engine = _get_engine()
@@ -2355,15 +2295,12 @@ def sync_push(dry_run: bool):
 
 
 @sync_group.command("pull")
-@click.option("--dry-run", is_flag=True, help="Show what would be applied without touching local DB.")
+@click.option("--dry-run", is_flag=True, help="Preview incoming changes; store upgrades still run on open.")
 def sync_pull(dry_run: bool):
     """Apply Trags rows newer than our last pull watermark."""
     from poppy.sync import TragsAuthError, TragsTransportError, load, pull
 
     client, url = _sync_client()
-    if _dry_run_stopped_by_pending_migration(dry_run):
-        client.close()
-        return
     try:
         with client:
             engine = _get_engine()
@@ -2421,16 +2358,13 @@ def sync_status():
 
 
 @sync_group.command("run")
-@click.option("--dry-run", is_flag=True, help="Show what would happen without writing anywhere.")
+@click.option("--dry-run", is_flag=True, help="Preview sync changes; store upgrades still run on open.")
 def sync_run(dry_run: bool):
     """Pull then push — full bidirectional sync."""
     from poppy.sync import TragsAuthError, TragsQuotaError, TragsTransportError
     from poppy.sync import sync as do_sync
 
     client, url = _sync_client()
-    if _dry_run_stopped_by_pending_migration(dry_run):
-        client.close()
-        return
     try:
         with client:
             engine = _get_engine()
@@ -2459,91 +2393,6 @@ def sync_auto_worker():
     from poppy.sync.auto import run_worker
 
     run_worker(_get_poppy_dir())
-
-
-def _closet_store_conn(poppy_dir: Path):
-    """Open the memory store for a read-only doctor probe, or None.
-
-    Through ``poppy.db.connect`` rather than ``sqlite3.connect``: the latter
-    bypasses the encryption gate, so on an encrypted store it fails to read the
-    tables and the doctor line silently disappears on exactly the installs that
-    most need it.
-    """
-    from poppy.db import connect as connect_db
-
-    db_path = poppy_dir / "memories.db"
-    if not db_path.exists():
-        return None
-    return connect_db(db_path)
-
-
-def _closet_backup_status(poppy_dir: Path) -> tuple[int, str | None]:
-    """(rows, recoverable-until) for the closet migration's pre-image table.
-
-    Returns (0, None) when the store, or the table, is not there yet.
-    """
-    conn = _closet_store_conn(poppy_dir)
-    if conn is None:
-        return (0, None)
-    try:
-        row = conn.execute("SELECT COUNT(*), MIN(migrated_at) FROM closet_migration_backup").fetchone()
-    except Exception:
-        return (0, None)
-    finally:
-        conn.close()
-    count, oldest = (row[0], row[1]) if row else (0, None)
-    if not count or not oldest:
-        return (0, None)
-    from poppy.ui.tombstones import TTL_DAYS
-
-    deadline = datetime.datetime.fromisoformat(oldest) + datetime.timedelta(days=TTL_DAYS)
-    return (count, deadline.date().isoformat())
-
-
-def _closet_repair_counts(poppy_dir: Path) -> tuple[int, int]:
-    """(copies adopted on inference, copy-shaped rows with no parent to check).
-
-    Both are reported and never acted on. Rewriting an inferentially-adopted copy
-    would destroy a curated split if the inference is wrong, and purging an
-    orphan destroys the only copy of whatever it is — so both wait for the
-    explicit repair command rather than a guess made at store open.
-    """
-    conn = _closet_store_conn(poppy_dir)
-    if conn is None:
-        return (0, 0)
-    try:
-        from poppy.engine._closet_marker import count_adopted_pending_rebuild, count_orphan_shaped_rows
-
-        return (count_adopted_pending_rebuild(conn), count_orphan_shaped_rows(conn))
-    except Exception:
-        return (0, 0)
-    finally:
-        conn.close()
-
-
-def _unmarked_copies_count(poppy_dir: Path) -> int:
-    """How many per-speaker copies an older Poppy wrote that this one has not marked.
-
-    Counted, never acted on. Marking them means re-running an inference over
-    unmarked data, and doing that on every store open turned a one-time
-    migration into a standing destructive rule. The one-time migration
-    is the only place that inference belongs, so a store sharing ``~/.poppy``
-    with an older Poppy gets a diagnostic here instead of a silent repair.
-
-    Only rows a LIVE parent re-derives exactly are counted, so this never
-    reports a real memory whose id merely looks like a copy.
-    """
-    conn = _closet_store_conn(poppy_dir)
-    if conn is None:
-        return 0
-    try:
-        from poppy.engine._closet_marker import count_unmarked_derivable_copies
-
-        return count_unmarked_derivable_copies(conn)
-    except Exception:
-        return 0
-    finally:
-        conn.close()
 
 
 @cli.command()
@@ -2672,59 +2521,6 @@ def doctor():
         line("Trags key", "OK", "none (Trags sync not configured; optional)")
     else:
         line("Trags key", "OK", "keychain")
-
-    # Pre-images the one-time closet migration kept. Surfaced here because it is
-    # otherwise invisible: if the migration misread a row, this line is the only
-    # thing that tells the user it is still recoverable, and until when.
-    try:
-        backup_rows, backup_deadline = _closet_backup_status(poppy_dir)
-    except Exception:
-        backup_rows, backup_deadline = (0, None)
-    if backup_rows:
-        line(
-            "closet migration backup",
-            "WARN",
-            f"{backup_rows} row(s) snapshotted before rewrite or removal, recoverable until {backup_deadline}",
-            "recover with: sqlite3 "
-            f"{poppy_dir / 'memories.db'} "
-            '"SELECT id, action, content FROM closet_migration_backup;"',
-        )
-
-    # Counted, not repaired: see `_unmarked_copies_count`.
-    try:
-        unmarked_copies = _unmarked_copies_count(poppy_dir)
-    except Exception:
-        unmarked_copies = 0
-    if unmarked_copies:
-        line(
-            "per-speaker copies",
-            "WARN",
-            f"{unmarked_copies} written by an older Poppy are unmarked",
-            "they are listed and synced like ordinary memories and a redaction "
-            "will not reach them; use a single Poppy version against this store",
-        )
-
-    try:
-        adopted_pending, orphan_shaped = _closet_repair_counts(poppy_dir)
-    except Exception:
-        adopted_pending, orphan_shaped = (0, 0)
-    if adopted_pending:
-        line(
-            "per-speaker copies",
-            "WARN",
-            f"{adopted_pending} adopted copies pending rebuild",
-            "their text predates their memory's last edit; they are hidden, and "
-            "forgetting or editing the text of that memory removes them, but "
-            "nothing rewrites them until repaired",
-        )
-    if orphan_shaped:
-        line(
-            "per-speaker copies",
-            "WARN",
-            f"{orphan_shaped} copy-shaped rows have no memory to check against",
-            "left untouched because nothing can confirm what they are; they need "
-            "a human look before anything removes them",
-        )
 
     from poppy.capture.redaction import MIN_CUSTOM_SECRET_LENGTH, load_custom_redaction, valid_env_var_name
 

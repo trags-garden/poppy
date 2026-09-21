@@ -66,7 +66,7 @@ def get_engine(
     except (ImportError, ValueError) as e:
         if error_sink is not None:
             error_sink(_engine_failure_description(name, e))
-        # Best-first substitutes: bloom is the full closet-hybrid engine; seed is
+        # Best-first substitutes: bloom is the full hybrid retrieval engine; seed is
         # the guaranteed FTS-only floor.
         last_exc: Exception = e
         for candidate in ("bloom", "seed"):

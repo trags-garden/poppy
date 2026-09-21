@@ -20,25 +20,24 @@ from pathlib import Path
 
 from poppy.db import apply_row_factory
 from poppy.db import connect as connect_db
-from poppy.engine._closet_marker import (
-    CLOSET_BACKUP_DDL,
-    CLOSET_TOMBSTONE_DDL,
-    LEGACY_CLOSET_DDL,
-    LEGACY_CLOSET_TABLE,
+from poppy.engine._legacy_copies import (
+    BACKUP_DDL,
+    COPY_CLAIM_DDL,
+    COPY_CLAIM_TABLE,
+    COPY_DELETION_DDL,
     announced_copy_claim,
-    chunked,
     claim_proven_unmarked_copy,
     clear_copy_snapshot,
     grade_copy_snapshot,
+    is_marked_copy,
     is_proven_unmarked_copy,
     mark_legacy_announced,
     pending_legacy_announcements,
     rearm_legacy_announcement,
-    record_closet_tombstones,
+    record_copy_deletions,
     refuse_restorable_copy_snapshot,
-    utc_iso,
 )
-from poppy.engine._timestamps import repush_stamp
+from poppy.engine._timestamps import chunked, repush_stamp, utc_iso
 from poppy.models import Memory, Source
 
 TTL_DAYS = 7
@@ -70,20 +69,10 @@ CREATE TABLE IF NOT EXISTS sync_remote_memories (
 );
 """
 
-# Deletions of the default engine's synthetic per-speaker copies, kept apart from
-# `ui_tombstones` and holding NO memory columns at all.
-#
-# Separate because of what those two facts must never allow. A closet's content
-# is a verbatim copy of the parent's speaker turns, and the whole point of the
-# delete is that the text is gone — so it must not be snapshotted anywhere, and
-# an id plus a timestamp is all that is needed to tell the cloud to drop its
-# copy. Keeping them out of `ui_tombstones` also means the UI never lists them as
-# restorable deletions and `restore` can never re-ingest an empty row.
-#
-# The DDL is owned by the engine side (the engines are what delete closets, and
-# the marker migration runs before any store is constructed); it is applied here
-# too so opening a TombstoneStore is enough to make the table exist.
-SCHEMA += CLOSET_TOMBSTONE_DDL + CLOSET_BACKUP_DDL + LEGACY_CLOSET_DDL
+# Historical copy deletions carry only an id and a timestamp. Keeping them
+# separate from Trash prevents redacted speaker text from becoming restorable.
+# Both engines and the Trash store preserve these on-disk tables for old stores.
+SCHEMA += COPY_DELETION_DDL + BACKUP_DDL + COPY_CLAIM_DDL
 
 
 def _migrate_columns(conn: sqlite3.Connection) -> None:
@@ -144,13 +133,8 @@ class Tombstone:
 
 
 @dataclass(frozen=True)
-class ClosetTombstone:
-    """A deletion of one synthetic per-speaker copy: an id and a time, nothing else.
-
-    Deliberately not a :class:`Tombstone`. It carries no memory snapshot because
-    the text it refers to is the text being redacted, and it is not restorable —
-    the default engine re-derives closets from the parent whenever it re-ingests.
-    """
+class CopyDeletion:
+    """A historical copy deletion, with no content to expose or restore."""
 
     id: str
     tombstoned_at: datetime
@@ -344,35 +328,25 @@ class TombstoneStore:
                 [(path, ts.memory.id, ts.token) for ts in tombstones],
             )
 
-    def add_closets(
+    def add_copy_deletions(
         self,
         memory_ids: list[str],
         *,
         now: datetime | None = None,
         applying_remote_deletion: bool = False,
         authoritative: bool = False,
-    ) -> list[ClosetTombstone]:
-        """Record deletions of the parent's synthetic per-speaker copies.
+    ) -> list[CopyDeletion]:
+        """Retain content-free deletion evidence for copies from older releases.
 
-        Ids and one timestamp — never the rows themselves. Push turns each into a
-        content-free soft-delete so a copy an earlier client leaked to the cloud
-        is removed there too, without the redacted speaker text ever reaching the
-        wire.
-
-        ``now`` is when the deletion HAPPENED. Pass the incoming timestamp when
-        recording one pulled from another device; see ``record_closet_tombstones``
-        for why receipt time is wrong.
-
-        ``authoritative`` marks a deletion that is its own event rather than
-        another sighting of one — a server-side cleanup of a leaked copy — and
-        lets it RAISE an older record. See ``record_closet_tombstones``.
+        Use the event's timestamp for a remote deletion so it cannot suppress a
+        newer real memory at the same id. Local deletions use the current time.
         """
         if not memory_ids:
             return []
         ids = list(memory_ids)
         rows = []
         with self._lock:
-            record_closet_tombstones(
+            record_copy_deletions(
                 self._conn,
                 ids,
                 when=now,
@@ -388,10 +362,10 @@ class TombstoneStore:
                         batch,
                     ).fetchall()
                 )
-        return [ClosetTombstone(id=r["id"], tombstoned_at=datetime.fromisoformat(r["tombstoned_at"])) for r in rows]
+        return [CopyDeletion(id=r["id"], tombstoned_at=datetime.fromisoformat(r["tombstoned_at"])) for r in rows]
 
     def claim_proven_unmarked_copy(self, memory_id: str) -> bool:
-        """Whether a live unmarked row at ``memory_id`` is a PROVEN copy; claims its cloud row if so."""
+        """Prove an old unmarked copy and retain its deletion evidence if so."""
         with self._lock:
             claimed = claim_proven_unmarked_copy(self._conn, memory_id)
             self._conn.commit()
@@ -421,11 +395,10 @@ class TombstoneStore:
             )
 
     def claim_leaked_copy(self, memory_id: str, seen_at: datetime) -> None:
-        """Queue the cloud's copy of a PROVEN leak for deletion, stamped ``seen_at``.
+        """Retain a proven legacy copy claim at its observed timestamp.
 
-        TIER A EVIDENCE ONLY — the stamp is an ownership claim, and one taken from a
-        row not proven to be ours can tie with, and so overwrite, a real memory
-        another device wrote at that id. See ``rearm_legacy_announcement``.
+        The claim protects old deletion records from premature Trash purge.
+        Only proven copies qualify; a claim must never hide a real memory.
         """
         with self._lock:
             rearm_legacy_announcement(self._conn, memory_id, seen_at.isoformat())
@@ -454,7 +427,7 @@ class TombstoneStore:
             self._conn.commit()
         return cleared
 
-    def get_closet(self, memory_id: str) -> ClosetTombstone | None:
+    def get_copy_deletion(self, memory_id: str) -> CopyDeletion | None:
         """The recorded deletion of ``memory_id`` as a derived copy, if any."""
         with self._lock:
             row = self._conn.execute(
@@ -462,7 +435,7 @@ class TombstoneStore:
             ).fetchone()
         if row is None:
             return None
-        return ClosetTombstone(id=row["id"], tombstoned_at=datetime.fromisoformat(row["tombstoned_at"]))
+        return CopyDeletion(id=row["id"], tombstoned_at=datetime.fromisoformat(row["tombstoned_at"]))
 
     def announced_copy_claim(self, memory_id: str) -> datetime | None:
         """Whether this store ever PROVED the id to be a leaked copy, and when it was seen.
@@ -487,7 +460,7 @@ class TombstoneStore:
         # one would raise rather than answer.
         return claimed if claimed.tzinfo is not None else claimed.replace(tzinfo=timezone.utc)
 
-    def has_closet_tombstone(self, memory_id: str) -> bool:
+    def has_copy_deletion(self, memory_id: str) -> bool:
         """Whether this device deleted ``memory_id`` as a derived per-speaker copy.
 
         Read by sync's pull: while the deletion is inside its retention window,
@@ -501,15 +474,7 @@ class TombstoneStore:
         return row is not None
 
     def pending_legacy_announcements(self) -> list[tuple[str, str | None]]:
-        """``(id, pre-migration updated_at)`` the cloud has not confirmed deleting.
-
-        These are the ONLY ids ever announced to the cloud. A copy created after
-        the marker fix is local-only, so there is nothing up there to delete and
-        announcing it would remove any real cloud memory sharing the id.
-
-        The timestamp is what the announcement is stamped with, so the server
-        decides whether the remote row is still the leaked copy we mean.
-        """
+        """Legacy claims whose deletion evidence still needs to be retained."""
         with self._lock:
             return pending_legacy_announcements(self._conn)
 
@@ -560,7 +525,7 @@ class TombstoneStore:
     def mark_legacy_announced(
         self, memory_ids: list[str] | list[tuple[str, str | None]], *, when: datetime | None = None
     ) -> None:
-        """Clear the pending flag. Called only after the server accepted the delete.
+        """Clear a legacy pending flag after its deletion evidence is settled.
 
         Pass ``(id, stamp)`` pairs to clear only the exact claim that was sent.
         """
@@ -568,12 +533,12 @@ class TombstoneStore:
             mark_legacy_announced(self._conn, memory_ids, when=when)
             self._conn.commit()
 
-    def list_closets(self) -> list[ClosetTombstone]:
+    def list_copy_deletions(self) -> list[CopyDeletion]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, tombstoned_at FROM closet_tombstones ORDER BY tombstoned_at DESC"
             ).fetchall()
-        return [ClosetTombstone(id=r["id"], tombstoned_at=datetime.fromisoformat(r["tombstoned_at"])) for r in rows]
+        return [CopyDeletion(id=r["id"], tombstoned_at=datetime.fromisoformat(r["tombstoned_at"])) for r in rows]
 
     def remove(self, memory_id: str, *, token: str | None = None) -> bool:
         """Delete a tombstone; returns whether a row was actually removed.
@@ -602,6 +567,18 @@ class TombstoneStore:
         if row is None:
             return None
         return self._row_to_tombstone(row)
+
+    def get_public(self, memory_id: str) -> Tombstone | None:
+        """Read Trash without exposing a snapshot of a hidden live row."""
+        with self._lock:
+            if is_marked_copy(self, memory_id):
+                return None
+            return self.get(memory_id)
+
+    def list_public(self) -> list[Tombstone]:
+        """Keep hidden live rows out of Trash and combined dashboard listings."""
+        with self._lock:
+            return [t for t in self.list_all() if not is_marked_copy(self, t.memory.id)]
 
     def list_all(self) -> list[Tombstone]:
         with self._lock:
@@ -656,28 +633,18 @@ class TombstoneStore:
                     (cutoff, pushed_through, require_sent),
                 )
                 purged = cursor.rowcount
-                # A closet deletion record is what makes pull SKIP the cloud's
-                # stale copy of that id. It is never pushed itself; the cloud is
-                # told through `legacy_closet_ids`, a separate queue with its own
-                # transport. So the ordinary push watermark says nothing about
-                # whether that announcement has landed: an unrelated note can
-                # advance it while every announcement is still failing. Keep
-                # the record while its announcement is pending, or the next pull
-                # re-ingests the leaked copy as an ordinary memory, and that
-                # ingest cancels the announcement too. Once the cloud has
-                # accepted the deletion, the window and the purge bound apply.
+                # A historical copy deletion record makes pull skip the cloud's
+                # stale copy of that id. Pending legacy claims preserve evidence
+                # for old speaker snapshots even after the ordinary Trash window.
+                # Store-open cleanup retires those claims together with recording
+                # deletion evidence in the sync ledger.
                 self._conn.execute(
                     f"""DELETE FROM closet_tombstones WHERE tombstoned_at < ? AND tombstoned_at <= ?
-                    AND id NOT IN (SELECT id FROM {LEGACY_CLOSET_TABLE} WHERE announce_pending = 1)""",
+                    AND id NOT IN (SELECT id FROM {COPY_CLAIM_TABLE} WHERE announce_pending = 1)""",
                     (cutoff, pushed_through),
                 )
-            # `legacy_closet_ids` is deliberately NOT purged here. It is an
-            # announcement queue, not a deletion record: a pending row is work
-            # the cloud still owes, and ageing it out would leave leaked text up
-            # there for ever on a device that was offline for a week.
-            #
-            # Pre-images the marker migration kept so a misclassification stays
-            # recoverable. Nothing to push, so the window alone decides.
+            # Legacy claims outlive the Trash window. Migration pre-images have
+            # no remote work and age out on the window alone.
             self._conn.execute("DELETE FROM closet_migration_backup WHERE migrated_at < ?", (cutoff,))
             self._conn.commit()
             return purged

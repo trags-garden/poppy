@@ -12,6 +12,43 @@ from poppy.engine.seed import SeedEngine
 from poppy.models import Memory, Source
 
 
+@pytest.mark.parametrize("snapshot", [False, True])
+@pytest.mark.parametrize(
+    "method,suffix,body",
+    [
+        ("get", "", None),
+        ("patch", "", {"project": "other"}),
+        ("post", "/supersede", {"content": "replacement"}),
+        ("post", "/restore", None),
+    ],
+)
+def test_exact_id_endpoints_hide_retained_copy(app_client, hidden_memory_store, snapshot, method, suffix, body):
+    from poppy.ui.tombstones import TombstoneStore
+
+    engine, memory = hidden_memory_store
+    if snapshot:
+        TombstoneStore(engine._db_path).add(memory)
+    kwargs = {"json": body} if body is not None else {}
+    hidden = app_client.request(method, f"/api/memories/{memory.id}{suffix}", **kwargs)
+    missing = app_client.request(method, f"/api/memories/missing{suffix}", **kwargs)
+    assert hidden.status_code == missing.status_code == 404
+    assert hidden.text.replace(memory.id, "missing") == missing.text
+    assert memory.content not in hidden.text
+    assert engine.get(memory.id) == memory
+
+
+@pytest.mark.parametrize("scope", ["active", "tombstoned", "all"])
+def test_lists_hide_retained_copy_snapshots(app_client, hidden_memory_store, scope):
+    from poppy.ui.tombstones import TombstoneStore
+
+    engine, memory = hidden_memory_store
+    TombstoneStore(engine._db_path).add(memory)
+    response = app_client.get("/api/memories", params={"scope": scope})
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert memory.content not in response.text
+
+
 def _ingest(engine: SeedEngine, mid: str, content: str, expires_at=None) -> Memory:
     n = datetime.now(timezone.utc)
     m = Memory(

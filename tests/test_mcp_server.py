@@ -9,6 +9,25 @@ from poppy.mcp_server.server import PoppyMcpServer
 from poppy.models import Memory, Source
 
 
+@pytest.mark.asyncio
+async def test_exact_id_tools_hide_retained_copy(hidden_memory_store, tmp_path):
+    import json
+
+    engine, memory = hidden_memory_store
+    handler = PoppyMcpServer(poppy_dir=tmp_path)
+    handler._engine = engine
+    full = await handler.handle_recall_full([memory.id])
+    assert full == await handler.handle_recall_full(["missing"]) == {"memories": []}
+    edit = await handler.handle_edit(id=memory.id, project="other")
+    missing_edit = await handler.handle_edit(id="missing", project="other")
+    assert json.dumps(edit).replace(memory.id, "missing") == json.dumps(missing_edit)
+    supersede = await handler.handle_remember(content="replacement", supersedes=memory.id)
+    missing_supersede = await handler.handle_remember(content="replacement", supersedes="missing")
+    assert json.dumps(supersede).replace(memory.id, "missing") == json.dumps(missing_supersede)
+    assert memory.content not in json.dumps([full, edit, supersede])
+    assert engine.get(memory.id) == memory
+
+
 def _stub_ctx(name):
     """A FastMCP-Context-shaped stub carrying clientInfo.name."""
     return SimpleNamespace(

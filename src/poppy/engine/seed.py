@@ -6,12 +6,13 @@ from pathlib import Path
 
 from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
-from poppy.engine._closet_marker import (
+from poppy.engine._legacy_copies import (
     clear_marked_copies,
     clear_retired_records,
-    ensure_closet_side_tables,
+    ensure_legacy_copy_tables,
+    is_proven_unmarked_copy,
+    mark_legacy_copies_for_cleanup,
 )
-from poppy.engine._legacy_copies import mark_legacy_copies_for_cleanup
 from poppy.engine._timestamps import chunked, expiry_passed, normalise_stored_timestamps, utc_iso
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
 from poppy.models import Filters, Memory, ScoredMemory, Source
@@ -252,7 +253,7 @@ class SeedEngine(RetrievalEngine):
             had_bloom_schema = _has_memory_embeddings(self._conn) or _has_enriched_content(self._conn)
             self._conn.executescript(SCHEMA)
             # Retained while older caller surfaces still read these tables.
-            ensure_closet_side_tables(self._conn)
+            ensure_legacy_copy_tables(self._conn)
             _migrate_expires_at(self._conn)
             from poppy.sync.state import remove_derived_rows
 
@@ -437,8 +438,6 @@ class SeedEngine(RetrievalEngine):
 
     def is_proven_copy_row(self, memory_id: str) -> bool:
         """Compatibility check for lifecycle callers inspecting old copies."""
-        from poppy.engine._closet_marker import is_proven_unmarked_copy
-
         with self._lock:
             return is_proven_unmarked_copy(self._conn, memory_id)
 

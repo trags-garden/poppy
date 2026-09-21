@@ -41,7 +41,20 @@ class RetrievalEngine(ABC):
 
     @abstractmethod
     def get(self, memory_id: str) -> Memory | None:
-        """Get a single memory by ID."""
+        """Read a stored row, including hidden rows needed by legacy cleanup."""
+
+    def get_public(self, memory_id: str) -> Memory | None:
+        """Read a memory by ID without exposing retained legacy copies.
+
+        Public readers and edits use this accessor. Internal cleanup and
+        content-free deletion still need the stored row through ``get``.
+        """
+        from poppy.engine._legacy_copies import is_marked_copy
+
+        memory = self.get(memory_id)
+        # Checked after the read, not before: a marker written in between would
+        # otherwise slip a hidden row past an earlier all-clear.
+        return None if is_marked_copy(self, memory_id) else memory
 
     @abstractmethod
     def delete(self, memory_id: str) -> bool:

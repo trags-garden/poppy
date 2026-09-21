@@ -214,7 +214,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
     ) -> dict[str, Any]:
         """List memories. scope=active|tombstoned|all."""
         if scope == "tombstoned":
-            tombs = ctx.tombstones.list_all()
+            tombs = ctx.tombstones.list_public()
             items = [MemoryOut.from_tombstone(t) for t in tombs]
             items = _filter_items(items, type=type, project=project, source=source, q=q)
             return {"items": [i.model_dump() for i in items], "scope": scope}
@@ -232,7 +232,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             items = [i for i in items if i.source_type == source]
 
         if scope == "all":
-            tombs = ctx.tombstones.list_all()
+            tombs = ctx.tombstones.list_public()
             tomb_items = _filter_items(
                 [MemoryOut.from_tombstone(t) for t in tombs],
                 type=type,
@@ -246,10 +246,10 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
 
     @app.get("/api/memories/{memory_id}")
     def get_memory(memory_id: str) -> dict[str, Any]:
-        m = ctx.reader.get(memory_id)
+        m = ctx.reader.get_public(memory_id)
         if m is not None:
             return MemoryOut.from_memory(m).model_dump()
-        t = ctx.tombstones.get(memory_id)
+        t = ctx.tombstones.get_public(memory_id)
         if t is not None:
             return MemoryOut.from_tombstone(t).model_dump()
         raise HTTPException(status_code=404, detail="Memory not found")
@@ -321,7 +321,6 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
-            # e.g. the target is a derived per-speaker copy, not a memory.
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _autosync()
         return {
@@ -352,11 +351,8 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             raise HTTPException(status_code=404, detail="Memory not found")
         ts = result.tombstone
         if ts is None:
-            # Deleted, but with no restore window to report. Either the row was a
-            # derived per-speaker copy (never snapshotted, re-derived from its
-            # parent rather than restored), or the delete lost a race after the
-            # reader saw the row. Reporting a deadline when restoration would
-            # return 404 is worse than reporting none.
+            # A content-free legacy deletion has no snapshot to restore. A
+            # deletion that lost a race likewise cannot promise a restore window.
             return {"ok": True, "restorable": False}
         return {
             "ok": True,
@@ -375,7 +371,6 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
         try:
             result = restore(ctx.writer(), ctx.poppy_dir, memory_id, tombstones=ctx.tombstones)
         except ValueError as exc:
-            # e.g. the id now names a derived per-speaker copy.
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not result.found:
             raise HTTPException(status_code=404, detail="Tombstone not found")
@@ -395,7 +390,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
         types = Counter(m.memory_type for m in all_memories)
         projects = Counter(m.project for m in all_memories if m.project)
         sources = Counter(m.source.type for m in all_memories)
-        tombstone_count = len(ctx.tombstones.list_all())
+        tombstone_count = len(ctx.tombstones.list_public())
         return {
             "types": dict(types),
             "projects": dict(projects),
@@ -425,7 +420,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
                 "memory_count": s.memory_count,
                 "storage_bytes": s.storage_bytes,
             },
-            "tombstoned": len(ctx.tombstones.list_all()),
+            "tombstoned": len(ctx.tombstones.list_public()),
             "activity": dict(sorted(activity.items())),
             "ttl_days": TTL_DAYS,
         }
