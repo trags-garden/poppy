@@ -23,11 +23,12 @@ import math
 
 # Provisional recommended production floor, expressed as a cross-encoder
 # relevance probability. NOT yet calibrated: the LongMemEval `_abs` sweep that
-# sets the real default is pending the Rosemary gate. 0.2 is
-# deliberately conservative — it corresponds to a CE logit of about -1.4, so it
-# drops only clearly-unrelated matches while leaving genuine hits (which the
-# cross-encoder scores well above 0.5) untouched. Ship default-off (0.0); this
-# is the value to recommend once a store wants abstention before calibration.
+# sets the real default is pending an evaluation that has not been published
+# yet. 0.2 is deliberately conservative — it corresponds to a CE logit of
+# about -1.4, so it drops only clearly-unrelated matches while leaving genuine
+# hits (which the cross-encoder scores well above 0.5) untouched. Ship
+# default-off (0.0); this is the value to recommend once a store wants
+# abstention before calibration.
 RECOMMENDED_MIN_SCORE = 0.2
 
 
