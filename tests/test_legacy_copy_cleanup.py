@@ -4342,3 +4342,183 @@ def test_incoming_copy_snapshot_never_becomes_public_trash(tmp_path, engine_kind
     client = _RecordingClient()
     push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
     assert child["id"] not in {row["id"] for row in client.upserts}
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("damage", ["blob", "invalid_utf8"])
+@pytest.mark.parametrize("same_creation", [False, True])
+def test_incoming_copy_with_unreadable_parent_stays_unresolved(tmp_path, engine_kind, damage, same_creation):
+    from poppy.sync.serializer import wire_to_memory
+
+    db = _legacy_store(tmp_path)
+    parent_id = "sess-2026-01"
+    copy_id = parent_id + "_closet_alice"
+    created = _rows(db, "SELECT created_at FROM memories WHERE id = ?", (parent_id,))[0][0]
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM memories WHERE id != ?", (parent_id,))
+        if damage == "blob":
+            conn.execute("UPDATE memories SET content = CAST(content AS BLOB)")
+        else:
+            conn.execute("UPDATE memories SET content = CAST(x'ff' AS TEXT)")
+        original = conn.execute("SELECT CAST(content AS BLOB), typeof(content) FROM memories").fetchone()
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    when = datetime.fromisoformat(created)
+    child = _cloud_row(copy_id, json.dumps([json.loads(_turns())[0]]), when=when)
+    child["related_to"] = [parent_id]
+    child["created_at"] = created if same_creation else (when - timedelta(days=1)).isoformat()
+
+    assert store.grade_incoming_copy(wire_to_memory(child)) == ("orphan" if same_creation else "none")
+    pull(engine=engine, tombstones=store, client=_RecordingClient([child]), state=SyncState(), poppy_dir=tmp_path)
+    assert (engine.get_public(copy_id) is None) == same_creation
+    assert _local_deletion_time(db, copy_id) is None
+    assert _rows(db, "SELECT CAST(content AS BLOB), typeof(content) FROM memories WHERE id = ?", (parent_id,)) == [
+        original
+    ]
+    assert _rows(db, "SELECT is_closet FROM memories WHERE id = ?", (parent_id,)) == [(0,)]
+
+    # Repair only the parent so public readers and push can read the store.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE memories SET content = ? WHERE id = ?", (_turns(), parent_id))
+    assert (copy_id not in {m.id for m in engine.list_all()}) == same_creation
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert (copy_id not in {row["id"] for row in client.upserts}) == same_creation
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize(
+    "stamp_sql, expected_event",
+    [
+        ("x'32303230'", None),
+        ("CAST(x'ff' AS TEXT)", None),
+        ("'not-a-time'", None),
+        ("NULL", None),
+        # A claim that does spell an instant still transfers it, unchanged.
+        ("'2026-02-03T04:05:06+00:00'", datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)),
+    ],
+)
+def test_malformed_pending_claim_is_retired_without_inventing_event_time(
+    tmp_path, engine_kind, stamp_sql, expected_event
+):
+    db = _legacy_store(tmp_path)
+    copy_id = "missing_closet_alice"
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"INSERT INTO legacy_closet_ids (id, legacy_updated_at) VALUES (?, {stamp_sql})", (copy_id,))
+        original = conn.execute(
+            "SELECT CAST(legacy_updated_at AS BLOB), typeof(legacy_updated_at) FROM legacy_closet_ids WHERE id = ?",
+            (copy_id,),
+        ).fetchone()
+
+    for _ in range(2):
+        engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+        # The older client's push reads this queue with SQLite's text decoder.
+        assert _rows(db, "SELECT id, legacy_updated_at FROM legacy_closet_ids WHERE announce_pending = 1") == []
+        assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids WHERE id = ?", (copy_id,)) == [(0,)]
+        assert _local_deletion_time(db, copy_id) == expected_event
+        assert _rows(
+            db,
+            "SELECT CAST(legacy_updated_at AS BLOB), typeof(legacy_updated_at) FROM legacy_closet_ids WHERE id = ?",
+            (copy_id,),
+        ) == [original]
+        engine._conn.close()
+
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    note = _cloud_row(copy_id, "an independent memory", when=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    pull(engine=engine, tombstones=store, client=_RecordingClient([note]), state=SyncState(), poppy_dir=tmp_path)
+    assert engine.get_public(copy_id).content == note["content"]
+    assert _local_deletion_time(db, copy_id) is None
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert {row["id"] for row in client.upserts} == {"sess-2026-01", copy_id}
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_retiring_an_unreadable_claim_dates_no_deletion_at_all(tmp_path, engine_kind):
+    """A claim whose time cannot be read leaves the ledger alone.
+
+    The entry says an earlier release proved this id held a copy. It does not say
+    when that happened, and a floor value is not a way of saying so: stored, it
+    is an instant like any other, and a memory arriving at that id carrying
+    exactly that instant is refused for being no newer than it while the sync
+    position moves on past the row. So the entry is retired and nothing is dated
+    for it; the queue keeps the entry itself as the record that it was answered.
+    """
+    db = _legacy_store(tmp_path)
+    copy_id = "missing_closet_alice"
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO legacy_closet_ids (id, legacy_updated_at) VALUES (?, 'not-a-time')", (copy_id,))
+
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids WHERE id = ?", (copy_id,)) == [(0,)]
+    assert _rows(db, "SELECT id FROM sync_local_deletions WHERE id = ?", (copy_id,)) == []
+
+    # The earliest instant a timestamp can spell. Nothing may already hold it.
+    store = TombstoneStore(db)
+    note = _cloud_row(copy_id, "an independent memory", when=datetime.min.replace(tzinfo=timezone.utc))
+    pull(engine=engine, tombstones=store, client=_RecordingClient([note]), state=SyncState(), poppy_dir=tmp_path)
+    assert engine.get_public(copy_id).content == note["content"]
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_retiring_an_unreadable_claim_keeps_an_existing_deletion_record(tmp_path, engine_kind):
+    """Retirement adds no evidence, and it takes none away either."""
+    db = _legacy_store(tmp_path)
+    copy_id = "missing_closet_alice"
+    held = datetime(2026, 4, 5, 6, 7, 8, tzinfo=timezone.utc)
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO legacy_closet_ids (id, legacy_updated_at) VALUES (?, 'not-a-time')", (copy_id,))
+        conn.execute("CREATE TABLE IF NOT EXISTS sync_local_deletions (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO sync_local_deletions (id, deleted_at) VALUES (?, ?)", (copy_id, held.isoformat()))
+
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert _rows(db, "SELECT announce_pending FROM legacy_closet_ids WHERE id = ?", (copy_id,)) == [(0,)]
+    assert _local_deletion_time(db, copy_id) == held
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("created_sql", ["'not-a-time'", "CAST(x'ff' AS TEXT)", "x'ff'"])
+@pytest.mark.parametrize("occupied", [False, True])
+def test_ungradable_snapshot_keeps_preimage_before_atomic_cleanup(tmp_path, engine_kind, created_sql, occupied):
+    db = _legacy_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    _plant_drifted_snapshot(db, copy_id, "sess-2026-01")
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"UPDATE ui_tombstones SET created_at = {created_sql} WHERE id = ?", (copy_id,))
+        if occupied:
+            conn.execute(
+                "INSERT INTO closet_migration_backup (id, content, action, migrated_at) VALUES (?, ?, 'adopted', ?)",
+                (copy_id, "an earlier pre-image", datetime.now(timezone.utc).isoformat()),
+            )
+        conn.execute(
+            "CREATE TRIGGER stop_snapshot_cleanup BEFORE DELETE ON ui_tombstones "
+            "BEGIN SELECT RAISE(ABORT, 'snapshot cleanup interrupted'); END"
+        )
+    columns = "content, related_to, CAST(created_at AS BLOB), typeof(created_at), updated_at"
+    snapshot = _rows(db, f"SELECT {columns} FROM ui_tombstones WHERE id = ?", (copy_id,))
+    original_backup = _rows(db, f"SELECT {columns} FROM closet_migration_backup WHERE id = ?", (copy_id,))
+    event = _local_deletion_time(db, copy_id)
+    with pytest.raises(sqlite3.IntegrityError, match="snapshot cleanup interrupted"):
+        SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    assert _rows(db, f"SELECT {columns} FROM closet_migration_backup WHERE id = ?", (copy_id,)) == original_backup
+    assert _rows(db, f"SELECT {columns} FROM ui_tombstones WHERE id = ?", (copy_id,)) == snapshot
+    assert _local_deletion_time(db, copy_id) == event
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TRIGGER stop_snapshot_cleanup")
+
+    for _ in range(2):
+        engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+        assert engine.get_public(copy_id) is None
+        assert _rows(db, "SELECT id FROM ui_tombstones WHERE id = ?", (copy_id,)) == []
+        assert _rows(db, f"SELECT {columns} FROM closet_migration_backup WHERE id = ?", (copy_id,)) == (
+            original_backup if occupied else snapshot
+        )
+        assert _rows(db, "SELECT action FROM closet_migration_backup WHERE id = ?", (copy_id,)) == [
+            ("adopted" if occupied else "cleared",)
+        ]
+        engine._conn.close()

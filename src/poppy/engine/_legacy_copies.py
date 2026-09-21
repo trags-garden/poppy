@@ -155,7 +155,13 @@ def classify_legacy_copy(
         try:
             parent = _text_row(conn, "memories", parent_id, "content", "created_at")
         except (ValueError, TypeError, OverflowError):
-            continue
+            # Unreadable text cannot prove a copy, but it does not erase its
+            # provenance. Keep checking the creation instant when readable.
+            try:
+                created = _text_row(conn, "memories", parent_id, "created_at")
+            except (ValueError, TypeError, OverflowError):
+                created = None
+            parent = (None, created[0]) if created else None
         if not has_copy_provenance(
             parent_id,
             slug,
@@ -308,7 +314,10 @@ def ensure_legacy_copy_tables(conn: sqlite3.Connection) -> None:
 def announced_copy_claim(conn: sqlite3.Connection, memory_id: str) -> str | None:
     if not _table_exists(conn, COPY_CLAIM_TABLE):
         return None
-    row = conn.execute(f"SELECT legacy_updated_at FROM {COPY_CLAIM_TABLE} WHERE id = ?", (memory_id,)).fetchone()
+    try:
+        row = _text_row(conn, COPY_CLAIM_TABLE, memory_id, "legacy_updated_at")
+    except (ValueError, TypeError, OverflowError):
+        return None
     return row[0] if row is not None else None
 
 
@@ -516,6 +525,7 @@ def clear_copy_snapshot(conn: sqlite3.Connection, copy_id: str) -> bool:
             return False
         if not marked or live_tier not in (TIER_PROVEN, TIER_LIKELY):
             return False
+        back_up_cleared_snapshot(conn, copy_id)
         conn.execute("DELETE FROM ui_tombstones WHERE id = ?", (copy_id,))
         return True
     if tier != TIER_PROVEN:
