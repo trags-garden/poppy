@@ -490,19 +490,27 @@ def remove_derived_rows(conn: sqlite3.Connection, poppy_dir: Path, *, gate_held:
             # deletion. Transfer its event time before retiring the queue, in
             # the same transaction, so retention cannot erase the evidence.
             columns = raw_text_columns("id", "legacy_updated_at")
-            claims = conn.execute(f"SELECT {columns} FROM legacy_closet_ids WHERE announce_pending = 1").fetchall()
+            claims = conn.execute(
+                f"SELECT rowid, {columns} FROM legacy_closet_ids WHERE announce_pending = 1"
+            ).fetchall()
             for row in claims:
+                memory_id = None
+                stamp = _MIN_STAMP
                 try:
-                    memory_id, observed = decode_text_columns(tuple(row))
-                    stamp = _first_readable(observed)
-                    if not isinstance(memory_id, str) or stamp is None:
-                        continue
+                    (memory_id,) = decode_text_columns(tuple(row)[1:3])
+                    (observed,) = decode_text_columns(tuple(row)[3:])
+                    stamp = _first_readable(observed) or _MIN_STAMP
                 except (ValueError, TypeError, OverflowError):
-                    continue
-                conn.execute(_RECORD_LOCAL_DELETION_SQL, (memory_id, stamp))
+                    pass
+                if isinstance(memory_id, str):
+                    conn.execute(_RECORD_LOCAL_DELETION_SQL, (memory_id, stamp))
+                # Retire even a claim whose id or time cannot be decoded. Left
+                # pending it stays in a queue a client on the previous release
+                # still reads, where a value that client cannot read breaks its
+                # push every sync and nothing ever drains the entry.
                 conn.execute(
-                    "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE id = ?",
-                    (now_iso, memory_id),
+                    "UPDATE legacy_closet_ids SET announce_pending = 0, announced_at = ? WHERE rowid = ?",
+                    (now_iso, row[0]),
                 )
         for batch in chunked([mid for mid, _ in deletions]):
             placeholders = ",".join("?" * len(batch))

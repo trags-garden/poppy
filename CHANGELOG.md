@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A store holding damaged rows no longer defeats the handling of per-speaker
+  copies from earlier releases. Where the memory a copy came from cannot be
+  read, a copy of it arriving from the cloud is refused rather than stored as
+  an ordinary memory, so its text is neither shown nor uploaded again. A Trash
+  entry that cannot be read keeps its text recoverable for the usual window
+  before it is removed. A queued deletion that cannot be read is retired,
+  rather than left in a queue that a client on the previous release cannot
+  read past on every sync.
 - Removed em dashes from user-facing CLI, dashboard, setup prompt, and MCP
   copy. `poppy doctor` status lines now read `label: OK, detail` where they
   used a dash.
