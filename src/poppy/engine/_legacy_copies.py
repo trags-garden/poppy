@@ -160,24 +160,44 @@ def back_up_inferred_copy(conn: sqlite3.Connection, memory_id: str, action: str 
     )
 
 
+def _decoded(value: object) -> str | None:
+    """Text for a column read as raw bytes, or a raise the caller turns into no grade.
+
+    Read as bytes on purpose. A store can hold bytes in a TEXT column that are
+    not valid text at all, and the database driver raises while BUILDING the
+    result set, which is before any per-row guard can run. Decoding one row at a
+    time moves that failure inside the guard.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    return bytes(value).decode()
+
+
 def legacy_copy_grades(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     """Read unmarked candidates once, before any marker writes change the store."""
     rows = conn.execute(
-        "SELECT id, content, related_to, created_at FROM memories "
+        "SELECT CAST(id AS BLOB), CAST(content AS BLOB), CAST(related_to AS BLOB), "
+        "CAST(created_at AS BLOB) FROM memories "
         "WHERE instr(id, ?) > 0 AND COALESCE(is_closet, 0) = 0",
         (SEPARATOR,),
     ).fetchall()
     grades = []
-    for memory_id, content, related, created in rows:
+    for raw_id, raw_content, raw_related, raw_created in rows:
         try:
-            tier, _ = classify_legacy_copy(conn, memory_id, content=content, related_raw=related, created_at=created)
+            memory_id = _decoded(raw_id)
+            tier, _ = classify_legacy_copy(
+                conn,
+                memory_id,
+                content=_decoded(raw_content),
+                related_raw=_decoded(raw_related),
+                created_at=_decoded(raw_created),
+            )
         except Exception:
             # Grading runs inside the transaction that adds the marker column, so
             # a row this cannot read must not raise: that rolls the column back
             # too, and every later open fails the same way, leaving the store
-            # unopenable. An ungradeable row is left alone, which is what the
-            # weakest grade already means.
-            tier = TIER_NONE
+            # unopenable. A row that cannot be graded is left exactly as it is.
+            continue
         grades.append((memory_id, tier))
     return grades
 

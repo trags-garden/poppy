@@ -1,7 +1,10 @@
-"""Temporary adapters for callers that still inspect legacy copy records.
+"""Adapters for callers that still inspect legacy copy records, and the
+cleanup that stops a marked copy outliving the memory it was copied from.
 
-No copies are created here. Keep these adapters only until the CLI, lifecycle,
-Trash and sync callers have moved to their final legacy-data interfaces.
+No copies are created here. Keep the adapters only until the CLI, lifecycle,
+Trash and sync callers have moved to their final legacy-data interfaces; keep
+:func:`clear_marked_copies` and the marker filters in the engines for as long as
+stores written before this release are supported.
 """
 
 from __future__ import annotations
@@ -147,6 +150,61 @@ def is_marked_closet(engine: object, memory_id: str) -> bool:
     # Keep the existing caller guard without requiring an engine-specific API.
     conn = getattr(engine, "_conn", None)
     return conn is not None and has_marker(conn) and is_marked_closet_row(conn, memory_id)
+
+
+def _owned_by(parent_id: str, related_raw: str | None) -> bool:
+    """Whether a marked row's back-reference names exactly ``parent_id``.
+
+    A copy's id always sits under its parent's, but that prefix is a coarse net:
+    it also catches the copies of another memory whose own id starts the same
+    way. The back-reference every copy carries is what decides ownership.
+    """
+    try:
+        return json.loads(related_raw or "[]") == [parent_id]
+    except (TypeError, ValueError):
+        return False
+
+
+def clear_marked_copies(
+    conn: sqlite3.Connection, parent_id: str, *, has_embeddings: bool, tombstone: bool = True
+) -> list[str]:
+    """Remove the marked legacy copies of ``parent_id``. The caller holds the write lock.
+
+    A row carrying the marker is kept out of listings, counts and recall, so the
+    only thing keeping its text reachable is the memory it was copied from. When
+    that memory's text is edited away or deleted, no copy of the old text may
+    outlive it: without this, editing a secret out of a memory left a copy of the
+    secret in the store for good.
+
+    Nothing is lost by removing them. A copy holds a projection of text its
+    parent already holds, and no version derives them any more.
+
+    Content-free on the way out: the ids and a time, never the text. Writing the
+    speaker text into Trash here would put back exactly what a redaction removes.
+
+    ``tombstone=False`` is for expiry, which is not a redaction: the cloud row
+    carries the same expiry and ages out on its own.
+
+    Scoped to rows carrying the marker, so a real memory whose id merely looks
+    like a copy's is never touched.
+    """
+    if not has_marker(conn):
+        return []
+    rows = conn.execute(
+        f"SELECT id, related_to FROM memories WHERE {IS_CLOSET_SQL} AND instr(id, ?) > 0",
+        (CLOSET_SEPARATOR,),
+    ).fetchall()
+    ids = sorted(row[0] for row in rows if _owned_by(parent_id, row[1]))
+    if not ids:
+        return []
+    if tombstone:
+        record_closet_tombstones(conn, ids)
+    for batch in chunked(ids):
+        placeholders = ",".join("?" * len(batch))
+        if has_embeddings:
+            conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)
+        conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", batch)
+    return ids
 
 
 def rearm_legacy_announcement(conn: sqlite3.Connection, memory_id: str, updated_at: str) -> None:

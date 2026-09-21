@@ -6,7 +6,11 @@ from pathlib import Path
 
 from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
-from poppy.engine._closet_marker import clear_retired_records, ensure_closet_side_tables
+from poppy.engine._closet_marker import (
+    clear_marked_copies,
+    clear_retired_records,
+    ensure_closet_side_tables,
+)
 from poppy.engine._legacy_copies import mark_legacy_copies_for_cleanup
 from poppy.engine._timestamps import chunked, expiry_passed, normalise_stored_timestamps, utc_iso
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
@@ -163,6 +167,10 @@ def _has_enriched_content(conn: sqlite3.Connection) -> bool:
 # vector was computed from. Any value that is not a live engine's model_id would
 # do; a named sentinel makes the reason legible in the table and in doctor output.
 SEED_INVALIDATED_MODEL_ID = "seed-invalidated"
+
+# Rows an older release marked as derived per-speaker copies. Kept out of
+# listings, counts and recall, and removed with the memory they came from.
+_NOT_MARKED_SQL = "COALESCE(is_closet, 0) = 0"
 
 
 def _has_memory_embeddings(conn: sqlite3.Connection) -> bool:
@@ -331,6 +339,10 @@ class SeedEngine(RetrievalEngine):
             content_changed = existing is not None and existing.content != memory.content
             write_enriched = enriched_schema and (existing is None or content_changed)
             if content_changed:
+                # A copy an older release left behind holds the text this write
+                # is replacing, so it is being redacted too. A metadata-only
+                # write replays the same body and leaves them alone.
+                clear_marked_copies(self._conn, memory.id, has_embeddings=_has_memory_embeddings(self._conn))
                 # Gated on content change alone, not on enriched_schema:
                 # ``_invalidate_parent_embedding`` self-guards a missing table
                 # or column, and a store that has ``memory_embeddings`` but not
@@ -386,7 +398,7 @@ class SeedEngine(RetrievalEngine):
                 rows = self._conn.execute(
                     """SELECT m.*, rank FROM memory_fts fts
                        JOIN memories m ON fts.id = m.id
-                       WHERE memory_fts MATCH ?
+                       WHERE memory_fts MATCH ? AND COALESCE(m.is_closet, 0) = 0
                        ORDER BY rank
                        LIMIT ?""",
                     (escaped_query, limit * 3),
@@ -432,6 +444,9 @@ class SeedEngine(RetrievalEngine):
 
     def delete(self, memory_id: str, *, remote_event_ts: datetime | None = None) -> bool:
         with self._lock, write_txn(self._conn):
+            # Copies an older release left behind go with it: nothing derives
+            # them any more, and a copy of deleted text must not outlive it.
+            clear_marked_copies(self._conn, memory_id, has_embeddings=_has_memory_embeddings(self._conn))
             # Delete the parent row. Its own ``memory_embeddings`` vector is
             # local-only (never synced, recomputed per engine), so it goes here:
             # leaving it lets a later seed insert of the same id silently inherit
@@ -443,7 +458,11 @@ class SeedEngine(RetrievalEngine):
         return deleted
 
     def list_all(self, filters: Filters | None = None, limit: int = 50) -> list[Memory]:
-        query = "SELECT * FROM memories WHERE 1 = 1"
+        # A store the default engine wrote can hold rows an older release marked
+        # as per-speaker copies. Excluded here, from stats and from recall, so
+        # they never reach a listing or a push. Keyed on the marker, so a real
+        # memory whose id merely looks like a copy's is never hidden.
+        query = f"SELECT * FROM memories WHERE {_NOT_MARKED_SQL}"
         params: list = []
         if filters:
             if filters.project:
@@ -477,26 +496,33 @@ class SeedEngine(RetrievalEngine):
         now = datetime.now(timezone.utc)
         with self._lock, write_txn(self._conn):
             expired = [
-                row[0]
+                (row[0], bool(row[1]))
                 for row in self._conn.execute(
-                    "SELECT id, expires_at FROM memories WHERE expires_at IS NOT NULL"
+                    f"SELECT id, {_NOT_MARKED_SQL}, expires_at FROM memories WHERE expires_at IS NOT NULL"
                 ).fetchall()
-                if expiry_passed(row[1], now)
+                if expiry_passed(row[2], now)
             ]
             has_embeddings = _has_memory_embeddings(self._conn)
-            for batch in chunked(expired):
+            # A leftover copy is not a memory the user lost, and it goes with the
+            # memory it came from. No deletion record: expiry is not a redaction.
+            memories = [mid for mid, is_memory in expired if is_memory]
+            for mid in memories:
+                clear_marked_copies(self._conn, mid, has_embeddings=has_embeddings, tombstone=False)
+            for batch in chunked([mid for mid, _ in expired]):
                 placeholders = ",".join("?" * len(batch))
                 if has_embeddings:
                     self._conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)
                 self._conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", batch)
-            return len(expired)
+            return len(memories)
 
     def consolidate(self) -> ConsolidationResult:
         return ConsolidationResult(merged=0, removed=0, updated=0)
 
     def stats(self) -> EngineStats:
         with self._lock:
-            count = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            # Memories, not rows: leftover copies are hidden from list_all, so
+            # counting them here would disagree with what the user can see.
+            count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {_NOT_MARKED_SQL}").fetchone()[0]
         storage = self._db_path.stat().st_size if self._db_path.exists() else 0
         return EngineStats(
             memory_count=count,

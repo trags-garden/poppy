@@ -648,16 +648,25 @@ def test_pull_never_overwrites_a_marked_closet_with_a_live_cloud_row(tmp_path: P
     assert result.skipped_closets == 1
     assert result.applied_live == 0
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
-    assert len(_marked_ids(db)) == 2
+    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
     assert engine.get("sess-2026-01_closet_alice").content != "cloud copy of Alice's turns"
+
+    # And the parent's redaction still reaches it.
+    assert forget(engine, tmp_path, "sess-2026-01").deleted is True
+    assert _all_ids(db) == []
+    assert not _bloom(db).retrieve(SECRET, limit=10)
+
+    client = _RecordingClient()
+    push(engine=engine, tombstones=store, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert [r for r in client.upserts if r["deleted_at"] is None] == []
 
 
 def test_pull_never_deletes_a_marked_closet_via_a_cloud_tombstone(tmp_path: Path) -> None:
     """A cloud tombstone for a closet id must not remove a copy bloom owns.
 
     The server-side cleanup of pre-marker leaks sends exactly these
-    rows. They refer to the cloud's stale copy, not to the one this device
-    derives locally, so applying them would silently break local recall.
+    rows. They refer to the cloud's stale copy, not to the row this device
+    holds, and the local row is the one the memory beside it is graded against.
     """
     db = tmp_path / "memories.db"
     engine = _bloom(db)
@@ -676,7 +685,11 @@ def test_pull_never_deletes_a_marked_closet_via_a_cloud_tombstone(tmp_path: Path
     assert result.applied_tombstones == 0
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
     assert store.list_all() == []  # no snapshot of the leaked text either
-    assert "sess-2026-01_closet_alice" in {r.memory.id for r in engine.retrieve(SECRET, limit=10)}
+    # The local row is untouched. It is no longer offered by recall: nothing
+    # derives these rows for recall any more, and the memory they were copied
+    # from is indexed in full.
+    assert engine.get("sess-2026-01_closet_alice") is not None
+    assert "sess-2026-01_closet_alice" not in {r.memory.id for r in engine.retrieve(SECRET, limit=10)}
 
 
 def test_pull_does_not_resurrect_a_closet_this_device_just_forgot(tmp_path: Path) -> None:
@@ -744,15 +757,12 @@ def test_a_seed_write_over_a_closet_id_makes_it_a_real_memory(tmp_path: Path) ->
     seed.ingest(_memory("sess-2026-01_closet_alice", "my own note about Alice"))
 
     assert _marked_ids(db) == ["sess-2026-01_closet_bob"]
-    assert sorted(m.id for m in seed.list_all()) == [
-        "sess-2026-01",
-        "sess-2026-01_closet_alice",
-        "sess-2026-01_closet_bob",
-    ]
+    assert sorted(m.id for m in seed.list_all()) == ["sess-2026-01", "sess-2026-01_closet_alice"]
 
     # It survives the unrelated parent's deletion, and syncs as a real memory.
+    # The row still marked as a copy goes with that parent.
     assert forget(seed, tmp_path, "sess-2026-01").deleted is True
-    assert _all_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
+    assert _all_ids(db) == ["sess-2026-01_closet_alice"]
     assert seed.get("sess-2026-01_closet_alice").content == "my own note about Alice"
 
 
@@ -887,7 +897,7 @@ def test_edit_memory_refuses_a_marked_closet(tmp_path: Path, engine_name: str) -
 
     assert "sess-2026-01" in str(exc.value)  # points at the parent
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
-    assert len(_marked_ids(db)) == 2
+    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
 
 
 def test_a_changed_content_write_still_reclaims_the_id(tmp_path: Path) -> None:
@@ -899,11 +909,7 @@ def test_a_changed_content_write_still_reclaims_the_id(tmp_path: Path) -> None:
     engine.ingest(_memory("sess-2026-01_closet_alice", "my own note"))
 
     assert _marked_ids(db) == ["sess-2026-01_closet_bob"]
-    assert sorted(m.id for m in engine.list_all()) == [
-        "sess-2026-01",
-        "sess-2026-01_closet_alice",
-        "sess-2026-01_closet_bob",
-    ]
+    assert sorted(m.id for m in engine.list_all()) == ["sess-2026-01", "sess-2026-01_closet_alice"]
 
 
 def test_a_reclaimed_closet_id_still_receives_cloud_updates(tmp_path: Path) -> None:
@@ -1032,7 +1038,9 @@ def test_an_inferentially_adopted_copy_keeps_text_and_backup(tmp_path: Path) -> 
     # The inferred tier survives the open; only the proven one is removed.
     assert engine.get("sess-2026-01_closet_bob") is None
 
-    assert set(m.id for m in engine.list_all()) == {"sess-2026-01", "sess-2026-01_closet_alice"}
+    # Kept, but not shown: it still holds a projection of text the memory
+    # beside it holds, so a listing must not offer it as a memory of its own.
+    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
     client = _RecordingClient()
     push(
         engine=engine,
@@ -1175,8 +1183,10 @@ def test_remember_with_supersedes_pointing_at_a_closet_is_refused(tmp_path: Path
 def test_auto_supersede_never_picks_a_derived_copy(tmp_path: Path) -> None:
     """No human types an id on this path.
 
-    Candidates come from retrieve(), which still returns copies, and a copy
-    carries the parent's project and memory_type so it passes the filters.
+    A copy inherits the project and memory_type of the memory it came from, so
+    it passes every filter this path applies. Two things keep it out: recall no
+    longer offers a row marked as a copy, and the reconciler refuses one that
+    reaches it by any other route.
     """
     from poppy.capture.reconciler import find_candidates
 
@@ -1184,10 +1194,10 @@ def test_auto_supersede_never_picks_a_derived_copy(tmp_path: Path) -> None:
     engine = _bloom(db)
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
 
-    # The copy outranks the parent under the test reranker (shorter document),
-    # so this is the ordering that would have picked it.
+    # The copy is the shorter document, so it would outrank the memory it came
+    # from under the test reranker: the ordering that used to pick it.
     ranked = [s.memory.id for s in engine.retrieve(SECRET, limit=10)]
-    assert "sess-2026-01_closet_alice" in ranked
+    assert "sess-2026-01_closet_alice" not in ranked
 
     candidates = find_candidates(engine, _memory("mem_new", SECRET), top_k=10)
 
@@ -1209,7 +1219,7 @@ def test_restore_refuses_an_id_that_is_now_a_derived_copy(tmp_path: Path) -> Non
         restore(engine, tmp_path, "sess-2026-01_closet_alice", tombstones=store)
 
     assert "sess-2026-01_closet_alice" in _marked_ids(db)
-    assert len(_marked_ids(db)) == 2
+    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
 
 
 def test_migration_leaves_a_row_a_present_parent_does_not_account_for(tmp_path: Path) -> None:
@@ -3407,6 +3417,90 @@ def test_a_newer_entry_at_that_id_survives_a_pulled_copy_snapshot(tmp_path: Path
 
     kept = store.get("p_closet_alice")
     assert kept is not None and kept.memory.content == "A NOTE DELETED LATER"
+
+
+@pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
+def test_a_copy_kept_on_inference_is_never_shown(tmp_path: Path, engine_kind: str) -> None:
+    """Kept in the store, out of every way of reading it.
+
+    Its text is not rewritten, because it may be a split someone curated rather
+    than a stale copy. It is still a projection of text the memory beside it
+    holds, so a listing, a count and a recall must not surface it. Recall runs
+    through the engine, so the MCP tools and the dashboard are covered by this.
+    """
+    db = _tier_b_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+
+    assert SECRET in engine.get(copy_id).content
+    assert [m.id for m in engine.list_all()] == ["sess-2026-01"]
+    assert engine.stats().memory_count == 1
+    assert copy_id not in [scored.memory.id for scored in engine.retrieve(SECRET, limit=10)]
+
+
+@pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
+def test_forgetting_a_memory_takes_the_copy_kept_beside_it(tmp_path: Path, engine_kind: str) -> None:
+    """A copy must not outlive the text it was copied from.
+
+    Nothing regenerates these rows, so the memory being deleted is the only
+    thing that kept this one explainable.
+    """
+    db = _tier_b_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+    store = TombstoneStore(db)
+    assert engine.get(copy_id) is not None
+
+    assert forget(engine, tmp_path, "sess-2026-01", tombstones=store).deleted is True
+
+    assert engine.get(copy_id) is None
+    assert _all_ids(db) == []
+    # Content-free on the way out: no Trash entry carries the speaker text.
+    assert all(SECRET not in (entry.memory.content or "") for entry in store.list_all())
+
+
+@pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
+def test_editing_the_text_takes_a_copy_of_what_it_replaced(tmp_path: Path, engine_kind: str) -> None:
+    """Editing a secret out of a memory must not leave a copy holding it."""
+    db = _tier_b_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    engine = SeedEngine(db) if engine_kind == "seed" else _bloom(db)
+
+    engine.ingest(_memory("sess-2026-01", "a plain sentence with nothing sensitive in it"))
+
+    assert engine.get(copy_id) is None
+    assert _all_ids(db) == ["sess-2026-01"]
+
+
+def test_a_row_that_is_not_text_leaves_the_store_openable(tmp_path: Path) -> None:
+    """Bytes that are not text in a candidate column must not brick the store.
+
+    The database driver raises while BUILDING the result set, before any per-row
+    guard can run, and that rolls back the marker column with it, so every later
+    open retried and failed the same way.
+    """
+    db = _legacy_store(tmp_path)
+    stamp = "2020-01-01T00:00:00+00:00"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO memories (id, content, enriched_content, memory_type, project, source_type,"
+        " source_session_id, source_timestamp, confidence, related_to, created_at, updated_at,"
+        " expires_at) VALUES ('meeting_closet_bytes', CAST(? AS TEXT), 'x', 'fact', NULL, 'cli',"
+        " NULL, ?, 1.0, '[]', ?, ?, NULL)",
+        (b"\xff\xfe not text", stamp, stamp, stamp),
+    )
+    conn.commit()
+    conn.close()
+
+    _bloom(db)  # must not raise
+    engine = _bloom(db)  # and the store stays openable afterwards
+
+    assert MARKER_COLUMN in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
+    # The rows it COULD read were still graded and cleaned.
+    assert engine.get("sess-2026-01_closet_alice") is None
+    # The one it could not is left exactly as it was.
+    assert _rows(db, "SELECT is_closet FROM memories WHERE id = 'meeting_closet_bytes'") == [(0,)]
 
 
 @pytest.mark.parametrize("engine_kind", ["seed", "bloom"])

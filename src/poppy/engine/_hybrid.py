@@ -18,7 +18,11 @@ import numpy as np
 
 from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
-from poppy.engine._closet_marker import clear_retired_records, ensure_closet_side_tables
+from poppy.engine._closet_marker import (
+    clear_marked_copies,
+    clear_retired_records,
+    ensure_closet_side_tables,
+)
 from poppy.engine._legacy_copies import mark_legacy_copies_for_cleanup
 from poppy.engine._timestamps import (
     _columns,
@@ -35,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 FIRST_STAGE_K = 100
 RRF_K = 60
+
+# Rows an older release marked as derived per-speaker copies. They are kept
+# out of listings, counts and recall, and removed when the memory they were
+# copied from is redacted or deleted.
+_NOT_MARKED_SQL = "COALESCE(is_closet, 0) = 0"
 
 STOPWORDS = frozenset(
     "a an the is was were be been being am are do does did have has had "
@@ -369,6 +378,12 @@ class HybridEngine(RetrievalEngine):
                     created_at = datetime.fromisoformat(prior["created_at"])
                 except (TypeError, ValueError):
                     pass
+            elif prior is not None:
+                # The text this memory held is being replaced, so a copy of that
+                # text left over from an older release is being redacted too. A
+                # write that only changes metadata replays the same body and
+                # leaves them alone.
+                clear_marked_copies(self._conn, memory.id, has_embeddings=True)
             self._insert_memory(
                 memory.id,
                 memory.content,
@@ -407,7 +422,7 @@ class HybridEngine(RetrievalEngine):
                 fts_rows = self._conn.execute(
                     """SELECT m.*, rank FROM memory_fts fts
                        JOIN memories m ON fts.id = m.id
-                       WHERE memory_fts MATCH ?
+                       WHERE memory_fts MATCH ? AND COALESCE(m.is_closet, 0) = 0
                        ORDER BY rank
                        LIMIT ?""",
                     (fts_query, k * 5),
@@ -424,7 +439,8 @@ class HybridEngine(RetrievalEngine):
         # engine's model are excluded from RRF here and only contribute via
         # FTS5 above until re-embedded.
         rows = self._conn.execute(
-            "SELECT m.*, e.embedding FROM memories m JOIN memory_embeddings e ON m.id = e.id WHERE e.model_id = ?",
+            "SELECT m.*, e.embedding FROM memories m JOIN memory_embeddings e ON m.id = e.id "
+            "WHERE e.model_id = ? AND COALESCE(m.is_closet, 0) = 0",
             (self.model_id,),
         ).fetchall()
 
@@ -482,13 +498,21 @@ class HybridEngine(RetrievalEngine):
             return is_proven_unmarked_copy(self._conn, memory_id)
 
     def delete(self, memory_id: str, *, remote_event_ts: datetime | None = None) -> bool:
+        # One transaction: a failure between the copies and the memory itself
+        # would otherwise commit half a redaction.
         with self._lock, write_txn(self._conn):
+            clear_marked_copies(self._conn, memory_id, has_embeddings=True)
             cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             self._conn.execute("DELETE FROM memory_embeddings WHERE id = ?", (memory_id,))
             return cursor.rowcount > 0
 
     def list_all(self, filters: Filters | None = None, limit: int = 50) -> list[Memory]:
-        query = "SELECT * FROM memories WHERE 1 = 1"
+        # Rows an older release left marked as per-speaker copies are excluded,
+        # here and from stats and recall, so nothing shows text a memory in this
+        # store already holds and push (which reads this) never sends one. Keyed
+        # on the marker, so a real memory whose id merely looks like a copy's is
+        # never hidden.
+        query = f"SELECT * FROM memories WHERE {_NOT_MARKED_SQL}"
         params: list = []
         if filters:
             if filters.project:
@@ -521,23 +545,31 @@ class HybridEngine(RetrievalEngine):
         now = datetime.now(timezone.utc)
         with self._lock, write_txn(self._conn):
             expired = [
-                row[0]
+                (row[0], bool(row[1]))
                 for row in self._conn.execute(
-                    "SELECT id, expires_at FROM memories WHERE expires_at IS NOT NULL"
+                    f"SELECT id, {_NOT_MARKED_SQL}, expires_at FROM memories WHERE expires_at IS NOT NULL"
                 ).fetchall()
-                if expiry_passed(row[1], now)
+                if expiry_passed(row[2], now)
             ]
-            for batch in chunked(expired):
+            # Counted as memories the user lost: a leftover copy is not one, and
+            # it goes with the memory it was copied from rather than on its own.
+            # No deletion record for these: expiry is not a redaction.
+            memories = [mid for mid, is_memory in expired if is_memory]
+            for mid in memories:
+                clear_marked_copies(self._conn, mid, has_embeddings=True, tombstone=False)
+            for batch in chunked([mid for mid, _ in expired]):
                 placeholders = ",".join("?" * len(batch))
                 self._conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)
                 self._conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", batch)
-            return len(expired)
+            return len(memories)
 
     def consolidate(self) -> ConsolidationResult:
         return ConsolidationResult(merged=0, removed=0, updated=0)
 
     def stats(self) -> EngineStats:
-        count = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        # Memories, not rows: leftover copies are hidden from list_all, so
+        # counting them here would disagree with what the user can see.
+        count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {_NOT_MARKED_SQL}").fetchone()[0]
         storage = self._db_path.stat().st_size if self._db_path.exists() else 0
         return EngineStats(
             memory_count=count,
