@@ -1,10 +1,16 @@
-"""Auto-capture deep modules (ADR-0001/0002/0003).
+"""Auto-capture deep modules.
+
+ADR-0001 records the watermark-after-success capture rule; ADR-0002 records
+consent and default-on precedence; ADR-0003 records automatic candidate
+reconciliation. See CONTRIBUTING.md for why these non-public labels remain.
 
 Each module here is a small, independently testable unit that the capture
 orchestration composes:
 
-* ``reconciler``  — dedup-on-capture: ADD / SUPERSEDE / SKIP before ingest (ADR-0003).
-* ``window``      — incremental transcript window over ``(watermark, now]`` (ADR-0001).
+* ``reconciler``  — dedup-on-capture: ADD / SUPERSEDE / SKIP before ingest
+  (ADR-0003).
+* ``window``      — incremental transcript window over ``(watermark, now]``
+  (ADR-0001).
 * ``watermark``   — per-session capture watermark + turn cadence (ADR-0001).
 
 The SessionEnd / PostCompact backstops and the mid-session loop all route their

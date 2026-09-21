@@ -3,8 +3,8 @@ interface.
 
 The whole point of the reshape: exercise extract → build → ingest → advance
 watermark → journal end-to-end with a fake LLM + fake reconcile and a tmp
-poppy_dir — no module-global monkeypatching — and pin the ADR-0001 invariant
-(the watermark advances only after a successful ingest) in one place.
+poppy_dir — no module-global monkeypatching — and pin ADR-0001's
+watermark-after-success invariant in one place.
 """
 
 from __future__ import annotations

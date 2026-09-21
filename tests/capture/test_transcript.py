@@ -1,8 +1,8 @@
 """Tests for the transcript reader seam.
 
 One module, one source-app adapter today — the Claude Code JSONL reader — plus
-the shared ``extract_text``. Parsing is tested here, apart from the ADR-0001
-windowing (``test_window.py``).
+the shared ``extract_text``. Parsing is tested here, apart from ADR-0001's
+watermark-after-success windowing (``test_window.py``).
 """
 
 from __future__ import annotations

@@ -1,4 +1,5 @@
-"""TurnCadence — per-session turn counter + cadence gate (ADR-0001).
+"""TurnCadence — per-session turn counter + cadence gate for ADR-0001's
+watermark-after-success capture rule.
 
 The mid-session loop fires a capture every Nth user turn. This module owns the
 per-session turn counter and the cadence / soft-cap gates. State lives in the
@@ -6,8 +7,8 @@ shared per-session file (``_state``); the counters reset at SessionStart via
 ``watermark.reset_session`` so cadence and coverage are predictable per session
 and concurrent sessions never interfere.
 
-Defaults (N / K) are sane starting points; ADR-0003's autoresearch pass tunes
-them later.
+Defaults (N / K) are sane starting points; ADR-0003's automatic-reconciliation
+tuning pass tunes them later.
 """
 
 from __future__ import annotations

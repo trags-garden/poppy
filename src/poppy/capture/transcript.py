@@ -1,7 +1,7 @@
 """Transcript reader seam: session ref in → turns out, one adapter per source app.
 
-CONTEXT.md defines the **Source app** — the coding agent a memory came from (the
-real client: ``claude-code``, ``cursor``, ``codex``, …), never the transport.
+The **Source app** is the coding agent a memory came from (the real client:
+``claude-code``, ``cursor``, ``codex``, …), never the transport.
 This module is the seam behind that term for *reading* a session transcript into
 turns. Adding a new client's transcript support is one adapter here, not a hunt
 across ``window.py`` + ``detect_host_cli`` + hardcoded source literals — the
@@ -13,7 +13,7 @@ A **turn** is one qualifying (text-bearing) user/assistant message,
 * :func:`read_claude_code_turns` — the Claude Code JSONL transcript (the live
   capture path). The incremental ``(watermark, now]`` windowing in
   ``capture.window`` is layered on top of these turns, so JSONL parsing and the
-  ADR-0001 window machinery are now testable apart.
+  ADR-0001 watermark-after-success window machinery is now testable apart.
 
 * :func:`read_codex_turns` — Codex rollout JSONL, identified by its leading
   ``session_meta`` record.
