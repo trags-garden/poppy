@@ -40,19 +40,19 @@ decisions, preferences, and lessons across sessions.
 - A lesson is learned (something failed and we now know why).
 
 **When to call `recall_index` then `recall_full`:**
-- Before suggesting an approach in an unfamiliar area — check if there's a prior decision.
+- Before suggesting an approach in an unfamiliar area, check if there's a prior decision.
 - When the user references something from a past session.
 - Use `recall_index` first (cheap, IDs + snippets), then `recall_full` only on the IDs
   that look relevant. Don't call `recall_full` on every result.
 
 **Tool surface:**
-- `remember(content, memory_type, project)` — store a single memory.
-- `recall_index(query, project, limit)` — IDs + snippets only.
-- `recall_full(ids)` — fetch full content for a batch of IDs.
-- `recall(query, project, limit)` — convenience: index + full in one call (use sparingly).
-- `consolidate(session_summary, facts, project)` — store learnings at session end.
-- `context(project, limit)` — most recent memories for a project.
-- `forget(id)` — delete a memory.
+- `remember(content, memory_type, project)`: store a single memory.
+- `recall_index(query, project, limit)`: IDs and snippets only.
+- `recall_full(ids)`: fetch full content for a batch of IDs.
+- `recall(query, project, limit)`: convenience, index and full in one call (use sparingly).
+- `consolidate(session_summary, facts, project)`: store learnings at session end.
+- `context(project, limit)`: most recent memories for a project.
+- `forget(id)`: delete a memory.
 
 `memory_type` is one of: `fact`, `decision`, `preference`, `lesson`, `summary`."""
 
@@ -64,7 +64,7 @@ CLAUDE_IMPORT_PROMPT = """\
 Export all of my stored memories and any context you've learned about me from past conversations, AND ingest each entry into Poppy as you go. Preserve my words verbatim where possible, especially for instructions and preferences.
 
 ## Categories (output in this order):
-1. **Instructions**: Rules I've explicitly asked you to follow going forward — tone, format, style, "always do X", "never do Y", and corrections to your behavior. Only include rules from stored memories, not from conversations.
+1. **Instructions**: Rules I've explicitly asked you to follow going forward: tone, format, style, "always do X", "never do Y", and corrections to your behavior. Only include rules from stored memories, not from conversations.
 2. **Identity**: Name, age, location, education, family, relationships, languages, and personal interests.
 3. **Career**: Current and past roles, companies, and general skill areas.
 4. **Projects**: Projects I meaningfully built or committed to. Ideally ONE entry per project. Include what it does, current status, and any key decisions. Use the project name or a short descriptor as the first words of the entry.
@@ -72,7 +72,7 @@ Export all of my stored memories and any context you've learned about me from pa
 
 ## Poppy ingestion (do this for every entry):
 For each entry you produce, call `remember(content, memory_type, project)` with:
-- **content**: the verbatim entry text (without the date prefix — store the date inside the content if relevant, e.g. "As of 2026-03-14, ...").
+- **content**: the verbatim entry text (without the date prefix; store the date inside the content if relevant, e.g. "As of 2026-03-14, ...").
 - **memory_type**: map by category:
   - Instructions → `preference`
   - Identity → `fact`

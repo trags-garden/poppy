@@ -244,7 +244,7 @@ def remember(
         else:
             click.echo(f"{len(result.conflicts)} conflict candidate(s):")
             for c in result.conflicts:
-                click.echo(f"  {c.memory.id}  conf={c.confidence:.2f}  {c.reason or '—'}")
+                click.echo(f"  {c.memory.id}  conf={c.confidence:.2f}  {c.reason or 'No reason provided'}")
                 click.echo(f"    {c.memory.content[:80]}")
         return
 
@@ -444,7 +444,7 @@ def forget(memory_id: str, yes: bool):
 @click.option("--no-project", is_flag=True, help="Clear project")
 @click.option("--ttl", default=None, help="Reset TTL (e.g. 30d)")
 @click.option("--expires-at", default=None, help="Reset expiry to ISO-8601 datetime")
-@click.option("--no-expiry", is_flag=True, help="Clear expiry — make memory permanent")
+@click.option("--no-expiry", is_flag=True, help="Clear expiry: make memory permanent")
 def edit(
     memory_id: str,
     content: str | None,
@@ -649,7 +649,7 @@ def migrate_engine(
 
     Without filters: re-embeds every row whose model_id differs from the
     active engine's bi-encoder (or is NULL from a legacy DB). With filters:
-    only the matching subset. Idempotent and resumable — each row is
+    only the matching subset. Idempotent and resumable: each row is
     committed individually, so Ctrl+C and rerun continues where it left off.
     """
     from poppy.engine.migration import (
@@ -1364,9 +1364,7 @@ def ui(host: str, port: int, no_open: bool, allow_remote: bool):
             "Re-run with --allow-remote if you really intend this."
         )
     if host not in LOOPBACK_HOSTS:
-        click.echo(
-            f"⚠  Binding {host} — the UI's delete/edit API is now reachable, unauthenticated, from your network."
-        )
+        click.echo(f"⚠  Binding {host}: the UI's delete/edit API is now reachable, unauthenticated, from your network.")
 
     # Silence HF Hub / transformers noise that surfaces when the BloomEngine lazy-loads
     # its bi-encoder + cross-encoder on the first edit. The UI doesn't load these at
@@ -1890,7 +1888,7 @@ def setup_goose():
     _warn_if_poppy_unresolved()
     click.echo(
         "\nPoppy is registered as a Goose extension. Run `goose session` to "
-        "start a session — Poppy will be available via the standard MCP tool surface."
+        "start a session. Poppy will be available via the standard MCP tool surface."
     )
     _record_agent_setup("goose")
 
@@ -1899,7 +1897,7 @@ def setup_goose():
 def setup_hermes_agent():
     """Install Poppy as a Hermes Agent (Nous Research) memory provider plugin.
 
-    Hermes doesn't speak MCP — instead it loads memory providers from
+    Hermes doesn't speak MCP. Instead, it loads memory providers from
     `~/.hermes/plugins/<name>/`. This drops the Poppy plugin + sets
     `memory.provider: poppy` in `~/.hermes/config.yaml`.
     """
@@ -1910,7 +1908,7 @@ def setup_hermes_agent():
         click.echo(f"  {label}: {path}")
     click.echo(
         "\nPoppy is the active hermes memory provider. Run `hermes memory status` "
-        "to verify, then start a hermes session — it will call poppy_recall before "
+        "to verify, then start a hermes session. It will call poppy_recall before "
         "each turn and consolidate at session end."
     )
     _record_agent_setup("hermes-agent")
@@ -2248,7 +2246,7 @@ def _fail_if_unresolved_error(url) -> None:
     rs = remote_state_for(_get_poppy_dir(), url)
     if rs.errors:
         for kind, message in rs.errors.items():
-            click.echo(f"sync incomplete — {kind}: {message}", err=True)
+            click.echo(f"sync incomplete, {kind}: {message}", err=True)
         raise click.Abort()
 
 
@@ -2348,9 +2346,9 @@ def sync_status():
     pending = (_get_poppy_dir() / "sync.pending").exists()
     click.echo(f"  url:             {cfg.trags_api_url}")
     click.echo(f"  auto-sync:       {cfg.auto_sync}{'  (pending)' if pending else ''}")
-    click.echo(f"  last pulled at:  {rs.last_pulled_at or '—'}")
-    click.echo(f"  last pushed at:  {rs.last_pushed_at or '—'}")
-    click.echo(f"  last synced at:  {rs.last_synced_at or '—'}")
+    click.echo(f"  last pulled at:  {rs.last_pulled_at or 'not yet'}")
+    click.echo(f"  last pushed at:  {rs.last_pushed_at or 'not yet'}")
+    click.echo(f"  last synced at:  {rs.last_synced_at or 'not yet'}")
     click.echo(f"  pushed (total):  {rs.pushed_count}")
     click.echo(f"  pulled (total):  {rs.pulled_count}")
     # One line per outstanding origin — a push failure and a pull failure can
@@ -2362,7 +2360,7 @@ def sync_status():
 @sync_group.command("run")
 @click.option("--dry-run", is_flag=True, help="Preview sync changes; store upgrades still run on open.")
 def sync_run(dry_run: bool):
-    """Pull then push — full bidirectional sync."""
+    """Pull then push: full bidirectional sync."""
     from poppy.sync import TragsAuthError, TragsQuotaError, TragsTransportError
     from poppy.sync import sync as do_sync
 
@@ -2459,7 +2457,7 @@ def doctor():
 
     ok = True
 
-    def line(label: str, status: str, detail: str = "", hint: str = "", separator: str = " — ") -> None:
+    def line(label: str, status: str, detail: str = "", hint: str = "", separator: str = ", ") -> None:
         nonlocal ok
         if status == "FAIL":
             ok = False
@@ -2673,7 +2671,7 @@ def doctor():
             return ("registered against the HTTP daemon, but its URL is malformed (no host)", setup_hint)
         if host not in _LOOPBACK_HOSTS:
             return (
-                f"registered against a NON-loopback host ({host or 'unknown'}) — the client is sending its "
+                f"registered against a NON-loopback host ({host or 'unknown'}), the client is sending its "
                 "bearer token and MCP traffic off-box",
                 f"re-run `poppy setup {client_id} --daemon` to point it back at the local daemon",
             )
@@ -2812,7 +2810,7 @@ def doctor():
                 "daemon (client MCP)",
                 "WARN",
                 f"{names} registered against the HTTP daemon, but it is not usable (unreachable, "
-                "stale token, or malformed URL) — MCP is dead there",
+                "stale token, or malformed URL). MCP is dead there",
                 hint="start/reinstall the daemon (`poppy daemon install && poppy daemon start`) "
                 "or re-run `poppy setup <client> --daemon` to refresh the registration",
             )
@@ -3052,21 +3050,21 @@ def doctor():
         # only MSIX registered and the standard file is absent.
         desktop_problem = _client_daemon_problem("claude-desktop") if desktop_registered else None
         if desktop_registered and desktop_problem:
-            line("Claude desktop MCP", "WARN", f"{desktop_path} — {desktop_problem[0]}", hint=desktop_problem[1])
+            line("Claude desktop MCP", "WARN", f"{desktop_path}: {desktop_problem[0]}", hint=desktop_problem[1])
         elif desktop_registered:
             line("Claude desktop MCP", "OK", str(desktop_path))
         elif desktop_path.exists():
             line(
                 "Claude desktop MCP",
                 "WARN",
-                f"{desktop_path} — Poppy is set up for Claude Desktop but its MCP entry is missing here",
+                f"{desktop_path}: Poppy is set up for Claude Desktop but its MCP entry is missing here",
                 hint="run `poppy setup claude-desktop` to re-register",
             )
         else:
             line(
                 "Claude desktop MCP",
                 "WARN",
-                f"{desktop_path} — Poppy is not registered in the standard Claude Desktop config",
+                f"{desktop_path}: Poppy is not registered in the standard Claude Desktop config",
                 hint="run `poppy setup claude-desktop` to register it",
             )
         if msix_present:
@@ -3079,7 +3077,7 @@ def doctor():
                 line(
                     "Claude desktop MSIX MCP",
                     "WARN",
-                    f"{msix_desktop_path} — MSIX config missing; the packaged app cannot reach Poppy",
+                    f"{msix_desktop_path}: MSIX config missing; the packaged app cannot reach Poppy",
                     hint="run `poppy setup claude-desktop` to re-create the MSIX config",
                 )
             elif not msix_registered:
@@ -3090,9 +3088,7 @@ def doctor():
                     hint="run `poppy setup claude-desktop` to re-register the MSIX config",
                 )
             elif msix_problem:
-                line(
-                    "Claude desktop MSIX MCP", "WARN", f"{msix_desktop_path} — {msix_problem[0]}", hint=msix_problem[1]
-                )
+                line("Claude desktop MSIX MCP", "WARN", f"{msix_desktop_path}: {msix_problem[0]}", hint=msix_problem[1])
             else:
                 line("Claude desktop MSIX MCP", "OK", str(msix_desktop_path))
 
@@ -3135,14 +3131,14 @@ def doctor():
                 mcp_read_failed = True
         daemon_problem = _client_daemon_problem(client_id) if registered else None
         if daemon_problem:
-            line(label, "WARN", f"{path} — {daemon_problem[0]}", hint=daemon_problem[1])
+            line(label, "WARN", f"{path}: {daemon_problem[0]}", hint=daemon_problem[1])
         elif registered:
             line(label, "OK", str(path))
         elif mcp_read_failed:
             line(
                 label,
                 "WARN",
-                f"{path} — config present but unreadable; can't verify Poppy's MCP registration",
+                f"{path}: config present but unreadable; can't verify Poppy's MCP registration",
                 hint="fix the file's permissions/encoding, then re-run `poppy doctor`",
             )
         else:
@@ -3151,7 +3147,7 @@ def doctor():
             line(
                 label,
                 "WARN",
-                f"{path} — Poppy is set up here but its MCP entry is missing",
+                f"{path}: Poppy is set up here but its MCP entry is missing",
                 hint=f"run `{install_cmd}` to re-register the MCP server",
             )
 
@@ -3168,7 +3164,7 @@ def doctor():
         cursor_hooks_path = cursor_home / "hooks.json"
 
         def cursor_line(label: str, status: str, detail: str = "", hint: str = "") -> None:
-            line(label, status, detail, hint, separator=" - ")
+            line(label, status, detail, hint, separator=", ")
 
         cursor_hooks_ok = safe_read(is_cursor_hooks_installed, False)
         cursor_hooks_valid = False

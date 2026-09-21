@@ -246,8 +246,8 @@ def test_production_fetcher_sends_only_version_user_agent(monkeypatch):
 @pytest.mark.parametrize(
     ("latest", "expected"),
     [
-        ("0.2.2", "version: OK — 0.2.2 (latest)"),
-        ("0.2.3", "version: WARN — 0.2.3 available (installed 0.2.2)"),
+        ("0.2.2", "version: OK, 0.2.2 (latest)"),
+        ("0.2.3", "version: WARN, 0.2.3 available (installed 0.2.2)"),
     ],
 )
 def test_doctor_reports_version_status(tmp_path, monkeypatch, latest, expected):
@@ -277,7 +277,7 @@ def test_doctor_reports_disabled_update_check_reason(tmp_path, monkeypatch):
         ["doctor"],
         env={"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")},
     )
-    assert "version: OK — 0.2.2 (check is off: POPPY_UPDATE_CHECK_OFF=1)" in result.output
+    assert "version: OK, 0.2.2 (check is off: POPPY_UPDATE_CHECK_OFF=1)" in result.output
 
 
 def test_config_command_sets_update_check_on_and_off(tmp_path, monkeypatch):
