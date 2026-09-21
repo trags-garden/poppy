@@ -751,7 +751,7 @@ def _spawn_detached_worker(subcommand: str, payload: dict, worker_log_name: str)
 
 
 def _maybe_fire_capture(payload: dict) -> None:
-    """Mid-session capture trigger (ADR-0001).
+    """Mid-session capture trigger using ADR-0001's watermark-after-success rule.
 
     Every Nth turn, while consolidation is enabled, spawn a detached capture
     worker for the ``(watermark, now]`` window. All gating that needs the

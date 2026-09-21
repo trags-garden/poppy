@@ -158,13 +158,13 @@ def test_a_reingest_leaves_no_stale_fts_row_for_the_edited_memory(tmp_path: Path
 
 
 def _real_lookalike(db: Path) -> None:
-    """A parent plus a REAL memory whose id sits under the parent's closet prefix."""
+    """A parent plus a REAL memory whose id sits under the parent's copy id prefix."""
     engine = _bloom(db)
     engine.ingest(_memory("mem_customer", _turns()))
     engine.ingest(_memory("mem_customer_closet_notes", "the wardrobe budget for Q3"))
 
 
-def test_a_real_memory_shaped_like_a_closet_is_listed_and_synced(tmp_path: Path) -> None:
+def test_a_real_memory_shaped_like_a_copy_is_listed_and_synced(tmp_path: Path) -> None:
     db = tmp_path / "memories.db"
     _real_lookalike(db)
 
@@ -208,8 +208,8 @@ def test_a_seed_redaction_does_not_delete_a_real_lookalike(tmp_path: Path) -> No
     assert _all_ids(db) == ["mem_customer_closet_notes"]
 
 
-def test_a_pulled_memory_shaped_like_a_closet_is_ingested_untouched(tmp_path: Path) -> None:
-    """No closet detection at the wire: the marker is local provenance, not a shape."""
+def test_a_pulled_memory_shaped_like_a_copy_is_ingested_untouched(tmp_path: Path) -> None:
+    """No copy detection at the wire: the marker is local provenance, not a shape."""
     db = tmp_path / "memories.db"
     engine = _bloom(db)
     now = datetime.now(timezone.utc).isoformat()
@@ -338,7 +338,7 @@ def _write_legacy(engine, memory: Memory) -> None:
 
 
 def _legacy_store(tmp_path: Path) -> Path:
-    """A store written by a pre-marker client: closets present, column absent."""
+    """A store written by a pre-marker client: copies present, column absent."""
     db = tmp_path / "memories.db"
     _write_legacy(_bloom(db), _memory("sess-2026-01", _turns()))
     _strip_marker(db)
@@ -362,7 +362,7 @@ def _legacy_store_open(tmp_path: Path) -> tuple[Path, "BloomEngine"]:
     return db, engine
 
 
-def test_migration_marks_closets_it_can_re_derive_from_a_live_parent(tmp_path: Path) -> None:
+def test_migration_marks_copies_it_can_re_derive_from_a_live_parent(tmp_path: Path) -> None:
     db = _legacy_store(tmp_path)
     assert MARKER_COLUMN not in {r[1] for r in _rows(db, "PRAGMA table_info(memories)")}
 
@@ -478,10 +478,10 @@ def test_a_pre_marker_store_is_cleaned_on_the_first_open(tmp_path: Path) -> None
     assert _pending_ids(TombstoneStore(db)) == []
 
 
-def test_migration_leaves_a_real_memory_shaped_like_an_orphan_closet_alone(tmp_path: Path) -> None:
+def test_migration_leaves_a_real_memory_shaped_like_an_orphan_copy_alone(tmp_path: Path) -> None:
     """The orphan purge is conjunctive, so a hand-named memory survives it.
 
-    ``mem_customer_closet_notes`` splits like a closet and has no parent row, but
+    ``mem_customer_closet_notes`` splits like a copy and has no parent row, but
     it carries prose rather than a single-speaker turn list, so it fails the
     shape test and is left listed, recallable and unmarked.
     """
@@ -523,7 +523,7 @@ def test_migration_runs_on_a_seed_only_store_without_bloom_columns(tmp_path: Pat
     assert [m.id for m in seed.list_all()] == ["plain"]
 
 
-def test_a_single_speaker_session_gets_no_closet(tmp_path: Path) -> None:
+def test_a_single_speaker_session_gets_no_copy(tmp_path: Path) -> None:
     db = tmp_path / "memories.db"
     solo = json.dumps([{"speaker": "Alice", "text": "one"}, {"speaker": "Alice", "text": "two"}])
     _bloom(db).ingest(_memory("sess-2026-01", solo))
@@ -531,8 +531,8 @@ def test_a_single_speaker_session_gets_no_closet(tmp_path: Path) -> None:
     assert _all_ids(db) == ["sess-2026-01"]
 
 
-def test_forgetting_a_closet_id_directly_writes_no_speaker_text(tmp_path: Path) -> None:
-    """``retrieve`` surfaces closets, so a closet id is reachable by forget.
+def test_forgetting_a_copy_id_directly_writes_no_speaker_text(tmp_path: Path) -> None:
+    """``retrieve`` surfaces copies, so a copy id is reachable by forget.
 
     The ordinary path would snapshot the speaker turns into ``ui_tombstones``
     and push them as the body of a soft-delete. It must not.
@@ -565,7 +565,7 @@ def test_forgetting_a_closet_id_directly_writes_no_speaker_text(tmp_path: Path) 
 
 
 def test_forgetting_a_real_lookalike_still_tombstones_it_normally(tmp_path: Path) -> None:
-    """The closet branch is marker-gated, so a real memory keeps its restore window."""
+    """The copy branch is marker-gated, so a real memory keeps its restore window."""
     db = tmp_path / "memories.db"
     _real_lookalike(db)
     engine = _bloom(db)
@@ -625,8 +625,8 @@ def _legacy_deletion_row(mid: str, when: datetime | None = None, *, updated: dat
     }
 
 
-def test_pull_never_overwrites_a_marked_closet_with_a_live_cloud_row(tmp_path: Path) -> None:
-    """A live cloud row for a marked closet id must not become a real memory.
+def test_pull_never_overwrites_a_marked_copy_with_a_live_cloud_row(tmp_path: Path) -> None:
+    """A live cloud row for a marked copy id must not become a real memory.
 
     Ingesting it would write is_closet=0, so the copy would stop being derived
     data: it would list, it would push live, and forgetting its parent would no
@@ -661,8 +661,8 @@ def test_pull_never_overwrites_a_marked_closet_with_a_live_cloud_row(tmp_path: P
     assert [r for r in client.upserts if r["deleted_at"] is None] == []
 
 
-def test_pull_never_deletes_a_marked_closet_via_a_cloud_tombstone(tmp_path: Path) -> None:
-    """A cloud tombstone for a closet id must not remove a copy bloom owns.
+def test_pull_never_deletes_a_marked_copy_via_a_cloud_tombstone(tmp_path: Path) -> None:
+    """A cloud tombstone for a copy id must not remove a copy bloom owns.
 
     The server-side cleanup of pre-marker leaks sends exactly these
     rows. They refer to the cloud's stale copy, not to the row this device
@@ -692,8 +692,8 @@ def test_pull_never_deletes_a_marked_closet_via_a_cloud_tombstone(tmp_path: Path
     assert "sess-2026-01_closet_alice" not in {r.memory.id for r in engine.retrieve(SECRET, limit=10)}
 
 
-def test_pull_does_not_resurrect_a_closet_this_device_just_forgot(tmp_path: Path) -> None:
-    """An older cloud row must not undo a closet deletion inside its window."""
+def test_pull_does_not_resurrect_a_copy_this_device_just_forgot(tmp_path: Path) -> None:
+    """An older cloud row must not undo a copy deletion inside its window."""
     db = tmp_path / "memories.db"
     engine = _bloom(db)
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
@@ -719,10 +719,10 @@ def test_pull_does_not_resurrect_a_closet_this_device_just_forgot(tmp_path: Path
     assert not [r for r in engine.retrieve(SECRET, limit=10) if r.memory.id.endswith("_closet_alice")]
 
 
-def test_pull_applies_a_real_closet_shaped_memory_when_a_parent_is_present(tmp_path: Path) -> None:
+def test_pull_applies_a_real_copy_shaped_memory_when_a_parent_is_present(tmp_path: Path) -> None:
     """The skip reads the LOCAL marker, never the incoming id's shape.
 
-    A real cloud memory sitting under a live parent's closet prefix is unmarked
+    A real cloud memory sitting under a live parent's copy id prefix is unmarked
     here, so it syncs like any other memory.
     """
     db = tmp_path / "memories.db"
@@ -744,8 +744,8 @@ def test_pull_applies_a_real_closet_shaped_memory_when_a_parent_is_present(tmp_p
     assert sorted(m.id for m in engine.list_all()) == ["mem_customer", "mem_customer_closet_notes"]
 
 
-def test_a_seed_write_over_a_closet_id_makes_it_a_real_memory(tmp_path: Path) -> None:
-    """A note written at a closet's id must stop being derived data.
+def test_a_seed_write_over_a_copy_id_makes_it_a_real_memory(tmp_path: Path) -> None:
+    """A note written at a copy's id must stop being derived data.
 
     Keeping the marker would hide the user's note from every list and then
     destroy it when the unrelated parent memory was deleted.
@@ -766,8 +766,8 @@ def test_a_seed_write_over_a_closet_id_makes_it_a_real_memory(tmp_path: Path) ->
     assert seed.get("sess-2026-01_closet_alice").content == "my own note about Alice"
 
 
-def test_migration_leaves_a_real_memory_at_a_derivable_closet_id_alone(tmp_path: Path) -> None:
-    """Re-derivability is not enough — the row must also BE closet-shaped.
+def test_migration_leaves_a_real_memory_at_a_derivable_copy_id_alone(tmp_path: Path) -> None:
+    """Re-derivability is not enough: the row must also BE copy-shaped.
 
     `meeting` is multi-speaker with an Alice, so bloom would mint
     `meeting_closet_alice`. A real memory already sitting at that id holds the
@@ -804,7 +804,7 @@ def test_a_malformed_legacy_row_does_not_abort_the_migration(tmp_path: Path) -> 
     _insert_legacy(db, "meeting_closet_notes", "just some prose", [])
 
     _migrate_only(db)  # must not raise
-    # The well-formed closets alongside them still got marked, before the open
+    # The well-formed copies alongside them still got marked, before the open
     # below removes them.
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
 
@@ -852,7 +852,7 @@ def test_ingesting_malformed_turns_does_not_crash_the_engine(tmp_path: Path) -> 
     assert SeedEngine(db_path=db).get("sess-2026-01").content == _LIST_SPEAKER
 
 
-def test_expiry_does_not_announce_closet_deletions(tmp_path: Path) -> None:
+def test_expiry_does_not_announce_copy_deletions(tmp_path: Path) -> None:
     """TTL is not a redaction: the cloud row carries the same expires_at."""
     db = tmp_path / "memories.db"
     engine = _bloom(db)
@@ -865,7 +865,7 @@ def test_expiry_does_not_announce_closet_deletions(tmp_path: Path) -> None:
     assert TombstoneStore(db).list_copy_deletions() == []
 
 
-def test_forgetting_a_closet_reports_no_restore_window(tmp_path: Path) -> None:
+def test_forgetting_a_copy_reports_no_restore_window(tmp_path: Path) -> None:
     """Nothing was snapshotted, so advertising a 7-day window would be a lie."""
     db = tmp_path / "memories.db"
     engine = _bloom(db)
@@ -879,8 +879,8 @@ def test_forgetting_a_closet_reports_no_restore_window(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("engine_name", ["bloom", "seed"])
-def test_edit_memory_refuses_a_marked_closet(tmp_path: Path, engine_name: str) -> None:
-    """`poppy edit <closet id> --project x` keeps the text and would clear the marker.
+def test_edit_memory_refuses_a_marked_copy(tmp_path: Path, engine_name: str) -> None:
+    """`poppy edit <copy id> --project x` keeps the text and would clear the marker.
 
     The copy would then list, push live with the secret, and survive the
     parent's redaction. Editing a derived copy is refused; edit the parent.
@@ -901,7 +901,7 @@ def test_edit_memory_refuses_a_marked_closet(tmp_path: Path, engine_name: str) -
 
 
 def test_a_changed_content_write_still_reclaims_the_id(tmp_path: Path) -> None:
-    """The round-1 guarantee survives: a real note over a closet id is a real memory."""
+    """The round-1 guarantee survives: a real note over a copy id is a real memory."""
     db = tmp_path / "memories.db"
     engine = _bloom(db)
     _write_legacy(engine, _memory("sess-2026-01", _turns()))
@@ -912,10 +912,10 @@ def test_a_changed_content_write_still_reclaims_the_id(tmp_path: Path) -> None:
     assert sorted(m.id for m in engine.list_all()) == ["sess-2026-01", "sess-2026-01_closet_alice"]
 
 
-def test_a_reclaimed_closet_id_still_receives_cloud_updates(tmp_path: Path) -> None:
+def test_a_reclaimed_copy_id_still_receives_cloud_updates(tmp_path: Path) -> None:
     """Forget a copy, write a real note at that id, then pull a newer version.
 
-    The closet tombstone must not make pull skip it: the watermark advances
+    The copy deletion record must not make pull skip it: the watermark advances
     either way, so a skip loses the update permanently.
     """
     db = tmp_path / "memories.db"
@@ -969,13 +969,13 @@ def test_a_reclaimed_id_syncs_even_if_the_tombstone_survives(tmp_path: Path) -> 
     assert engine.get("sess-2026-01_closet_alice").content == "newer still"
 
 
-def test_migration_marks_a_closet_that_arrived_through_the_cloud(tmp_path: Path) -> None:
-    """The enrichment proves nothing about a closet's provenance.
+def test_migration_marks_a_copy_that_arrived_through_the_cloud(tmp_path: Path) -> None:
+    """The enrichment proves nothing about a copy's provenance.
 
-    Clients at or below 0.3.0 push closets live, and a second device that pulls
+    Clients at or below 0.3.0 push copies live, and a second device that pulls
     one runs it through the ordinary ingest, which re-enriches it with the
     FULL-session preamble instead of the per-speaker one. That row is a genuine
-    legacy closet with a completely different enrichment, so requiring the
+    legacy copy with a completely different enrichment, so requiring the
     per-speaker preamble left exactly these unmarked, listed, and alive through
     their parent's redaction.
     """
@@ -1073,8 +1073,8 @@ def test_the_migration_backup_ages_out_on_the_tombstone_clock(tmp_path: Path) ->
     assert _backup_rows(db) == {}
 
 
-def test_a_pulled_closet_tombstone_never_becomes_a_restorable_entry(tmp_path: Path) -> None:
-    """Another device's closet deletion, on a device that never had that copy.
+def test_a_pulled_copy_deletion_never_becomes_a_restorable_entry(tmp_path: Path) -> None:
+    """Another device's copy deletion, on a device that never had that copy.
 
     Filed as a ui tombstone it would show in Trash with the placeholder
     (`LEGACY_DELETION_BODY`) as its body, and restoring it would create junk
@@ -1145,7 +1145,7 @@ def test_a_real_memory_matching_the_placeholder_still_gets_deleted(tmp_path: Pat
     assert _local_deletion_time(db, "mem_odd") is None
 
 
-def test_supersede_refuses_a_marked_closet(tmp_path: Path) -> None:
+def test_supersede_refuses_a_marked_copy(tmp_path: Path) -> None:
     """Superseding a copy snapshots its speaker turns into Trash and onto the wire.
 
     A later restore then brings them back unmarked, listed, and pushed live.
@@ -1165,7 +1165,7 @@ def test_supersede_refuses_a_marked_closet(tmp_path: Path) -> None:
     assert _marked_ids(db) == ["sess-2026-01_closet_alice", "sess-2026-01_closet_bob"]
 
 
-def test_remember_with_supersedes_pointing_at_a_closet_is_refused(tmp_path: Path) -> None:
+def test_remember_with_supersedes_pointing_at_a_copy_is_refused(tmp_path: Path) -> None:
     """The reachable surface: `poppy remember --supersedes <copy id>` and the MCP twin."""
     from poppy.write_flow import remember
 
@@ -1369,7 +1369,7 @@ def test_an_unsent_tombstone_survives_the_purge_and_still_propagates(tmp_path: P
     assert store.get("mem_secret") is None
 
 
-def test_an_unsent_closet_deletion_is_not_purged_by_age(tmp_path: Path) -> None:
+def test_an_unsent_copy_deletion_is_not_purged_by_age(tmp_path: Path) -> None:
     """Same rule for the copy deletions: unsent means a leaked cloud copy stays."""
     db = tmp_path / "memories.db"
     engine = _bloom(db)
@@ -2652,7 +2652,7 @@ def test_push_still_sends_a_row_that_is_only_a_lookalike(tmp_path: Path) -> None
     assert {r["id"] for r in client.upserts} == {"p", "p_closet_notes"}
 
 
-def test_newer_remote_closet_deletion_is_not_retained(tmp_path: Path) -> None:
+def test_newer_remote_copy_deletion_is_not_retained(tmp_path: Path) -> None:
     """A server cleanup at t3 left the local record still saying t1.
 
     "Earliest wins" is about not refreshing a record with a later SIGHTING of the

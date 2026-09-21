@@ -1,4 +1,4 @@
-"""Per-session capture watermark (ADR-0001).
+"""Per-session capture watermark for ADR-0001's watermark-after-success rule.
 
 The capture watermark is the index of the last transcript turn already captured
 for a session. Every capture — each mid-session fire and the SessionEnd backstop

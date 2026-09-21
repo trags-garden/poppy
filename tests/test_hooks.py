@@ -85,7 +85,7 @@ def test_session_start_active_banner_shows_counts(tmp_path, monkeypatch):
 
 def test_session_start_consent_pending_banner_points_to_enable(tmp_path, monkeypatch):
     """A fresh install (consent pending) shows the consent nudge, not silence and
-    not a misleading '0 captured' (ADR-0002)."""
+    not a misleading '0 captured' (ADR-0002 consent and default-on precedence)."""
     monkeypatch.setenv("POPPY_DIR", str(tmp_path))
     monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)  # default: consent pending
     runner = CliRunner()

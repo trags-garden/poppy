@@ -32,8 +32,8 @@ from poppy.runtime import get_poppy_dir
 _DEFAULT_POLL_INTERVAL_S = 2.0
 _DEFAULT_TIMEOUT_S = 5 * 60
 # OAEP-SHA256 padding for a 2048-bit key can wrap up to 190 bytes — far more
-# than a usr_* key — and matches the Node `publicEncrypt` params on the server
-# (web/app/api/cli-setup/authorize/route.ts).
+# than a usr_* key. The Trags CLI authorization endpoint returns ciphertext
+# encrypted with the submitted public key, using these same parameters.
 _OAEP = padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
 
 

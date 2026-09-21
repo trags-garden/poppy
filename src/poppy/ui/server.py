@@ -543,7 +543,7 @@ def _today_summary(
     # The summary is rendered as HTML in the Today hero; the <em>/<strong> tags
     # are intentional, but every interpolated value (project/source/type) comes
     # from stored memories and is attacker-controllable, so escape each one so
-    # only the literal markup below reaches the browser (PP-01).
+    # only the literal markup below reaches the browser.
     top_type, _ = types.most_common(1)[0]
     parts = [f"Today Poppy stored <em>{todays_count}</em> memor" + ("y" if todays_count == 1 else "ies")]
     if projects:

@@ -830,7 +830,7 @@ def test_install_claude_desktop_also_merges_msix_config(tmp_path, monkeypatch):
     assert msix["marker"] == "keep"
 
 
-# --- PP-02: corrupt-config safety, universal backup, atomic write ---
+# --- Corrupt-config safety, universal backup, atomic write ---
 
 
 def test_install_aborts_on_corrupt_config_without_overwriting(tmp_path):

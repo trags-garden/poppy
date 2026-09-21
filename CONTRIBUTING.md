@@ -10,3 +10,7 @@ now. Bug reports and feature requests are welcome as
 email at feedback@trags.ai. For security issues, see [SECURITY.md](SECURITY.md).
 
 If you build something on top of Poppy, we would love to hear about it.
+
+Some source and test comments cite ADR-0001, ADR-0002, or ADR-0003. These
+labels name non-public decision records; the nearby comment or docstring states
+the relevant decision so the code remains understandable without the record.

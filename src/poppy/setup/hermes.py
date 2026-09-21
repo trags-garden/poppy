@@ -14,7 +14,7 @@ Only ONE external provider is active at a time; the built-in
 
 The plugin we install shells out to the ``poppy`` CLI for recall/remember
 so a hermes session shares ``~/.poppy/memories.db`` with Claude Code.
-The shape mirrors ``plugins/memory/byterover/`` in the hermes repo.
+The shape follows Hermes's third-party memory-provider plugin convention.
 """
 
 from __future__ import annotations

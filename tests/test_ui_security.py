@@ -1,14 +1,12 @@
-"""Security regression tests for the local UI + MCP output bounds.
+"""Security regression tests for the local UI and MCP output bounds.
 
-Covers the PP-01..PP-05 hardening cluster:
-  - PP-01: stored content is neutralized at every render sink (the server-side
-    Today summary, and — statically — the app.js memory_type sinks), plus the
-    memory_type enum guard at the MCP write boundary.
-  - PP-03: the UI answers only allowlisted Host headers.
-  - PP-05: MCP recall/context/recall_full bound their output.
-  - CSP + nosniff headers on every UI response.
+Covers stored-content escaping at every render sink (the server-side Today
+summary and, statically, the app.js memory_type sinks), plus the memory_type enum
+guard at the MCP write boundary. The UI answers only allowlisted Host headers,
+and MCP recall, context, and recall_full bound their output. CSP and nosniff
+headers are present on every UI response.
 
-Setup-config safety (PP-02) lives in test_setup_claude_code.py.
+Setup-config safety lives in test_setup_claude_code.py.
 """
 
 from __future__ import annotations
@@ -67,7 +65,7 @@ def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app, base_url="http://localhost")
 
 
-# --- PP-01: the server-rendered Today summary escapes user values ---
+# --- The server-rendered Today summary escapes user values ---
 
 
 def test_today_summary_escapes_project(app_client: TestClient, tmp_path: Path) -> None:
@@ -97,7 +95,7 @@ def test_today_summary_escapes_type(app_client: TestClient, tmp_path: Path) -> N
     assert "<img" not in summary
 
 
-# --- PP-01: app.js escapes the memory_type sinks (JS-side regression net) ---
+# --- app.js escapes the memory_type sinks (JS-side regression net) ---
 
 
 def test_app_js_escapes_memory_type_sinks() -> None:
@@ -107,7 +105,7 @@ def test_app_js_escapes_memory_type_sinks() -> None:
     assert "escapeHtml(m.memory_type)" in app_js
 
 
-# --- PP-01 / headers: CSP + nosniff present on every response ---
+# --- CSP + nosniff headers are present on every response ---
 
 
 def test_csp_and_nosniff_headers_present(app_client: TestClient) -> None:
@@ -129,7 +127,7 @@ def test_csp_disallows_inline_script_and_style(app_client: TestClient) -> None:
     assert "style-src 'self'" in csp
 
 
-# --- PP-03: Host allowlist ---
+# --- Host allowlist ---
 
 
 def test_untrusted_host_rejected(app_client: TestClient) -> None:
@@ -154,7 +152,7 @@ def test_allow_remote_disables_host_check(tmp_path: Path, monkeypatch: pytest.Mo
     assert client.get("/api/facets").status_code == 200
 
 
-# --- PP-01: memory_type enum normalization at the MCP write boundary ---
+# --- memory_type enum normalization at the MCP write boundary ---
 
 
 @pytest.fixture
@@ -187,7 +185,7 @@ async def test_edit_normalizes_unknown_type(mcp_server) -> None:
     assert mcp_server._engine.get(r["id"]).memory_type == "fact"
 
 
-# --- PP-05: MCP output bounds ---
+# --- MCP output bounds ---
 
 
 @pytest.mark.asyncio

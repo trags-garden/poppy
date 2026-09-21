@@ -244,7 +244,7 @@ class CorruptConfigError(Exception):
 
     Raised (in strict mode) instead of silently returning `{}`, so a write path
     that would overwrite the whole file aborts rather than truncating a config
-    that was merely malformed (PP-02).
+    that was merely malformed.
     """
 
 
@@ -733,7 +733,7 @@ def _install_json_mcp_config(
     backup_existing: bool = True,
 ) -> Path:
     # Read strict first: abort on a corrupt existing config before we touch it,
-    # rather than truncating the user's file to a 3-key stub (PP-02).
+    # rather than truncating the user's file to a 3-key stub.
     target = _resolve_write_target(settings_path)
     settings = _read_json(target, strict=True)
     # Back up any existing config before the first overwrite, for every client.
