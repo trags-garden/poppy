@@ -3420,13 +3420,15 @@ def test_a_newer_entry_at_that_id_survives_a_pulled_copy_snapshot(tmp_path: Path
 
 
 @pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
-def test_a_copy_kept_on_inference_is_never_shown(tmp_path: Path, engine_kind: str) -> None:
-    """Kept in the store, out of every way of reading it.
+def test_a_copy_kept_on_inference_is_kept_out_of_list_stats_and_recall(tmp_path: Path, engine_kind: str) -> None:
+    """Kept in the store, and out of the three ways of reading it that search.
 
     Its text is not rewritten, because it may be a split someone curated rather
     than a stale copy. It is still a projection of text the memory beside it
-    holds, so a listing, a count and a recall must not surface it. Recall runs
-    through the engine, so the MCP tools and the dashboard are covered by this.
+    holds, so a listing, a count and a recall must not surface it.
+
+    Scope: list, stats and recall only. A read by exact id still returns the
+    row, which is what the cleanup and the redaction path rely on.
     """
     db = _tier_b_store(tmp_path)
     copy_id = "sess-2026-01_closet_alice"
@@ -3471,6 +3473,33 @@ def test_editing_the_text_takes_a_copy_of_what_it_replaced(tmp_path: Path, engin
 
     assert engine.get(copy_id) is None
     assert _all_ids(db) == ["sess-2026-01"]
+
+
+def test_a_field_not_stored_as_text_earns_no_grade(tmp_path: Path) -> None:
+    """Storage class decides what may be graded, not what the bytes spell.
+
+    A value stored as a blob is not one any release that wrote copies produced,
+    so it is nobody's copy however exactly it matches. Decoding it and grading
+    on the text alone made a row that spells the projection removable, and the
+    removal keeps no pre-image.
+    """
+    db = _legacy_store(tmp_path)
+    copy_id = "sess-2026-01_closet_alice"
+    projected = _rows(db, "SELECT content FROM memories WHERE id = ?", (copy_id,))[0][0]
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE memories SET content = CAST(? AS BLOB) WHERE id = ?", (projected, copy_id))
+    conn.commit()
+    conn.close()
+    assert _rows(db, "SELECT typeof(content) FROM memories WHERE id = ?", (copy_id,)) == [("blob",)]
+
+    engine = _bloom(db)
+
+    assert engine.get(copy_id) is not None
+    assert _rows(db, "SELECT is_closet FROM memories WHERE id = ?", (copy_id,)) == [(0,)]
+    assert copy_id in [m.id for m in engine.list_all()]
+    assert _backup_rows(db) == {}
+    # Its sibling is still stored as text, so it is graded and cleaned as before.
+    assert engine.get("sess-2026-01_closet_bob") is None
 
 
 def test_a_row_that_is_not_text_leaves_the_store_openable(tmp_path: Path) -> None:

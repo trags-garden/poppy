@@ -163,10 +163,10 @@ def back_up_inferred_copy(conn: sqlite3.Connection, memory_id: str, action: str 
 def _decoded(value: object) -> str | None:
     """Text for a column read as raw bytes, or a raise the caller turns into no grade.
 
-    Read as bytes on purpose. A store can hold bytes in a TEXT column that are
-    not valid text at all, and the database driver raises while BUILDING the
-    result set, which is before any per-row guard can run. Decoding one row at a
-    time moves that failure inside the guard.
+    Read as bytes on purpose. A column declared TEXT can still hold bytes that
+    are not valid text, and the database driver raises while BUILDING the result
+    set, which is before any per-row guard can run. Decoding one row at a time
+    moves that failure inside the guard.
     """
     if value is None or isinstance(value, str):
         return value
@@ -174,15 +174,27 @@ def _decoded(value: object) -> str | None:
 
 
 def legacy_copy_grades(conn: sqlite3.Connection) -> list[tuple[str, str]]:
-    """Read unmarked candidates once, before any marker writes change the store."""
+    """Read unmarked candidates once, before any marker writes change the store.
+
+    Each field is read twice: as raw bytes, and as the storage class the value
+    actually has. Only a value stored AS TEXT is a value a release that wrote
+    copies could have written, so only that is decoded and graded. A row holding
+    anything else in a field this reads gets no grade at all, whatever those
+    bytes would spell: reading it as text would let a row nothing here wrote
+    look like a copy, and the strongest grade authorises deleting it without
+    keeping a pre-image.
+    """
     rows = conn.execute(
         "SELECT CAST(id AS BLOB), CAST(content AS BLOB), CAST(related_to AS BLOB), "
-        "CAST(created_at AS BLOB) FROM memories "
+        "CAST(created_at AS BLOB), typeof(id), typeof(content), typeof(related_to), "
+        "typeof(created_at) FROM memories "
         "WHERE instr(id, ?) > 0 AND COALESCE(is_closet, 0) = 0",
         (SEPARATOR,),
     ).fetchall()
     grades = []
-    for raw_id, raw_content, raw_related, raw_created in rows:
+    for raw_id, raw_content, raw_related, raw_created, *storage in rows:
+        if any(kind != "text" for kind in storage):
+            continue
         try:
             memory_id = _decoded(raw_id)
             tier, _ = classify_legacy_copy(
