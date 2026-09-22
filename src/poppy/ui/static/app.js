@@ -773,14 +773,8 @@ async function deleteSelected() {
   const m = state.selected;
   if (!m) return;
   try {
-    const res = await api(`/api/memories/${m.id}`, { method: "DELETE" });
-    // `restorable: false` means nothing was snapshotted, so there is no undo
-    // to offer. Offering Undo would hand the user a button that 404s.
-    if (res && res.restorable === false) {
-      toast("Deleted.");
-    } else {
-      toast("Tombstoned. Restorable for 7 days.", { undo: () => restoreById(m.id) });
-    }
+    await api(`/api/memories/${m.id}`, { method: "DELETE" });
+    toast("Tombstoned. Restorable for 7 days.", { undo: () => restoreById(m.id) });
     await loadList();
     await loadFacets();
     await loadStats();
