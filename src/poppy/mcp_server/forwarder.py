@@ -50,6 +50,7 @@ class _BridgeState:
     """Mutable state shared by the two one-way pumps."""
 
     pending: set[str | int] = field(default_factory=set)
+    handshake_sent: bool = False
     in_flight: bool = False
     stdin_eof: bool = False
     exit_code: int = 0
@@ -67,6 +68,29 @@ def _response_id(message: SessionMessage) -> str | int | None:
     if isinstance(root, types.JSONRPCResponse | types.JSONRPCError):
         return root.id
     return None
+
+
+def _pre_handshake_reply(request: types.JSONRPCRequest) -> SessionMessage:
+    """Answer a request that arrives before the client has sent ``initialize``.
+
+    The daemon only creates a session once it has seen ``initialize``, so any
+    earlier request would be answered by its transport with an HTTP error that
+    looks to this process like a dead daemon. Some clients open with a probe
+    (for example ``server/discover``) before the handshake, so those are
+    answered here instead of forwarded. ``ping`` is the one method allowed
+    before the handshake, and it carries no result of its own.
+    """
+    if request.method == "ping":
+        return SessionMessage(types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id=request.id, result={})))
+    return SessionMessage(
+        types.JSONRPCMessage(
+            types.JSONRPCError(
+                jsonrpc="2.0",
+                id=request.id,
+                error=types.ErrorData(code=types.METHOD_NOT_FOUND, message="Method not found"),
+            )
+        )
+    )
 
 
 async def _send_connection_errors(write_stream, pending: set[str | int]) -> None:
@@ -99,6 +123,20 @@ async def _bridge(
             async for message in local_read:
                 if isinstance(message, Exception):
                     continue
+                if not state.handshake_sent:
+                    root = message.message.root
+                    if isinstance(root, types.JSONRPCRequest):
+                        if root.method == "initialize":
+                            state.handshake_sent = True
+                        else:
+                            # Answered locally, so it never joins pending: the
+                            # daemon will never produce a response for it.
+                            await local_write.send(_pre_handshake_reply(root))
+                            continue
+                    elif isinstance(root, types.JSONRPCNotification):
+                        # Nothing can act on a notification before the
+                        # handshake, and it has no id to answer.
+                        continue
                 request_id = _request_id(message)
                 if request_id is not None:
                     state.pending.add(request_id)

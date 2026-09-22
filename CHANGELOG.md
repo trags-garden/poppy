@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy serve` no longer drops the connection when an MCP client sends a
+  request before the handshake. Some clients open with a discovery probe, which
+  the daemon has no session for yet; that probe is now answered with a
+  "method not found" error instead of taking the connection down, and the
+  client's `initialize` goes through as usual.
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed
