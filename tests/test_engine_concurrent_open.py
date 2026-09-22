@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 import poppy
+import poppy.db
 from poppy.engine.seed import SCHEMA as SEED_SCHEMA
 
 # Enough openers to lose the race reliably on an unfixed tree, without making CI
@@ -182,9 +183,61 @@ def open_store_concurrently(store_dir: Path, engine: str, processes: int = PROCE
     )
 
 
+def _open_in_process(engine: str, db_path: Path):
+    """Construct the engine under test here rather than in a child."""
+    if engine == "seed":
+        from poppy.engine.seed import SeedEngine
+
+        return SeedEngine(db_path)
+
+    from poppy.engine._hybrid import HybridEngine
+
+    class _Engine(HybridEngine):
+        model_id = "test-model"
+
+    return _Engine(db_path)
+
+
 @pytest.mark.parametrize("engine", ["seed", "bloom"])
 def test_concurrent_open_of_an_upgrade_shaped_store(tmp_path, engine):
     """Every opener gets through the open-time schema and migration block."""
     store_dir = tmp_path / engine
     store_dir.mkdir()
     open_store_concurrently(store_dir, engine)
+
+
+@pytest.mark.parametrize("engine", ["seed", "bloom"])
+def test_a_current_store_opens_without_taking_the_gate(tmp_path, engine, monkeypatch):
+    """A store that owes nothing must open without waiting on the write gate.
+
+    Opens are on the hot path: hooks, reads and every CLI call make one. Taking
+    the store's write lock unconditionally would put whatever a concurrent
+    writer is doing, a cold model load or a sync pull, in front of all of them.
+    So the lock is only for opens that actually have something to write, and a
+    store that is already up to date must not even create the gate file.
+    """
+    store_dir = tmp_path / engine
+    store_dir.mkdir()
+    db_path = store_dir / "memories.db"
+    _build_upgrade_shaped_store(db_path)
+
+    # The first open owes every migration, so it is expected to gate.
+    first = _open_in_process(engine, db_path)
+    first._conn.close()
+
+    gate = store_dir / "write.gate"
+    assert gate.exists(), "the first open owed work and should have taken the gate"
+    gate.unlink()
+
+    def refuse_gate(*args, **kwargs):
+        raise AssertionError("an already-upgraded store must open without the write gate")
+
+    monkeypatch.setattr(poppy.db, "write_gate", refuse_gate)
+
+    second = _open_in_process(engine, db_path)
+    try:
+        assert second._conn.execute("SELECT expires_at FROM memories LIMIT 1").fetchone() is not None
+    finally:
+        second._conn.close()
+
+    assert not gate.exists(), "opening a store that owes nothing must not create the gate file"

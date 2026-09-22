@@ -27,9 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "database is locked" or "duplicate column name". The first open after an
   upgrade is where it showed: that open applies the pending schema changes, so
   the CLI, the MCP server, the daemon and the dashboard starting together could
-  collide on them. The whole open now runs under the store's existing write
-  lock, one opener at a time, and the store itself was never damaged by the
-  failures.
+  collide on them. Openers of a store that still needs its upgrade now take the
+  store's write lock, so they run one at a time, and an open that fails that way
+  is retried once. A store that is already up to date opens as before, without
+  taking the lock, so ordinary commands and hooks never wait on a writer. The
+  store itself was never damaged by these failures.
 
 ## [0.3.1] - 2026-09-22
 

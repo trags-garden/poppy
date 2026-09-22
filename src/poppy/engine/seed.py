@@ -4,11 +4,12 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
-from poppy.db import connect as connect_db
+from poppy.db import apply_row_factory, open_with_upgrades, write_txn
 from poppy.engine._timestamps import (
+    TIMESTAMP_MIGRATION,
     chunked,
     expiry_passed,
+    migration_applied,
     normalise_stored_timestamps,
     unexpired_sql,
     utc_iso,
@@ -80,6 +81,21 @@ def _fts_triggers_enriched(conn: sqlite3.Connection) -> bool:
     return all("enriched_content" in (rows[name] or "") for name in ("memory_ai", "memory_au"))
 
 
+def _enriched_content_current(conn: sqlite3.Connection) -> bool:
+    """Whether ``enriched_content`` and its FTS triggers are fully in place.
+
+    Both the migration's fast path and the pre-open currency check ask this, so
+    they can never disagree about what "already migrated" means. Runs on a
+    read-only probe connection too, hence positional row access.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+    if "enriched_content" not in cols:
+        return False
+    if conn.execute("SELECT 1 FROM memories WHERE enriched_content IS NULL LIMIT 1").fetchone():
+        return False
+    return _fts_triggers_enriched(conn)
+
+
 def _migrate_enriched_content(conn: sqlite3.Connection) -> None:
     """Idempotently add ``enriched_content`` and rewire FTS triggers to point at it.
 
@@ -105,12 +121,7 @@ def _migrate_enriched_content(conn: sqlite3.Connection) -> None:
     """
     # Fast path: nothing to do, so don't take the write lock on every bloom
     # construction. Only when work remains do we serialize.
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
-    has_null = bool(
-        "enriched_content" in cols
-        and conn.execute("SELECT 1 FROM memories WHERE enriched_content IS NULL LIMIT 1").fetchone()
-    )
-    if "enriched_content" in cols and not has_null and _fts_triggers_enriched(conn):
+    if _enriched_content_current(conn):
         return
 
     # The whole migration runs under one BEGIN IMMEDIATE so no other writer can
@@ -220,6 +231,19 @@ def _migrate_embedding_model_id(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _seed_store_is_current(conn: sqlite3.Connection) -> bool:
+    """Whether a store already holds everything a seed open would write.
+
+    Asked of a read-only probe before any lock is taken, so it must answer from
+    reads alone and must be conservative: anything it cannot confirm counts as
+    work owed, and the open takes the gate.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+    if "expires_at" not in cols:
+        return False
+    return migration_applied(conn, TIMESTAMP_MIGRATION)
+
+
 class SeedEngine(RetrievalEngine):
     """FTS5-only retrieval — no ML deps, no model downloads. The universal fallback."""
 
@@ -231,34 +255,24 @@ class SeedEngine(RetrievalEngine):
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._lock = threading.RLock()
-        # The whole open -- the connection, the schema and the migrations -- runs
-        # under the store's write gate, because opening writes, in two ways that
-        # processes starting together collide on:
-        #
-        # * ``connect`` flips a rollback-journal store to WAL. That flip wants the
-        #   database's exclusive lock, and SQLite refuses to run the busy handler
-        #   for it, so a contended opener fails outright instead of waiting.
-        # * "is this column missing?" and "add it" are separate statements, so two
-        #   openers can both decide to add one and the loser gets ``duplicate
-        #   column name``; enough of them piling up gives ``database is locked``.
-        #
-        # Realistically that is the first open after an upgrade, when the CLI, the
-        # MCP server, the daemon and the dashboard all reach a store that has not
-        # applied its new migrations yet. The gate is taken once per open and
-        # released before the engine serves anything, so a long-lived holder never
-        # keeps another opener out; and it is taken BEFORE the connection's shared
-        # encryption gate, the order ``write_gate`` documents, so the two cannot
-        # deadlock.
-        with write_gate(db_path.parent):
-            self._conn = connect_db(db_path, check_same_thread=False)
-            try:
-                apply_row_factory(self._conn)
-                self._conn.executescript(SCHEMA)
-                _migrate_expires_at(self._conn)
-                normalise_stored_timestamps(self._conn)
-            except Exception:
-                rollback_and_close(self._conn)
-                raise
+        # Opening a store that still owes its one-time upgrades is a write, and
+        # several processes doing it at once collide; ``open_with_upgrades`` owns
+        # that policy for both engines. A store that is already current takes no
+        # lock at all, so the hook and read paths never wait on a writer.
+        self._conn = open_with_upgrades(
+            db_path,
+            store_is_current=_seed_store_is_current,
+            apply_upgrades=self._apply_open_time_work,
+            check_same_thread=False,
+        )
+
+    @staticmethod
+    def _apply_open_time_work(conn: sqlite3.Connection) -> None:
+        """Bring a just-opened store up to date. Idempotent, and re-run inside the gate."""
+        apply_row_factory(conn)
+        conn.executescript(SCHEMA)
+        _migrate_expires_at(conn)
+        normalise_stored_timestamps(conn)
 
     def _invalidate_parent_embedding(self, memory_id: str) -> None:
         """Retag ``memory_id``'s vector as stale instead of deleting it.

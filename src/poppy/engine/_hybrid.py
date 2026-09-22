@@ -16,11 +16,12 @@ from pathlib import Path
 
 import numpy as np
 
-from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
-from poppy.db import connect as connect_db
+from poppy.db import apply_row_factory, open_with_upgrades, write_txn
 from poppy.engine._timestamps import (
+    TIMESTAMP_MIGRATION,
     chunked,
     expiry_passed,
+    migration_applied,
     normalise_stored_timestamps,
     unexpired_sql,
     utc_iso,
@@ -156,6 +157,28 @@ def _enrich_full_content(content: str, session_timestamp: str | None = None) -> 
     return "\n".join(lines) if lines else content
 
 
+def _hybrid_store_is_current(conn: sqlite3.Connection) -> bool:
+    """Whether a store already holds everything a hybrid open would write.
+
+    Asked of a read-only probe before any lock is taken, so it answers from
+    reads alone and is conservative: anything it cannot confirm counts as work
+    owed, and the open takes the gate.
+    """
+    from poppy.engine.seed import _enriched_content_current  # noqa: PLC0415
+
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
+    if "expires_at" not in cols:
+        return False
+    if not _enriched_content_current(conn):
+        return False
+    # An absent memory_embeddings table is not work: the model_id migration
+    # skips it entirely, and the schema creates it with the column already there.
+    embedding_cols = {row[1] for row in conn.execute("PRAGMA table_info(memory_embeddings)")}
+    if embedding_cols and "model_id" not in embedding_cols:
+        return False
+    return migration_applied(conn, TIMESTAMP_MIGRATION)
+
+
 class HybridEngine(RetrievalEngine):
     """FTS5 and cosine retrieval followed by cross-encoder reranking."""
 
@@ -176,46 +199,36 @@ class HybridEngine(RetrievalEngine):
         # back. Reentrant so a write path may call another one on the
         # same thread; seed holds the same discipline.
         self._lock = threading.RLock()
-        # The whole open -- the connection, the schema and the migrations -- runs
-        # under the store's write gate, because opening writes, in two ways that
-        # processes starting together collide on:
-        #
-        # * ``connect`` flips a rollback-journal store to WAL. That flip wants the
-        #   database's exclusive lock, and SQLite refuses to run the busy handler
-        #   for it, so a contended opener fails outright instead of waiting.
-        # * "is this column missing?" and "add it" are separate statements, so two
-        #   openers can both decide to add one and the loser gets ``duplicate
-        #   column name``; enough of them piling up gives ``database is locked``.
-        #
-        # Realistically that is the first open after an upgrade, when the CLI, the
-        # MCP server, the daemon and the dashboard all reach a store that has not
-        # applied its new migrations yet. The gate is taken once per open and
-        # released before the engine serves anything, so a long-lived holder never
-        # keeps another opener out; and it is taken BEFORE the connection's shared
-        # encryption gate, the order ``write_gate`` documents, so the two cannot
-        # deadlock.
-        with write_gate(db_path.parent):
-            self._conn = connect_db(db_path, check_same_thread=False)
-            try:
-                apply_row_factory(self._conn)
-                self._conn.executescript(SCHEMA)
-                from poppy.engine.seed import (
-                    _migrate_embedding_model_id,
-                    _migrate_enriched_content,
-                    _migrate_expires_at,
-                )
+        # Opening a store that still owes its one-time upgrades is a write, and
+        # several processes doing it at once collide; ``open_with_upgrades`` owns
+        # that policy for both engines. A store that is already current takes no
+        # lock at all, so the hook and read paths never wait on a writer.
+        self._conn = open_with_upgrades(
+            db_path,
+            store_is_current=_hybrid_store_is_current,
+            apply_upgrades=self._apply_open_time_work,
+            check_same_thread=False,
+        )
 
-                # Order matters: expires_at and enriched_content are column-level
-                # schema upgrades that must complete before any read path runs. The
-                # enriched_content migration also rewires the FTS triggers to point at
-                # the new column; the ingest/update paths rely on that.
-                _migrate_expires_at(self._conn)
-                _migrate_enriched_content(self._conn)
-                _migrate_embedding_model_id(self._conn)
-                normalise_stored_timestamps(self._conn)
-            except Exception:
-                rollback_and_close(self._conn)
-                raise
+    @staticmethod
+    def _apply_open_time_work(conn: sqlite3.Connection) -> None:
+        """Bring a just-opened store up to date. Idempotent, and re-run inside the gate."""
+        from poppy.engine.seed import (  # noqa: PLC0415
+            _migrate_embedding_model_id,
+            _migrate_enriched_content,
+            _migrate_expires_at,
+        )
+
+        apply_row_factory(conn)
+        conn.executescript(SCHEMA)
+        # Order matters: expires_at and enriched_content are column-level schema
+        # upgrades that must complete before any read path runs. The
+        # enriched_content migration also rewires the FTS triggers to point at
+        # the new column; the ingest/update paths rely on that.
+        _migrate_expires_at(conn)
+        _migrate_enriched_content(conn)
+        _migrate_embedding_model_id(conn)
+        normalise_stored_timestamps(conn)
 
     # --- embedding runtime seams (subclass responsibility) -----------------
 
