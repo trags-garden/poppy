@@ -215,6 +215,26 @@ def expiry_passed(stamp: str | None, now: datetime) -> bool:
     return parsed <= now
 
 
+def unexpired_sql() -> tuple[str, str]:
+    """The ``WHERE`` fragment shared by ``list_all`` and ``stats`` on both engines.
+
+    Those two are the pair that has to agree. A ``stats`` total that counts what
+    ``list_all`` withholds is a number the user cannot reconcile with anything on
+    screen, so both read the store through this one fragment and one bound.
+
+    The other readers do not use it. ``retrieve`` filters in Python and the TTL
+    purge asks :func:`expiry_passed`. Both of those parse the stored stamp
+    instead of comparing it as text, and ``get`` does not filter on expiry at
+    all. On a row whose ``expires_at`` is spelled in a non-canonical way, an
+    offset other than ``+00:00`` for instance, the text comparison and the parsed
+    one can disagree. That is accepted here because this fragment only decides
+    what a count and a listing show. Deletion is never decided this way, for the
+    reason :func:`expiry_passed` gives above.
+    """
+    stamp = datetime.now(timezone.utc).isoformat()
+    return "(expires_at IS NULL OR expires_at > ?)", stamp
+
+
 def _rewrite_table(conn: sqlite3.Connection, table: str, columns: tuple[str, ...]) -> int:
     """Rewrite deviant timestamps in one table. Returns the number of rows changed."""
     if not _table_exists(conn, table):

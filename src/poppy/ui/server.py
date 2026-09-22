@@ -349,10 +349,11 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
                 # Idempotent: the row is already gone.
                 return {"ok": True, "already_tombstoned": True}
             raise HTTPException(status_code=404, detail="Memory not found")
+        # A live row is always snapshotted into Trash before it is deleted, so a
+        # forget that returns a memory always carries its tombstone with it.
         ts = result.tombstone
         if ts is None:
-            # A deletion that lost a race cannot promise a restore window.
-            return {"ok": True, "restorable": False}
+            raise RuntimeError(f"forget removed memory {memory_id} without writing a tombstone")
         return {
             "ok": True,
             "tombstoned_at": ts.tombstoned_at.isoformat(),
