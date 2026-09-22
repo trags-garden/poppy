@@ -669,3 +669,61 @@ async def test_bridge_drops_pre_initialize_notification_and_forwards_after_hands
     assert result == [0]
     with pytest.raises(anyio.WouldBlock):
         local_receive.receive_nowait()
+
+
+@pytest.mark.asyncio
+async def test_bridge_drops_pre_initialize_client_replies():
+    local_send, local_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    local_write, local_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    daemon_send, daemon_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    daemon_write, daemon_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    stray_response = SessionMessage(types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="stray-1", result={})))
+    stray_error = SessionMessage(
+        types.JSONRPCMessage(
+            types.JSONRPCError(
+                jsonrpc="2.0",
+                id="stray-2",
+                error=types.ErrorData(code=types.INVALID_REQUEST, message="Invalid request"),
+            )
+        )
+    )
+    initialize = SessionMessage(
+        types.JSONRPCMessage(
+            types.JSONRPCRequest(
+                jsonrpc="2.0",
+                id="init-3",
+                method="initialize",
+                params={"clientInfo": {"name": "stdio-client", "version": "1"}},
+            )
+        )
+    )
+    initialize_response = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="init-3", result={"ok": True}))
+    )
+    state = _BridgeState()
+    result: list[int] = []
+
+    async with anyio.create_task_group() as task_group:
+
+        async def run_bridge() -> None:
+            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, state))
+
+        task_group.start_soon(run_bridge)
+        # A reply the client owes nobody yet: forwarding it makes the daemon's
+        # transport reject the whole bridge, so it is dropped like a stray
+        # notification.
+        await local_send.send(stray_response)
+        await local_send.send(stray_error)
+        await local_send.send(initialize)
+        # The handshake is still the first thing the daemon sees.
+        with anyio.fail_after(1):
+            assert await daemon_receive.receive() is initialize
+        assert state.pending == {"init-3"}
+        await daemon_send.send(initialize_response)
+        assert await local_receive.receive() is initialize_response
+        assert state.pending == set()
+        await local_send.aclose()
+
+    assert result == [0]
+    with pytest.raises(anyio.WouldBlock):
+        local_receive.receive_nowait()

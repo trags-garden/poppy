@@ -79,6 +79,13 @@ def _pre_handshake_reply(request: types.JSONRPCRequest) -> SessionMessage:
     (for example ``server/discover``) before the handshake, so those are
     answered here instead of forwarded. ``ping`` is the one method allowed
     before the handshake, and it carries no result of its own.
+
+    The code here is -32601 (Method not found), while the SDK server answers
+    the same unknown method with -32602 (Invalid params) once the handshake is
+    done, because past that point it validates the request against a union of
+    known methods and the method name fails as a field. The same call can
+    therefore draw either code depending on when it arrives, and that is
+    expected.
     """
     if request.method == "ping":
         return SessionMessage(types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id=request.id, result={})))
@@ -133,9 +140,12 @@ async def _bridge(
                             # daemon will never produce a response for it.
                             await local_write.send(_pre_handshake_reply(root))
                             continue
-                    elif isinstance(root, types.JSONRPCNotification):
-                        # Nothing can act on a notification before the
-                        # handshake, and it has no id to answer.
+                    else:
+                        # A notification, or a reply to a request nobody has
+                        # made yet: nothing can act on it before the handshake
+                        # and there is no id of ours to answer. Forwarding it
+                        # would draw the same transport error as any other
+                        # pre-session message and take the bridge down with it.
                         continue
                 request_id = _request_id(message)
                 if request_id is not None:
