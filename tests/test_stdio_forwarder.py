@@ -187,7 +187,11 @@ async def test_bridge_times_out_clean_eof_drain_with_one_connection_error():
     async with anyio.create_task_group() as task_group:
 
         async def run_bridge() -> None:
-            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, _BridgeState(), 0.01))
+            result.append(
+                await _bridge(
+                    local_read, local_write, daemon_read, daemon_write, _BridgeState(handshake_sent=True), 0.01
+                )
+            )
 
         task_group.start_soon(run_bridge)
         await local_send.send(request)
@@ -253,7 +257,9 @@ async def test_bridge_returns_error_for_pending_request_when_daemon_disconnects(
     async with anyio.create_task_group() as task_group:
 
         async def run_bridge() -> None:
-            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, _BridgeState()))
+            result.append(
+                await _bridge(local_read, local_write, daemon_read, daemon_write, _BridgeState(handshake_sent=True))
+            )
 
         task_group.start_soon(run_bridge)
         await local_send.send(request)
@@ -413,7 +419,7 @@ async def test_bridge_drops_late_response_once_drain_timeout_errored_it():
     response = SessionMessage(
         types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="late-id", result={"ok": True}))
     )
-    state = _BridgeState()
+    state = _BridgeState(handshake_sent=True)
     result: list[int] = []
 
     async with anyio.create_task_group() as task_group:
@@ -466,7 +472,7 @@ async def test_bridge_completes_in_flight_response_when_stdin_closes_mid_send():
     response = SessionMessage(
         types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="mid-send", result={"ok": True}))
     )
-    state = _BridgeState()
+    state = _BridgeState(handshake_sent=True)
     result: list[int] = []
 
     async with anyio.create_task_group() as task_group:
@@ -505,7 +511,9 @@ async def test_bridge_errors_pending_request_when_daemon_ends_after_eof():
     async with anyio.create_task_group() as task_group:
 
         async def run_bridge() -> None:
-            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, _BridgeState()))
+            result.append(
+                await _bridge(local_read, local_write, daemon_read, daemon_write, _BridgeState(handshake_sent=True))
+            )
 
         task_group.start_soon(run_bridge)
         await local_send.send(request)
@@ -520,3 +528,202 @@ async def test_bridge_errors_pending_request_when_daemon_ends_after_eof():
         assert error.message.root.error.code == types.CONNECTION_CLOSED
 
     assert result == [1]
+
+
+@pytest.mark.asyncio
+async def test_bridge_answers_pre_initialize_request_then_forwards_initialize():
+    local_send, local_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    local_write, local_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    daemon_send, daemon_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    daemon_write, daemon_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    discover = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCRequest(jsonrpc="2.0", id="discover-1", method="server/discover", params={}))
+    )
+    initialize = SessionMessage(
+        types.JSONRPCMessage(
+            types.JSONRPCRequest(
+                jsonrpc="2.0",
+                id="init-1",
+                method="initialize",
+                params={"clientInfo": {"name": "stdio-client", "version": "1"}},
+            )
+        )
+    )
+    initialize_response = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="init-1", result={"ok": True}))
+    )
+    state = _BridgeState()
+    result: list[int] = []
+
+    async with anyio.create_task_group() as task_group:
+
+        async def run_bridge() -> None:
+            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, state))
+
+        task_group.start_soon(run_bridge)
+        # A client that probes before the handshake gets an answer here, not a
+        # dead daemon.
+        await local_send.send(discover)
+        with anyio.fail_after(1):
+            rejected = await local_receive.receive()
+        assert isinstance(rejected.message.root, types.JSONRPCError)
+        assert rejected.message.root.id == "discover-1"
+        assert rejected.message.root.error.code == types.METHOD_NOT_FOUND
+        with pytest.raises(anyio.WouldBlock):
+            daemon_receive.receive_nowait()
+        assert state.pending == set()
+        # The handshake that follows is forwarded and relayed as usual.
+        await local_send.send(initialize)
+        assert await daemon_receive.receive() is initialize
+        await daemon_send.send(initialize_response)
+        assert await local_receive.receive() is initialize_response
+        await local_send.aclose()
+
+    assert result == [0]
+
+
+@pytest.mark.asyncio
+async def test_bridge_answers_pre_initialize_ping_without_forwarding():
+    local_send, local_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    local_write, local_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    _daemon_send, daemon_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    daemon_write, daemon_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    ping = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCRequest(jsonrpc="2.0", id="ping-1", method="ping", params={}))
+    )
+    state = _BridgeState()
+    result: list[int] = []
+
+    async with anyio.create_task_group() as task_group:
+
+        async def run_bridge() -> None:
+            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, state))
+
+        task_group.start_soon(run_bridge)
+        await local_send.send(ping)
+        with anyio.fail_after(1):
+            answer = await local_receive.receive()
+        assert isinstance(answer.message.root, types.JSONRPCResponse)
+        assert answer.message.root.id == "ping-1"
+        assert answer.message.root.result == {}
+        with pytest.raises(anyio.WouldBlock):
+            daemon_receive.receive_nowait()
+        assert state.pending == set()
+        await local_send.aclose()
+
+    assert result == [0]
+
+
+@pytest.mark.asyncio
+async def test_bridge_drops_pre_initialize_notification_and_forwards_after_handshake():
+    local_send, local_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    local_write, local_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    daemon_send, daemon_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    daemon_write, daemon_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    notification = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCNotification(jsonrpc="2.0", method="notifications/cancelled", params={}))
+    )
+    initialize = SessionMessage(
+        types.JSONRPCMessage(
+            types.JSONRPCRequest(
+                jsonrpc="2.0",
+                id="init-2",
+                method="initialize",
+                params={"clientInfo": {"name": "stdio-client", "version": "1"}},
+            )
+        )
+    )
+    initialize_response = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="init-2", result={"ok": True}))
+    )
+    discover = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCRequest(jsonrpc="2.0", id="discover-2", method="server/discover", params={}))
+    )
+    discover_response = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="discover-2", result={"ok": True}))
+    )
+    state = _BridgeState()
+    result: list[int] = []
+
+    async with anyio.create_task_group() as task_group:
+
+        async def run_bridge() -> None:
+            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, state))
+
+        task_group.start_soon(run_bridge)
+        await local_send.send(notification)
+        await local_send.send(initialize)
+        # The notification was dropped, so the handshake is the first thing the
+        # daemon sees.
+        assert await daemon_receive.receive() is initialize
+        await daemon_send.send(initialize_response)
+        assert await local_receive.receive() is initialize_response
+        # Past the handshake the bridge is a verbatim pump again: the same
+        # method it rejected earlier is now the daemon's to answer.
+        await local_send.send(discover)
+        assert await daemon_receive.receive() is discover
+        await daemon_send.send(discover_response)
+        assert await local_receive.receive() is discover_response
+        await local_send.aclose()
+
+    assert result == [0]
+    with pytest.raises(anyio.WouldBlock):
+        local_receive.receive_nowait()
+
+
+@pytest.mark.asyncio
+async def test_bridge_drops_pre_initialize_client_replies():
+    local_send, local_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    local_write, local_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    daemon_send, daemon_read = anyio.create_memory_object_stream[SessionMessage | Exception](1)
+    daemon_write, daemon_receive = anyio.create_memory_object_stream[SessionMessage](1)
+    stray_response = SessionMessage(types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="stray-1", result={})))
+    stray_error = SessionMessage(
+        types.JSONRPCMessage(
+            types.JSONRPCError(
+                jsonrpc="2.0",
+                id="stray-2",
+                error=types.ErrorData(code=types.INVALID_REQUEST, message="Invalid request"),
+            )
+        )
+    )
+    initialize = SessionMessage(
+        types.JSONRPCMessage(
+            types.JSONRPCRequest(
+                jsonrpc="2.0",
+                id="init-3",
+                method="initialize",
+                params={"clientInfo": {"name": "stdio-client", "version": "1"}},
+            )
+        )
+    )
+    initialize_response = SessionMessage(
+        types.JSONRPCMessage(types.JSONRPCResponse(jsonrpc="2.0", id="init-3", result={"ok": True}))
+    )
+    state = _BridgeState()
+    result: list[int] = []
+
+    async with anyio.create_task_group() as task_group:
+
+        async def run_bridge() -> None:
+            result.append(await _bridge(local_read, local_write, daemon_read, daemon_write, state))
+
+        task_group.start_soon(run_bridge)
+        # A reply the client owes nobody yet: forwarding it makes the daemon's
+        # transport reject the whole bridge, so it is dropped like a stray
+        # notification.
+        await local_send.send(stray_response)
+        await local_send.send(stray_error)
+        await local_send.send(initialize)
+        # The handshake is still the first thing the daemon sees.
+        with anyio.fail_after(1):
+            assert await daemon_receive.receive() is initialize
+        assert state.pending == {"init-3"}
+        await daemon_send.send(initialize_response)
+        assert await local_receive.receive() is initialize_response
+        assert state.pending == set()
+        await local_send.aclose()
+
+    assert result == [0]
+    with pytest.raises(anyio.WouldBlock):
+        local_receive.receive_nowait()

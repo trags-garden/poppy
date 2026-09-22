@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy serve` no longer drops the connection when an MCP client sends a
+  request before the handshake. Some clients open with a discovery probe, which
+  the daemon has no session for yet; that probe is now answered with a
+  "method not found" error instead of taking the connection down, a `ping` sent
+  that early is answered on the spot, a notification or stray reply that early
+  is dropped rather than forwarded, and the client's `initialize` goes through
+  as usual.
 - `poppy stats` and the dashboard's memory total no longer count memories whose
   TTL has already run out. Those memories are hidden from `poppy list` and from
   the dashboard list the moment they expire, but the total kept counting them
