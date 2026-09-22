@@ -352,7 +352,8 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
         # A live row is always snapshotted into Trash before it is deleted, so a
         # forget that returns a memory always carries its tombstone with it.
         ts = result.tombstone
-        assert ts is not None
+        if ts is None:
+            raise RuntimeError(f"forget removed memory {memory_id} without writing a tombstone")
         return {
             "ok": True,
             "tombstoned_at": ts.tombstoned_at.isoformat(),
