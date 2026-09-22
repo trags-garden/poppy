@@ -33,8 +33,10 @@ import sqlite3
 import threading
 import time
 import weakref
-from contextlib import contextmanager, suppress
+from collections.abc import Callable
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
+from urllib.parse import quote
 
 from poppy.errors import EncryptionError, StorePermissionError
 from poppy.paths import ensure_poppy_dir
@@ -668,3 +670,129 @@ def connect(db_path: Path | str, *, check_same_thread: bool = False) -> sqlite3.
     except BaseException:
         _release_gate(gate_fd)
         raise
+
+
+# --- opening a store that may still owe its one-time upgrades ---------------
+
+# What a contended open fails with. Both are retryable: neither damages the
+# store, and a second attempt re-reads the schema, so a column another process
+# added in the meantime is simply skipped.
+_OPEN_RACE_MESSAGES = ("database is locked", "duplicate column name")
+
+
+def _is_open_race(exc: BaseException) -> bool:
+    """Whether ``exc`` is a contended open rather than a real fault.
+
+    Matched on the message rather than the class because the SQLCipher driver
+    raises its own ``OperationalError``, which is not a subclass of the stdlib
+    one -- the same reason ``write_txn`` matches on text.
+    """
+    text = str(exc).lower()
+    return any(message in text for message in _OPEN_RACE_MESSAGES)
+
+
+@contextmanager
+def read_only_probe(db_path: Path):
+    """Yield a read-only connection to ``db_path``, or ``None`` if unreadable.
+
+    Lets a caller decide, before taking any lock, whether an open still owes
+    work. Read-only, so the probe cannot perform the WAL flip it is checking
+    for; and a real SQLite connection rather than a raw file read, because
+    SQLite's own per-inode bookkeeping defers the close. Probing a store this
+    process already has open therefore does NOT drop its advisory locks, which
+    is exactly what a bare ``open()`` would do -- see the note above
+    ``_open_stores``.
+
+    Yields ``None`` for a store that is absent, encrypted, or not a database:
+    every case where the caller has to fall back to the gated path anyway.
+    """
+    conn = None
+    try:
+        conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True, timeout=0)
+        # Proves the file is a readable plaintext database before any answer
+        # from it is trusted. An encrypted store raises here.
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+    except Exception:
+        if conn is not None:
+            with suppress(Exception):
+                conn.close()
+        yield None
+        return
+    try:
+        yield conn
+    finally:
+        with suppress(Exception):
+            conn.close()
+
+
+def _upgrades_owed(db_path: Path, store_is_current: Callable[[sqlite3.Connection], bool]) -> bool:
+    """Whether this open still has to write something. Errs towards yes."""
+    with read_only_probe(db_path) as probe:
+        if probe is None:
+            return True
+        try:
+            if str(probe.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+                return True
+            return not store_is_current(probe)
+        except Exception:
+            return True
+
+
+def _open_once(
+    db_path: Path,
+    owed: bool,
+    apply_upgrades: Callable[[sqlite3.Connection], None],
+    check_same_thread: bool,
+) -> sqlite3.Connection:
+    with write_gate(db_path.parent) if owed else nullcontext():
+        conn = connect(db_path, check_same_thread=check_same_thread)
+        try:
+            apply_upgrades(conn)
+        except BaseException:
+            rollback_and_close(conn)
+            raise
+    return conn
+
+
+def open_with_upgrades(
+    db_path: Path,
+    *,
+    store_is_current: Callable[[sqlite3.Connection], bool],
+    apply_upgrades: Callable[[sqlite3.Connection], None],
+    check_same_thread: bool = False,
+) -> sqlite3.Connection:
+    """Open a store, applying its one-time open-time upgrades under the write gate.
+
+    Opening writes, the first time. ``connect`` flips a rollback-journal store to
+    WAL, and the caller's migrations add columns as check-then-ALTER sequences.
+    Several processes doing that at once collide, and the loser gets "database is
+    locked" -- SQLite will not run the busy handler for the WAL flip, so it fails
+    instantly instead of waiting -- or "duplicate column name". The realistic
+    trigger is the first open after an upgrade, when the CLI, the MCP server, the
+    daemon and the dashboard all reach a store that has not applied its new
+    migrations yet.
+
+    The gate is taken ONLY when this open owes work, decided by a read-only probe
+    while no lock is held. A store already in WAL with every migration applied --
+    every ordinary CLI call, every hook, every read -- opens exactly as it did
+    before, taking no lock and never waiting behind a writer that happens to hold
+    the gate.
+
+    When work IS owed the gate serializes it, and ``apply_upgrades`` re-checks on
+    its own connection inside the gate. The opener that waited finds the column
+    already there and does nothing, so the decision made outside the gate is only
+    ever a hint and never the thing acted on.
+
+    Above the gate's fail-open budget the guarantee is best-effort: ``write_gate``
+    gives up after roughly ten seconds and lets the sequence run unguarded, which
+    is the original race again. One retry absorbs it, because the second attempt
+    re-probes and re-reads the schema, so whatever another process applied in the
+    meantime is skipped rather than repeated. Past that the error is raised, as a
+    contended open that cannot settle is a real problem worth surfacing.
+    """
+    try:
+        return _open_once(db_path, _upgrades_owed(db_path, store_is_current), apply_upgrades, check_same_thread)
+    except Exception as exc:
+        if not _is_open_race(exc):
+            raise
+    return _open_once(db_path, _upgrades_owed(db_path, store_is_current), apply_upgrades, check_same_thread)
