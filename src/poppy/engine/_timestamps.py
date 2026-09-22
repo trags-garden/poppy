@@ -137,8 +137,8 @@ TIMESTAMP_MIGRATION = "utc_timestamp_text"
 REPUSH_MARKER = "utc_timestamp_text_repush"
 
 # The tables push enumerates: ``memories`` (live rows) and ``ui_tombstones``
-# (deletions). A rewrite confined to the legacy copy tables cannot have moved a
-# push candidate, so it asks for no re-push.
+# (deletions). A rewrite elsewhere cannot have moved a push candidate, so it
+# asks for no re-push.
 PUSH_SOURCE_TABLES = ("memories", "ui_tombstones")
 
 # Every (table, columns) pair holding an ISO-8601 instant as text, with the
@@ -158,9 +158,6 @@ TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
         "tombstoned_at",
         "memory_expires_at",
     ),
-    "closet_tombstones": ("tombstoned_at",),
-    "closet_migration_backup": ("created_at", "updated_at", "migrated_at"),
-    "legacy_closet_ids": ("legacy_updated_at", "announced_at"),
 }
 
 

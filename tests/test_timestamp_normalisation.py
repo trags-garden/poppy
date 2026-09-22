@@ -15,7 +15,7 @@ Two probes come straight from the issue, one per broken site:
      redacted parent live;
   b. a memory expiring an hour from now, expressed at ``-12:00``: the stored
      string sorted below ``now`` in UTC, so the gated purge hard-deleted a live
-     memory (and its per-speaker copies) on the spot.
+     memory on the spot.
 
 The rest cover the fix itself: writes normalise, the one-off rewrite brings
 existing rows into line exactly once, and the two compare sites still answer
@@ -357,9 +357,9 @@ def test_trash_snapshot_timestamps_are_written_as_utc_text(tmp_path: Path) -> No
 def _legacy_store(db: Path) -> None:
     """A store whose rows predate the normalisation, with no engine ever opened.
 
-    ``TombstoneStore`` first so ``ui_tombstones`` and the closet side tables
-    exist, then the memories schema by hand: opening an engine is the thing under
-    test, and doing it here would run the migration before the deviant rows land.
+    ``TombstoneStore`` first so ``ui_tombstones`` exists, then the memories
+    schema by hand: opening an engine is the thing under test, and doing it here
+    would run the migration before the deviant rows land.
     """
     TombstoneStore(db)
     conn = sqlite3.connect(str(db))
@@ -393,10 +393,6 @@ def _legacy_store(db: Path) -> None:
             " VALUES ('gone', 'deleted note', 'fact', NULL, 'cli', NULL,"
             " '2026-06-01T12:00:00+02:00', 1.0, '[]', '2026-06-01T12:00:00+02:00',"
             " '2026-06-01T12:00:00+02:00', '2026-06-01T13:00:00+02:00', NULL, NULL, 'tok')"
-        )
-        conn.execute(
-            "INSERT INTO closet_tombstones (id, tombstoned_at, is_local)"
-            " VALUES ('m1_closet_alice', '2026-06-01T13:00:00+02:00', 1)"
         )
         conn.commit()
     finally:
@@ -432,8 +428,6 @@ def test_the_one_off_rewrite_normalises_existing_rows_and_records_itself(tmp_pat
     assert _rows(db, "SELECT tombstoned_at, updated_at FROM ui_tombstones") == [
         ("2026-06-01T11:00:00+00:00", "2026-06-01T10:00:00+00:00")
     ]
-    assert _rows(db, "SELECT tombstoned_at FROM closet_tombstones") == [("2026-06-01T11:00:00+00:00",)]
-
     # Recorded by name, so it runs once per store rather than once per schema
     # shape: the marker column's presence says nothing about timestamps. The
     # second row is the re-push request, since rows push reads were rewritten.
@@ -449,9 +443,9 @@ def test_the_one_off_rewrite_runs_exactly_once_and_is_idempotent(tmp_path: Path)
     conn = sqlite3.connect(str(db))
     try:
         assert migration_applied(conn, TIMESTAMP_MIGRATION) is False
-        # Two memories, one Trash snapshot, one closet deletion record. The
-        # memory already stored in canonical spelling is not rewritten.
-        assert normalise_stored_timestamps(conn) == 4
+        # Two memories and one Trash snapshot. The memory already stored in
+        # canonical spelling is not rewritten.
+        assert normalise_stored_timestamps(conn) == 3
         assert migration_applied(conn, TIMESTAMP_MIGRATION) is True
         applied_at = conn.execute(
             f"SELECT applied_at FROM {MIGRATIONS_TABLE} WHERE name = ?", (TIMESTAMP_MIGRATION,)
@@ -813,27 +807,6 @@ def test_a_rewrite_that_changed_nothing_does_not_force_a_repush(tmp_path: Path) 
     assert client.upserts == []
     assert result.skipped == 2
     assert _remote(tmp_path).repush_done_for is None
-
-
-def test_a_repush_is_not_requested_for_a_rewrite_confined_to_the_side_tables(tmp_path: Path) -> None:
-    """Push reads ``memories`` and ``ui_tombstones``; the closet tables are not candidates."""
-    db = tmp_path / "memories.db"
-    TombstoneStore(db)
-    conn = sqlite3.connect(str(db))
-    try:
-        conn.executescript(SEED_SCHEMA)
-        conn.execute(
-            "INSERT INTO closet_tombstones (id, tombstoned_at, is_local)"
-            " VALUES ('x_closet_alice', '2026-06-01T13:00:00+02:00', 1)"
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    SeedEngine(db_path=db)
-
-    assert _rows(db, "SELECT tombstoned_at FROM closet_tombstones") == [("2026-06-01T11:00:00+00:00",)]
-    assert TombstoneStore(db).repush_stamp() is None
 
 
 def test_a_dry_run_push_reports_the_repush_without_recording_it(tmp_path: Path) -> None:

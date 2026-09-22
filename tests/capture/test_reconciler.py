@@ -38,20 +38,6 @@ def _mk(mid: str, content: str, *, project: str | None = "poppy", memory_type: s
     )
 
 
-@pytest.mark.parametrize("ranked", [True, False])
-def test_candidates_recheck_a_hidden_row_after_the_scan(engine, monkeypatch, ranked):
-    from poppy.capture.reconciler import find_candidates
-    from poppy.models import ScoredMemory
-
-    hidden = _mk("parent_closet_alice", "retained speaker text")
-    engine.ingest(hidden)
-    with engine._conn:
-        engine._conn.execute("UPDATE memories SET is_closet = 2 WHERE id = ?", (hidden.id,))
-    monkeypatch.setattr(engine, "retrieve", lambda *a, **kw: [ScoredMemory(memory=hidden, score=1)] if ranked else [])
-    monkeypatch.setattr(engine, "list_all", lambda *a, **kw: [hidden])
-    assert find_candidates(engine, _mk("new", hidden.content)) == []
-
-
 @pytest.fixture
 def engine(tmp_path: Path) -> SeedEngine:
     return SeedEngine(db_path=tmp_path / "memories.db")

@@ -174,21 +174,16 @@ def find_candidates(
     with the most recent same-project / same-type memories so the LLM still
     gets a chance to spot a conflict. Filters out the new memory itself.
     """
-    from poppy.engine._legacy_copies import is_marked_copy
-
     filters = Filters(project=new_memory.project, memory_type=new_memory.memory_type)
     seen: set[str] = {new_memory.id}
     out: list[Candidate] = []
 
-    # Results may have been read before a legacy row was marked by another
-    # process. Re-check both candidate sources so hidden text never reaches
-    # conflict detection or becomes a supersede target.
     try:
         scored = engine.retrieve(new_memory.content, filters=filters, limit=top_k * 2)
     except Exception:
         scored = []
     for s in scored:
-        if s.memory.id in seen or is_marked_copy(engine, s.memory.id):
+        if s.memory.id in seen:
             continue
         if s.score is not None and s.score < min_score:
             continue
@@ -205,7 +200,7 @@ def find_candidates(
     except Exception:
         recent = []
     for m in recent:
-        if m.id in seen or is_marked_copy(engine, m.id):
+        if m.id in seen:
             continue
         out.append(Candidate(memory=m, score=0.0))
         seen.add(m.id)
@@ -434,8 +429,8 @@ def reconcile_and_ingest(
             try:
                 supersede_memory(engine, mem, decision.target_id, poppy_dir=poppy_dir)
             except (ValueError, KeyError) as exc:
-                # The target turned out not to be supersedable — a derived
-                # per-speaker copy, or a row deleted since it was picked. Skip
+                # The target turned out not to be supersedable — a row
+                # deleted since it was picked, say. Skip
                 # THIS item and keep going: aborting mid-loop would drop every
                 # remaining capture in the batch on the floor. Nothing is
                 # swallowed silently, and nothing is written for this one.

@@ -105,7 +105,8 @@ def test_fresh_db_round_trip(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
-def test_multi_speaker_ingest_stores_one_unmarked_row(tmp_path: Path, engine_kind: str) -> None:
+def test_multi_speaker_ingest_stores_one_row(tmp_path: Path, engine_kind: str) -> None:
+    """A transcript with several speakers is one memory, however often it is re-ingested."""
     db = tmp_path / "memories.db"
     engine = _make_engine(db) if engine_kind == "bloom" else SeedEngine(db)
     content = '[{"speaker":"Alice","text":"hello"},{"speaker":"Bob","text":"world"}]'
@@ -113,8 +114,7 @@ def test_multi_speaker_ingest_stores_one_unmarked_row(tmp_path: Path, engine_kin
     for _ in range(2):
         engine.ingest(memory)
         with sqlite3.connect(db) as conn:
-            assert "is_closet" in {row[1] for row in conn.execute("PRAGMA table_info(memories)")}
-            assert conn.execute("SELECT id, content, is_closet FROM memories").fetchall() == [(memory.id, content, 0)]
+            assert conn.execute("SELECT id, content FROM memories").fetchall() == [(memory.id, content)]
             assert conn.execute("SELECT COUNT(*) FROM memory_fts").fetchone()[0] == 1
             if engine_kind == "bloom":
                 assert conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0] == 1
@@ -334,26 +334,3 @@ def test_legacy_torch_tagged_db_migrates_to_onnx(tmp_path: Path) -> None:
     assert run_migrate(engine, db, MigrateFilters()) == 2
     assert set(_embedding_model_ids(db)) == {BloomEngine.model_id}
     assert stale_stats(db, BloomEngine.model_id).needs_migration == 0
-
-
-_TWO_SPEAKER_TURNS = '[{"speaker":"Alice","dia_id":"D1","text":"hi"},{"speaker":"Bob","dia_id":"D2","text":"yo"}]'
-
-
-@pytest.mark.parametrize("engine_kind", ["bloom", "seed"])
-def test_ingest_never_calls_legacy_classification(tmp_path: Path, monkeypatch, engine_kind: str) -> None:
-    from poppy.engine import _legacy_copies
-
-    engine = _make_engine(tmp_path / "memories.db") if engine_kind == "bloom" else SeedEngine(tmp_path / "memories.db")
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("ingest reached legacy copy cleanup")
-
-    monkeypatch.setattr(_legacy_copies, "classify_legacy_copy", unexpected)
-    monkeypatch.setattr(_legacy_copies, "_projected_texts", unexpected)
-    memory = _memory("conversation", _TWO_SPEAKER_TURNS)
-    engine.ingest(memory)
-    for marker in (1, 2):
-        with engine._conn:
-            engine._conn.execute("UPDATE memories SET is_closet = ? WHERE id = ?", (marker, memory.id))
-        engine.ingest(memory)
-        assert [tuple(row) for row in engine._conn.execute("SELECT id, is_closet FROM memories")] == [(memory.id, 0)]

@@ -16,24 +16,9 @@ from pathlib import Path
 
 import numpy as np
 
-from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
+from poppy.db import apply_row_factory, rollback_and_close, write_txn
 from poppy.db import connect as connect_db
-from poppy.engine._legacy_copies import (
-    clear_copy_snapshot,
-    clear_marked_copies,
-    clear_retired_records,
-    ensure_legacy_copy_tables,
-    is_proven_unmarked_copy,
-    mark_legacy_copies_for_cleanup,
-)
-from poppy.engine._timestamps import (
-    _columns,
-    _table_exists,
-    chunked,
-    expiry_passed,
-    normalise_stored_timestamps,
-    utc_iso,
-)
+from poppy.engine._timestamps import chunked, expiry_passed, normalise_stored_timestamps, utc_iso
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
 from poppy.models import Filters, Memory, ScoredMemory, Source
 
@@ -41,11 +26,6 @@ logger = logging.getLogger(__name__)
 
 FIRST_STAGE_K = 100
 RRF_K = 60
-
-# Rows an older release marked as derived per-speaker copies. They are kept
-# out of listings, counts and recall, and removed when the memory they were
-# copied from is redacted or deleted.
-_NOT_MARKED_SQL = "COALESCE(is_closet, 0) = 0"
 
 STOPWORDS = frozenset(
     "a an the is was were be been being am are do does did have has had "
@@ -70,9 +50,7 @@ CREATE TABLE IF NOT EXISTS memories (
     related_to TEXT DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    expires_at TEXT,
-    -- Retained for cleanup of stores written by older releases.
-    is_closet INTEGER NOT NULL DEFAULT 0
+    expires_at TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -179,10 +157,6 @@ class HybridEngine(RetrievalEngine):
     # later swap to a backend with different vectors never mixes incompatible
     # vector spaces in the shared memory_embeddings table.
     model_id: str | None = None
-    # This engine accepts ``remote_event_ts`` on ingest and delete. Sync checks
-    # the flag rather than the signature, so an engine that predates it (or a
-    # third-party one) is called the old way instead of raising.
-    accepts_remote_event_ts = True
     _engine_name = "hybrid"
     _engine_version = "1.0.0"
 
@@ -199,17 +173,7 @@ class HybridEngine(RetrievalEngine):
         self._conn = connect_db(db_path, check_same_thread=False)
         try:
             apply_row_factory(self._conn)
-            # Captured BEFORE this engine's own schema work: `executescript`
-            # below creates memory_embeddings and the migrations add
-            # enriched_content, so afterwards every store looks like one this
-            # engine has written. A store that only ever ran `seed` cannot hold a
-            # per-speaker copy, and the marker migration must not grade its rows.
-            had_bloom_schema = _table_exists(self._conn, "memory_embeddings") or "enriched_content" in _columns(
-                self._conn, "memories"
-            )
             self._conn.executescript(SCHEMA)
-            # Retained while older caller surfaces still read these tables.
-            ensure_legacy_copy_tables(self._conn)
             from poppy.engine.seed import (
                 _migrate_embedding_model_id,
                 _migrate_enriched_content,
@@ -223,13 +187,6 @@ class HybridEngine(RetrievalEngine):
             _migrate_expires_at(self._conn)
             _migrate_enriched_content(self._conn)
             _migrate_embedding_model_id(self._conn)
-            from poppy.sync.state import remove_derived_rows
-
-            # Classification and removal share one gate and transaction, so an
-            # interrupted upgrade cannot leave classified copies behind.
-            with write_gate(db_path.parent), write_txn(self._conn):
-                mark_legacy_copies_for_cleanup(self._conn, had_bloom_schema=had_bloom_schema)
-                remove_derived_rows(self._conn, db_path.parent, gate_held=True)
             normalise_stored_timestamps(self._conn)
         except Exception:
             rollback_and_close(self._conn)
@@ -367,7 +324,7 @@ class HybridEngine(RetrievalEngine):
             (memory_id, emb_blob, self.model_id),
         )
 
-    def ingest(self, memory: Memory, *, remote_event_ts: datetime | None = None) -> str:
+    def ingest(self, memory: Memory) -> str:
         """Store one memory with its full-content index and embedding."""
         enriched = _enrich_full_content(memory.content, memory.source.timestamp.isoformat())
         # Model loading may fail. Do it before taking the database write lock.
@@ -380,12 +337,6 @@ class HybridEngine(RetrievalEngine):
                     created_at = datetime.fromisoformat(prior["created_at"])
                 except (TypeError, ValueError):
                     pass
-            elif prior is not None:
-                # The text this memory held is being replaced, so a copy of that
-                # text left over from an older release is being redacted too. A
-                # write that only changes metadata replays the same body and
-                # leaves them alone.
-                clear_marked_copies(self._conn, memory.id, remote_event_ts=remote_event_ts, has_embeddings=True)
             self._insert_memory(
                 memory.id,
                 memory.content,
@@ -400,7 +351,6 @@ class HybridEngine(RetrievalEngine):
                 memory.expires_at,
                 embedding=embedding,
             )
-            clear_retired_records(self._conn, memory.id)
         return memory.id
 
     # --- retrieval ---------------------------------------------------------
@@ -424,7 +374,7 @@ class HybridEngine(RetrievalEngine):
                 fts_rows = self._conn.execute(
                     """SELECT m.*, rank FROM memory_fts fts
                        JOIN memories m ON fts.id = m.id
-                       WHERE memory_fts MATCH ? AND COALESCE(m.is_closet, 0) = 0
+                       WHERE memory_fts MATCH ?
                        ORDER BY rank
                        LIMIT ?""",
                     (fts_query, k * 5),
@@ -441,8 +391,7 @@ class HybridEngine(RetrievalEngine):
         # engine's model are excluded from RRF here and only contribute via
         # FTS5 above until re-embedded.
         rows = self._conn.execute(
-            "SELECT m.*, e.embedding FROM memories m JOIN memory_embeddings e ON m.id = e.id "
-            "WHERE e.model_id = ? AND COALESCE(m.is_closet, 0) = 0",
+            "SELECT m.*, e.embedding FROM memories m JOIN memory_embeddings e ON m.id = e.id WHERE e.model_id = ?",
             (self.model_id,),
         ).fetchall()
 
@@ -492,34 +441,23 @@ class HybridEngine(RetrievalEngine):
             return None
         return self._row_to_memory(row)
 
-    def is_proven_copy_row(self, memory_id: str) -> bool:
-        """Compatibility check for lifecycle callers inspecting old copies."""
-        with self._lock:
-            return is_proven_unmarked_copy(self._conn, memory_id)
-
-    def delete(self, memory_id: str, *, remote_event_ts: datetime | None = None) -> bool:
-        # One transaction: a failure between the copies and the memory itself
-        # would otherwise commit half a redaction.
+    def delete(self, memory_id: str) -> bool:
+        # One transaction: a failure between the row and its embedding would
+        # otherwise leave a vector behind for text that is gone.
         with self._lock, write_txn(self._conn):
-            clear_marked_copies(self._conn, memory_id, remote_event_ts=remote_event_ts, has_embeddings=True)
             cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
             self._conn.execute("DELETE FROM memory_embeddings WHERE id = ?", (memory_id,))
             return cursor.rowcount > 0
 
     def list_all(self, filters: Filters | None = None, limit: int = 50) -> list[Memory]:
-        # Rows an older release left marked as per-speaker copies are excluded,
-        # here and from stats and recall, so nothing shows text a memory in this
-        # store already holds and push (which reads this) never sends one. Keyed
-        # on the marker, so a real memory whose id merely looks like a copy's is
-        # never hidden.
-        query = f"SELECT * FROM memories WHERE {_NOT_MARKED_SQL}"
+        clauses: list[str] = []
         params: list = []
         if filters:
             if filters.project:
-                query += " AND project = ?"
+                clauses.append("project = ?")
                 params.append(filters.project)
             if filters.memory_type:
-                query += " AND memory_type = ?"
+                clauses.append("memory_type = ?")
                 params.append(filters.memory_type)
             if filters.since:
                 # created_at is stored as canonical UTC text, so the SQL string
@@ -527,14 +465,17 @@ class HybridEngine(RetrievalEngine):
                 # way. Through the one helper that does it, so the bound and the
                 # stored values can never drift apart; it also reads a naive bound
                 # as UTC, the convention the rest of the store uses.
-                query += " AND created_at >= ?"
+                clauses.append("created_at >= ?")
                 params.append(utc_iso(filters.since))
             if filters.min_confidence:
-                query += " AND confidence >= ?"
+                clauses.append("confidence >= ?")
                 params.append(filters.min_confidence)
         if not (filters and filters.include_expired):
-            query += " AND (expires_at IS NULL OR expires_at > ?)"
+            clauses.append("(expires_at IS NULL OR expires_at > ?)")
             params.append(datetime.now(timezone.utc).isoformat())
+        query = "SELECT * FROM memories"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         rows = self._conn.execute(query, params).fetchall()
@@ -545,34 +486,23 @@ class HybridEngine(RetrievalEngine):
         now = datetime.now(timezone.utc)
         with self._lock, write_txn(self._conn):
             expired = [
-                (row[0], bool(row[1]))
+                row[0]
                 for row in self._conn.execute(
-                    f"SELECT id, {_NOT_MARKED_SQL}, expires_at FROM memories WHERE expires_at IS NOT NULL"
+                    "SELECT id, expires_at FROM memories WHERE expires_at IS NOT NULL"
                 ).fetchall()
-                if expiry_passed(row[2], now)
+                if expiry_passed(row[1], now)
             ]
-            # Counted as memories the user lost: a leftover copy is not one, and
-            # it goes with the memory it was copied from rather than on its own.
-            # No deletion record for these: expiry is not a redaction.
-            memories = [mid for mid, is_memory in expired if is_memory]
-            for mid in memories:
-                clear_marked_copies(self._conn, mid, has_embeddings=True, tombstone=False)
-            for mid, is_memory in expired:
-                if not is_memory:
-                    clear_copy_snapshot(self._conn, mid)
-            for batch in chunked([mid for mid, _ in expired]):
+            for batch in chunked(expired):
                 placeholders = ",".join("?" * len(batch))
                 self._conn.execute(f"DELETE FROM memory_embeddings WHERE id IN ({placeholders})", batch)
                 self._conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", batch)
-            return len(memories)
+            return len(expired)
 
     def consolidate(self) -> ConsolidationResult:
         return ConsolidationResult(merged=0, removed=0, updated=0)
 
     def stats(self) -> EngineStats:
-        # Memories, not rows: leftover copies are hidden from list_all, so
-        # counting them here would disagree with what the user can see.
-        count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {_NOT_MARKED_SQL}").fetchone()[0]
+        count = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         storage = self._db_path.stat().st_size if self._db_path.exists() else 0
         return EngineStats(
             memory_count=count,

@@ -77,10 +77,10 @@ def _rows(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
 
 
 def _family(db_path: Path, parent_id: str) -> list[tuple]:
-    """The stored memory, its index text, and its retained schema marker."""
+    """The stored memory and its index text."""
     return _rows(
         db_path,
-        "SELECT id, content, enriched_content, is_closet FROM memories WHERE id = ? ORDER BY id",
+        "SELECT id, content, enriched_content FROM memories WHERE id = ? ORDER BY id",
         (parent_id,),
     )
 

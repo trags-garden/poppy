@@ -11,8 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `poppy doctor` no longer reports per-speaker copy counts or the retired
-  migration diagnostics.
 - `poppy sync push|pull|run --dry-run` no longer refuses to run on a store that
   has not been upgraded yet. Opening a store always applies its pending one-time
   upgrades, as every other command already did, so a dry run now previews the
@@ -38,41 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   picking a memory opens the detail over the list with a way back.
 - The chrome link now points at trags.ai instead of the source repository.
 - A conversation transcript is now stored as one memory. Earlier versions also
-  derived a separate hidden copy of each speaker's turns; nothing derives those
-  any more.
-- Opening a store with this version removes the per speaker copies that an
-  earlier version derived from memories whose text was a conversation
-  transcript, along with their search entries. The memory each copy came from
-  is left untouched, nothing you wrote yourself is removed, and none of the
-  copies are uploaded on the way out. A copy that an earlier version had
-  already uploaded stays out of this store and never comes back to it, and it
-  never appears in Trash as something to restore. A row the cleanup cannot read
-  is left alone and stays visible, and the store still opens.
+  derived a separate copy of each speaker's turns, and nothing derives those any
+  more. A store that ingested multi-speaker transcripts under 0.3.0 or earlier
+  may still hold those copies. They are ordinary memories now, listed,
+  searchable and synced like any other, so they are uploaded on the next sync
+  if you have Trags sync on. `poppy forget <id>` removes any you do not want.
 
 ### Fixed
 
-- A store holding damaged rows no longer defeats the handling of per-speaker
-  copies from earlier releases. Where the memory a copy came from cannot be
-  read, a copy of it arriving from the cloud is refused rather than stored as
-  an ordinary memory, so its text is neither shown nor uploaded again. A Trash
-  entry that cannot be read keeps its text recoverable for the usual window
-  before it is removed. A queued deletion that cannot be read is retired,
-  rather than left in a queue that a client on the previous release cannot
-  read past on every sync.
 - Removed em dashes from user-facing CLI, dashboard, setup prompt, and MCP
   copy. `poppy doctor` status lines now read `label: OK, detail` where they
   used a dash.
-- Exact-id reads and edits now treat hidden copies retained from earlier
-  releases as missing, including MCP recall, CLI confirmations, and dashboard
-  details and Trash. Internal cleanup still removes them without exposing text.
-- A Trash entry holding a retained per-speaker copy's text no longer becomes
-  readable, restorable and syncable the moment that copy is deleted. It is
-  removed along with the copy, on all three paths that remove one: deleting the
-  copy by id, redacting the memory it came from, and the one-time cleanup on
-  first open. Its text stays recoverable for the usual Trash window unless
-  something recoverable is already held for that id, in which case the earlier
-  one is kept and the entry is removed without one. `poppy doctor` reports how
-  many recoverable rows are held and until when.
 - The OpenAI-compatible backend works on a default install. It called the
   endpoint through an SDK that Poppy does not depend on, so configuring a model
   and an API key produced empty consolidation and conflict results behind one

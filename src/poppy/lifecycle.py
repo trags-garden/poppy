@@ -123,34 +123,6 @@ def resolve_expiry(
     return parse_expires_at(expires_at)  # type: ignore[arg-type]
 
 
-def refuse_if_legacy_copy(
-    engine: RetrievalEngine,
-    memory_id: str,
-    verb: str,
-    *,
-    existing: Memory | None = None,
-) -> None:
-    """Refuse to turn a proven unmarked copy from an older store into a memory.
-
-    A client from an older release can leave unmarked copies in a shared store.
-    Editing or superseding one would expose its speaker text as an independent
-    memory. Only the frozen provenance and exact-content test can refuse it;
-    a real memory at a similar id follows the ordinary rules.
-    """
-    proven = getattr(engine, "is_proven_copy_row", None)
-    if proven is None or not proven(memory_id):
-        return
-    row = existing if existing is not None else engine.get(memory_id)
-    if row is None or not row.related_to:
-        # The row went away between proving it and reading it, so there is no
-        # copy left to refuse and no parent to name instead.
-        return
-    parent = row.related_to[0]
-    raise ValueError(
-        f"{memory_id} is a derived per-speaker copy, not a memory in its own right; {verb} the parent {parent} instead"
-    )
-
-
 @dataclass
 class EditResult:
     memory: Memory
@@ -206,11 +178,9 @@ def _edit_memory(
     clear_expiry: bool,
     project_unset: bool,
 ) -> EditResult:
-    existing = engine.get_public(memory_id)
+    existing = engine.get(memory_id)
     if existing is None:
         raise KeyError(f"memory not found: {memory_id}")
-
-    refuse_if_legacy_copy(engine, memory_id, "edit", existing=existing)
 
     if expires_at is not None and clear_expiry:
         raise ValueError("expires_at and clear_expiry are mutually exclusive")
@@ -276,10 +246,10 @@ def supersede_memory(
     """
     from poppy.db import write_gate
 
-    # Under the write gate for the whole sequence: the snapshot, the delete that
-    # clears the old text's copies and the ingest of the new row. A restore or
-    # forget from another process between any two of them would leave the old
-    # text half-redacted.
+    # Under the write gate for the whole sequence: the snapshot, the delete of
+    # the old row and the ingest of the new one. A restore or forget from
+    # another process between any two of them would leave the old text
+    # half-redacted.
     with write_gate(poppy_dir):
         return _supersede_memory(engine, new_memory, old_id, poppy_dir=poppy_dir)
 
@@ -293,17 +263,13 @@ def _supersede_memory(
 ) -> SupersedeResult:
     from poppy.ui.tombstones import TombstoneStore
 
-    old = engine.get_public(old_id)
+    old = engine.get(old_id)
     if old is None:
         raise KeyError(f"memory not found: {old_id}")
-
-    refuse_if_legacy_copy(engine, old_id, "supersede", existing=old)
 
     db_path = poppy_dir / "memories.db"
     tombstones = TombstoneStore(db_path)
     tombstones.add(old, superseded_by=new_memory.id)
-    # Superseding redacts the old text, so its derived per-speaker copies go with
-    # it. engine.delete clears them and retains content-free deletion evidence.
     engine.delete(old_id)
 
     related = list(new_memory.related_to)

@@ -16,33 +16,6 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture
-def hidden_memory_store(tmp_path):
-    """A retained row from an older release, invisible to public readers."""
-    from datetime import datetime, timezone
-
-    from poppy.engine.seed import SeedEngine
-    from poppy.models import Memory, Source
-
-    engine = SeedEngine(db_path=tmp_path / "memories.db")
-    now = datetime.now(timezone.utc)
-    memory = Memory(
-        id="parent_closet_alice",
-        content="retained-speaker-text-must-stay-hidden",
-        memory_type="fact",
-        source=Source(type="cli", session_id=None, timestamp=now),
-        project=None,
-        related_to=["parent"],
-        created_at=now,
-        updated_at=now,
-    )
-    engine.ingest(memory)
-    with engine._conn:
-        engine._conn.execute("UPDATE memories SET is_closet = 2 WHERE id = ?", (memory.id,))
-    yield engine, memory
-    engine._conn.close()
-
-
 @pytest.fixture(autouse=True)
 def _isolate_poppy_env(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     poppy_dir = tmp_path_factory.mktemp("poppy-dir")

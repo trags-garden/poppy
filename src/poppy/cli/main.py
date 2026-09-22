@@ -1,4 +1,3 @@
-import contextlib
 import datetime
 import errno
 import json
@@ -411,7 +410,7 @@ def list_memories(
 def forget(memory_id: str, yes: bool):
     """Delete a memory by ID."""
     engine = _get_engine()
-    mem = engine.get_public(memory_id)
+    mem = engine.get(memory_id)
     if mem is None:
         click.echo(f"Memory {memory_id} not found.")
         return
@@ -484,7 +483,6 @@ def edit(
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
     except ValueError as exc:
-        # e.g. the id names a derived per-speaker copy rather than a memory.
         raise click.ClickException(str(exc)) from exc
 
     if not result.changed:
@@ -2259,8 +2257,7 @@ def _print_push(res) -> None:
 def _print_pull(res) -> None:
     click.echo(
         f"  pull: {res.applied_live} live, {res.applied_tombstones} tombstones, "
-        f"{res.skipped_stale} skipped (local newer), "
-        f"{res.skipped_copies} skipped (derived copies), {res.errors} errors"
+        f"{res.skipped_stale} skipped (local newer), {res.errors} errors"
     )
 
 
@@ -2395,46 +2392,6 @@ def sync_auto_worker():
     run_worker(_get_poppy_dir())
 
 
-def _kept_pre_images(poppy_dir: Path) -> tuple[int, str | None]:
-    """(rows, recoverable-until) for pre-images an earlier cleanup saved.
-
-    Returns (0, None) when the store, or the table, is not there. Read through
-    ``poppy.db.connect`` rather than ``sqlite3.connect``: the latter bypasses
-    the encryption gate, so on an encrypted store it would fail to read the
-    table and the notice would vanish on exactly the installs that most need it.
-
-    This is one line of an installation check, and every step of it can fail on
-    a store this notice does not own: opening an encrypted one without a key,
-    reading a table an older client never created, closing a connection the
-    driver has already lost, or dating a timestamp somebody edited by hand. None
-    of that may take the remaining checks down, so a store that cannot be
-    answered for is reported as holding nothing.
-    """
-    from poppy.db import connect as connect_db
-
-    db_path = poppy_dir / "memories.db"
-    if not db_path.exists():
-        return (0, None)
-    try:
-        conn = connect_db(db_path)
-    except Exception:
-        return (0, None)
-    try:
-        row = conn.execute("SELECT COUNT(*), MIN(migrated_at) FROM closet_migration_backup").fetchone()
-        count, oldest = (row[0], row[1]) if row else (0, None)
-        if not count or not oldest:
-            return (0, None)
-        from poppy.ui.tombstones import TTL_DAYS
-
-        deadline = datetime.datetime.fromisoformat(oldest) + datetime.timedelta(days=TTL_DAYS)
-        return (count, deadline.date().isoformat())
-    except Exception:
-        return (0, None)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()
-
-
 @cli.command()
 def doctor():
     """Verify the Poppy installation: engine, storage, MCP config, hooks."""
@@ -2567,19 +2524,6 @@ def doctor():
         line("Trags key", "OK", "none (Trags sync not configured; optional)")
     else:
         line("Trags key", "OK", "keychain")
-
-    # Kept pre-images are otherwise invisible. Nothing reads that table on any
-    # surface a user or an agent can reach, so this notice is the only thing
-    # that says recoverable rows are still in the store, and until when. The
-    # count and the date only, never the rows.
-    kept_rows, kept_until = safe_read(lambda: _kept_pre_images(poppy_dir), (0, None))
-    if kept_rows:
-        line(
-            "kept pre-images",
-            "WARN",
-            f"{kept_rows} row(s) saved before an earlier release's cleanup removed them",
-            f"recoverable until {kept_until}, then dropped automatically",
-        )
 
     from poppy.capture.redaction import MIN_CUSTOM_SECRET_LENGTH, load_custom_redaction, valid_env_var_name
 
