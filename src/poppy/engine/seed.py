@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from poppy.db import apply_row_factory, rollback_and_close, write_txn
+from poppy.db import apply_row_factory, rollback_and_close, write_gate, write_txn
 from poppy.db import connect as connect_db
 from poppy.engine._timestamps import (
     chunked,
@@ -231,15 +231,34 @@ class SeedEngine(RetrievalEngine):
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._lock = threading.RLock()
-        self._conn = connect_db(db_path, check_same_thread=False)
-        try:
-            apply_row_factory(self._conn)
-            self._conn.executescript(SCHEMA)
-            _migrate_expires_at(self._conn)
-            normalise_stored_timestamps(self._conn)
-        except Exception:
-            rollback_and_close(self._conn)
-            raise
+        # The whole open -- the connection, the schema and the migrations -- runs
+        # under the store's write gate, because opening writes, in two ways that
+        # processes starting together collide on:
+        #
+        # * ``connect`` flips a rollback-journal store to WAL. That flip wants the
+        #   database's exclusive lock, and SQLite refuses to run the busy handler
+        #   for it, so a contended opener fails outright instead of waiting.
+        # * "is this column missing?" and "add it" are separate statements, so two
+        #   openers can both decide to add one and the loser gets ``duplicate
+        #   column name``; enough of them piling up gives ``database is locked``.
+        #
+        # Realistically that is the first open after an upgrade, when the CLI, the
+        # MCP server, the daemon and the dashboard all reach a store that has not
+        # applied its new migrations yet. The gate is taken once per open and
+        # released before the engine serves anything, so a long-lived holder never
+        # keeps another opener out; and it is taken BEFORE the connection's shared
+        # encryption gate, the order ``write_gate`` documents, so the two cannot
+        # deadlock.
+        with write_gate(db_path.parent):
+            self._conn = connect_db(db_path, check_same_thread=False)
+            try:
+                apply_row_factory(self._conn)
+                self._conn.executescript(SCHEMA)
+                _migrate_expires_at(self._conn)
+                normalise_stored_timestamps(self._conn)
+            except Exception:
+                rollback_and_close(self._conn)
+                raise
 
     def _invalidate_parent_embedding(self, memory_id: str) -> None:
         """Retag ``memory_id``'s vector as stale instead of deleting it.
