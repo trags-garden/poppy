@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy stats` and the dashboard's memory total no longer count memories whose
+  TTL has already run out. Those memories are hidden from `poppy list` and from
+  the dashboard list the moment they expire, but the total kept counting them
+  until the next purge removed them, so the number on screen was larger than the
+  list beneath it. The expired memories themselves are untouched: they are still
+  on disk, still shown by `poppy list --include-expired`, and still removed by
+  `poppy expire --yes`.
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed

@@ -18,7 +18,13 @@ import numpy as np
 
 from poppy.db import apply_row_factory, rollback_and_close, write_txn
 from poppy.db import connect as connect_db
-from poppy.engine._timestamps import chunked, expiry_passed, normalise_stored_timestamps, utc_iso
+from poppy.engine._timestamps import (
+    chunked,
+    expiry_passed,
+    normalise_stored_timestamps,
+    unexpired_sql,
+    utc_iso,
+)
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
 from poppy.models import Filters, Memory, ScoredMemory, Source
 
@@ -471,8 +477,9 @@ class HybridEngine(RetrievalEngine):
                 clauses.append("confidence >= ?")
                 params.append(filters.min_confidence)
         if not (filters and filters.include_expired):
-            clauses.append("(expires_at IS NULL OR expires_at > ?)")
-            params.append(datetime.now(timezone.utc).isoformat())
+            clause, bound = unexpired_sql()
+            clauses.append(clause)
+            params.append(bound)
         query = "SELECT * FROM memories"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -502,7 +509,11 @@ class HybridEngine(RetrievalEngine):
         return ConsolidationResult(merged=0, removed=0, updated=0)
 
     def stats(self) -> EngineStats:
-        count = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        # Counts what `list_all` shows, through the same clause: expired rows are
+        # already invisible to every reader, so counting them would report a
+        # total nothing in the UI or the CLI can account for.
+        clause, bound = unexpired_sql()
+        count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {clause}", (bound,)).fetchone()[0]
         storage = self._db_path.stat().st_size if self._db_path.exists() else 0
         return EngineStats(
             memory_count=count,

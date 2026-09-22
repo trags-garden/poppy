@@ -215,6 +215,19 @@ def expiry_passed(stamp: str | None, now: datetime) -> bool:
     return parsed <= now
 
 
+def unexpired_sql(now: datetime | None = None) -> tuple[str, str]:
+    """The ``WHERE`` fragment that keeps only rows a reader is allowed to see.
+
+    Both engines hide rows whose TTL has run out until :func:`purge_expired`
+    removes them, and every place that reports on the store has to hide the same
+    rows: a ``stats`` total that counted what ``list_all`` withholds is a number
+    the user cannot reconcile with anything on screen. One fragment, one bound,
+    so the two cannot drift apart.
+    """
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    return "(expires_at IS NULL OR expires_at > ?)", stamp
+
+
 def _rewrite_table(conn: sqlite3.Connection, table: str, columns: tuple[str, ...]) -> int:
     """Rewrite deviant timestamps in one table. Returns the number of rows changed."""
     if not _table_exists(conn, table):
