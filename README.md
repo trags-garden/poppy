@@ -205,7 +205,7 @@ the new engine):
 
 | Name | What it is |
 |---|---|
-| `bloom` | Default. Hybrid (FTS5 + bge-small embeddings + RRF) into a cross-encoder rerank, with per-speaker content expansion. Runs on local ONNX models, so a plain `pip install poppy-memory` has everything it needs. |
+| `bloom` | Default. Hybrid (FTS5 + bge-small embeddings + RRF) into a cross-encoder rerank. Runs on local ONNX models, so a plain `pip install poppy-memory` has everything it needs. |
 | `seed`  | FTS5 only. No ML deps, no model downloads. The floor, and the automatic fallback when `bloom` cannot start. |
 
 `bloom` is where retrieval work lands, so its architecture can change between
@@ -450,14 +450,21 @@ network request of any kind, to PyPI or to PostHog, until you have said yes.
 
 ## Hacking on it
 
-The full source ships in every release on PyPI:
+Clone the repo:
+
+```bash
+git clone https://github.com/trags-garden/poppy
+cd poppy
+uv sync
+uv run pytest -v
+uv run poppy --help
+```
+
+For the exact source of a release, download it from PyPI instead:
 
 ```bash
 pip download poppy-memory --no-binary :all: --no-deps -d .
 tar xzf poppy_memory-*.tar.gz && cd poppy_memory-*/
-uv sync
-uv run pytest -v
-uv run poppy --help
 ```
 
 ## License
