@@ -9,7 +9,7 @@ decisions, preferences, and lessons in a local SQLite store, then recalls
 them when they're relevant. No cloud, no API keys, no per-query cost.
 
 ```bash
-curl -fsSL https://trags.ai/install/poppy | sh
+pipx install poppy-memory
 ```
 
 Then wire up your agent:
@@ -18,6 +18,11 @@ Then wire up your agent:
 poppy setup claude-code   # or: claude-desktop, cursor, vscode, windsurf, codex,
                           #     gemini, copilot-cli, pi, goose, hermes-agent
 ```
+
+The package on PyPI is `poppy-memory`; the command it installs is `poppy`.
+Prefer uv? Use `uv tool install poppy-memory`. Or run the one-line installer,
+`curl -fsSL https://trags.ai/install/poppy | sh`. It picks pipx or uv for you
+and falls back to its own virtualenv if neither is there.
 
 ## What it does
 
@@ -103,11 +108,13 @@ What fires when, once automatic capture is enabled globally:
 - **Around context compaction**, Claude Code consolidates the compact summary;
   Cursor flushes the live transcript at `preCompact` before compaction begins.
 
-Extraction runs locally through the same coding-agent CLI you already use
-(`claude`, `cursor-agent`, `codex`, or `gemini`), on your existing login. Your
-conversation never leaves your machine, and Poppy never auto-spends on a
-paid remote model: if only an API-key backend is configured, capture
-stays off and tells you why.
+Extraction runs through the coding-agent CLI you already use (`claude`,
+`cursor-agent`, `codex`, or `gemini`), on your existing login. That CLI sends
+the transcript excerpt to the model provider you already use, so no new third
+party sees your conversation. The store, your memories, and retrieval stay on
+your machine; retrieval runs on local ONNX models. Poppy sends nothing to Trags
+unless you turn sync on. It never auto-spends on a paid remote model: if only an
+API-key backend is configured, capture stays off and tells you why.
 
 Before anything is written, a reconciler dedups each candidate against
 the store: clear duplicates are skipped, clear updates supersede the old
@@ -299,7 +306,7 @@ permissions (`~/.poppy` is `0700`). You can encrypt it at rest with a key held
 in your operating system's keychain:
 
 ```bash
-# The installer (curl -fsSL https://trags.ai/install/poppy | sh) uses pipx, so inject the extra dep there:
+# pipx installs poppy in its own virtualenv, so inject the extra dependency there:
 pipx inject poppy-memory sqlcipher3
 # (plain pip installs instead: pip install 'poppy-memory[encryption]')
 poppy encrypt enable                      # migrates the existing store in place
