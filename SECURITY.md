@@ -20,9 +20,14 @@ on an older version, upgrade to the latest release first.
 
 Please do not report security vulnerabilities through public GitHub issues.
 
-Report them privately by email to **security@trags.ai**. Include the Poppy
-version (`poppy --version`), reproduction steps, and the impact as you
-understand it.
+Report them privately, either way works:
+
+- Open a private report on GitHub:
+  https://github.com/trags-garden/poppy/security/advisories/new
+- Email **security@trags.ai**
+
+Include the Poppy version (`poppy --version`), reproduction steps, and the
+impact as you understand it.
 
 You can expect an initial response within a few days. We will keep you
 informed while the report is investigated and fixed.
