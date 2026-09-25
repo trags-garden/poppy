@@ -1394,8 +1394,9 @@ def ui(host: str, port: int, no_open: bool, allow_remote: bool):
 
 _CONSENT_DISCLOSURE = (
     "\nPoppy can automatically remember decisions and lessons from your sessions so "
-    "they're there next time. Extraction runs locally using your own Claude CLI; your "
-    "conversation never leaves your machine. Enable automatic capture?"
+    "they're there next time. Extraction runs through your own coding-agent CLI on "
+    "your existing login, so no new third party sees your conversation. Memories "
+    "stay on your machine unless you turn on sync. Enable automatic capture?"
 )
 
 
