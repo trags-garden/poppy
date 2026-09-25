@@ -1,4 +1,4 @@
-"""Tests for CaptureReconciler (ADR-0003: automatic candidate reconciliation).
+"""Tests for CaptureReconciler (automatic candidate reconciliation).
 
 The reconciler decides ADD / SUPERSEDE / SKIP for each captured candidate before
 ingest. The cheap lexical prefilter resolves clear duplicates (SKIP) and clearly

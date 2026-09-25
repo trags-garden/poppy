@@ -16,8 +16,7 @@ Two backends, tried in order:
 
 Either way, nothing runs until the user records a one-time consent
 (`poppy autocapture on --global`, or the prompt during `poppy setup claude-code`).
-The full consent and default-on precedence lives in ``poppy.capture.policy``
-(ADR-0002);
+The full consent and default-on precedence lives in ``poppy.capture.policy``;
 ``POPPY_CONSOLIDATE`` remains an explicit on/off override.
 """
 
@@ -57,7 +56,7 @@ MIN_BACKSTOP_TURNS = 4
 
 # Minimum characters of substantive new content in a mid-session capture window
 # before a fire is worthwhile (minimum-content gate). A sane default,
-# tuned later by ADR-0003's automatic-reconciliation tuning pass.
+# tuned later by the automatic reconciliation tuning pass.
 MIN_CAPTURE_CHARS = 200
 
 CONSOLIDATION_PROMPT = """You are a developer-memory consolidator. The transcript below is one coding-agent session.
@@ -595,7 +594,7 @@ def consolidate_stop_event(payload: dict) -> int:
         if not acquired:
             return 0
 
-        # ADR-0001 incremental capture: read only the window (watermark, end].
+        # Incremental capture: read only the window (watermark, end].
         # The lock keeps cadence, preCompact, and sessionEnd from extracting the
         # same window concurrently. read_window also clamps an oversized watermark.
         watermark = get_watermark(poppy_dir, session_id)
@@ -615,7 +614,7 @@ def consolidate_stop_event(payload: dict) -> int:
             project=project,
             transcript_path=transcript_path,
             max_items=max_items,
-            # ADR-0001: advance the watermark only after a successful ingest.
+            # Watermark-after-success rule: advance the watermark only after a successful ingest.
             # Journal the backstop capture so a short session's only capture is
             # visible to the banner and `poppy doctor`.
             advance_watermark_to=window.new_watermark,
@@ -629,7 +628,7 @@ def _window_substance(messages: list[dict[str, str]]) -> int:
 
 
 def consolidate_capture_event(payload: dict) -> int:
-    """ADR-0001 watermark-after-success mid-session capture. Returns the
+    """Watermark-after-success mid-session capture. Returns the
     number of memories stored.
 
     Fired every Nth turn by the UserPromptSubmit hook via a detached worker. It

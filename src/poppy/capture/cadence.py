@@ -1,4 +1,4 @@
-"""TurnCadence — per-session turn counter + cadence gate for ADR-0001's
+"""TurnCadence — per-session turn counter + cadence gate for the
 watermark-after-success capture rule.
 
 The mid-session loop fires a capture every Nth user turn. This module owns the
@@ -7,7 +7,7 @@ shared per-session file (``_state``); the counters reset at SessionStart via
 ``watermark.reset_session`` so cadence and coverage are predictable per session
 and concurrent sessions never interfere.
 
-Defaults (N / K) are sane starting points; ADR-0003's automatic-reconciliation
+Defaults (N / K) are sane starting points; the automatic reconciliation
 tuning pass tunes them later.
 """
 

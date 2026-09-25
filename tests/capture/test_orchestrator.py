@@ -3,7 +3,7 @@ interface.
 
 The whole point of the reshape: exercise extract → build → ingest → advance
 watermark → journal end-to-end with a fake LLM + fake reconcile and a tmp
-poppy_dir — no module-global monkeypatching — and pin ADR-0001's
+poppy_dir — no module-global monkeypatching — and pin the
 watermark-after-success invariant in one place.
 """
 
@@ -104,7 +104,7 @@ def test_max_items_caps_candidates(tmp_path: Path):
     assert reconcile.calls == [3]
 
 
-# ---------- ADR-0001: watermark advances only after a successful ingest ----------
+# ---------- watermark-after-success: watermark advances only after a successful ingest ----------
 
 
 def test_empty_extraction_writes_nothing_and_leaves_watermark(tmp_path: Path):

@@ -1623,8 +1623,8 @@ def capture(action: str, project: str | None):
 
 
 def _maybe_prompt_consent(config, *, assume_yes: bool) -> None:
-    """Record auto-capture consent during setup under ADR-0002's consent and
-    default-on precedence.
+    """Record auto-capture consent during setup under the consent and
+    default-on precedence rule.
 
     On a TTY, ask y/n and persist the answer. Non-interactively, leave consent
     pending (the SessionStart notice + ``poppy autocapture on --global`` carry it).
@@ -1783,7 +1783,7 @@ def setup_claude_code(hooks: bool, claude_md: bool, yes: bool, daemon_mode: bool
     _print_install_paths(paths, "claude-code")
     _record_agent_setup("claude-code")
 
-    # ADR-0002 consent and default-on precedence: ask once on a TTY,
+    # Consent and default-on precedence: ask once on a TTY,
     # otherwise leave pending for the SessionStart notice + `poppy consent`.
     _maybe_prompt_consent(load_config(_get_poppy_dir()), assume_yes=yes)
 

@@ -2,7 +2,7 @@
 
 A one-line banner prepended to the SessionStart context so the developer can see
 whether auto-capture is working. It reads the capture status (ConsolidationPolicy,
-with ADR-0002's consent and default-on precedence), the project memory count
+with the consent and default-on precedence rule), the project memory count
 (engine), and the last-session capture count
 (CaptureJournal) — the three signals that make silent background capture
 observable rather than invisible.

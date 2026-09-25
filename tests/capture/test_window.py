@@ -1,4 +1,4 @@
-"""Tests for TranscriptWindow (ADR-0001: watermark-after-success capture window).
+"""Tests for TranscriptWindow (watermark-after-success capture window).
 
 The window reader returns exactly the turns in ``(watermark, now]`` — clamping
 safely when compaction shrinks the transcript below the watermark. JSONL parsing

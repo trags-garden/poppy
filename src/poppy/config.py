@@ -26,7 +26,7 @@ _CONFIG_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR  # 0o600
 # option, documented as such.
 TRAGS_API_KEY_ENV = "POPPY_TRAGS_API_KEY"
 
-# ADR-0002 consent and default-on precedence uses tri-state auto-capture consent,
+# The consent and default-on precedence rule uses tri-state auto-capture consent,
 # owned by ConsolidationPolicy and set via `poppy autocapture` / the setup prompt,
 # not config set.
 _CONSENT_VALUES = {"pending", "granted", "denied"}
@@ -55,7 +55,7 @@ class PoppyConfig:
     consolidate_model: str | None = None
     consolidate_base_url: str | None = None
     consolidate_api_key: str | None = None
-    # ADR-0002 consent and default-on precedence: pending | granted |
+    # Consent and default-on precedence: pending | granted |
     # denied. Migrated from the legacy consolidate_enabled bool on load; managed
     # by `poppy autocapture` and the setup prompt. Both granted and denied persist.
     # Consent evidence record (GDPR Art 7(1)); never rename with CLI surface changes.

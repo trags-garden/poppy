@@ -1,11 +1,11 @@
-"""ConsolidationPolicy — ADR-0002's consent and default-on precedence.
+"""ConsolidationPolicy — the consent and default-on precedence rule.
 
 Auto-capture is **enabled by default but inert until a one-time consent is
 recorded.** This module owns the single source of truth for "is capture on right
 now, and if not, why" so the SessionEnd/PostCompact backstops, the mid-session
 loop, `poppy doctor`, and the SessionStart notice all agree.
 
-ADR-0002 consent and default-on precedence:
+Consent and default-on precedence:
 
     explicit env ON          -> FORCED_ENV    (operator override; implies consent)
     explicit env ON + failing CLI -> WARN_BACKEND_BROKEN (still forced on, but broken)
@@ -120,7 +120,7 @@ def evaluate(
     remote: bool | None = None,
     backend_broken: bool | None = None,
 ) -> CaptureStatus:
-    """Resolve capture status from ADR-0002's consent and default-on precedence.
+    """Resolve capture status from the consent and default-on precedence rule.
 
     ``project`` is the current project name (from ``project_from_cwd``); when it is
     on the per-project deny-list, capture is off for this repo regardless of

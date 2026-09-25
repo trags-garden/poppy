@@ -1,4 +1,4 @@
-"""CaptureReconciler — ADR-0003's automatic reconciliation decision brain in
+"""CaptureReconciler — the automatic reconciliation rule's decision brain in
 one seam.
 
 Background capture produces many candidate memories with no human in the loop.
@@ -7,11 +7,12 @@ whether to ADD it, SUPERSEDE an existing memory, or SKIP it as a duplicate.
 
 This module owns the whole decision brain behind the `reconcile_and_ingest`
 seam: the two-tier decision, *all* of its tunable thresholds, the LLM verdict
-(prompt + parse), candidate retrieval, and apply/tombstone. ADR-0003 designates
-the supersede-confidence threshold for automatic-reconciliation tuning, so it lives here with
-the rest — one module, one set of tunables to point the tuning pass at.
+(prompt + parse), candidate retrieval, and apply/tombstone. The automatic
+reconciliation rule designates the supersede-confidence threshold for tuning,
+so it lives here with the rest — one module, one set of tunables to point the
+tuning pass at.
 
-ADR-0003's three automatic-reconciliation tiers, cheapest first:
+The three automatic-reconciliation tiers, cheapest first:
 
 1. **Cheap lexical prefilter** (no LLM): a normalized `difflib` similarity score
    against the same-project / same-type candidates already in the store.
@@ -35,7 +36,7 @@ tool) consumes the same verdict interface (``detect_conflicts`` /
 The lexical prefilter is deliberately engine-agnostic (it works on the baseline
 FTS engine with no embeddings); embeddings only enter at the neighbour-fetch
 (`find_candidates`, via the engine's `retrieve`). A future tuning pass will use
-a labelled dedup-quality set under ADR-0003; until then
+a labelled dedup-quality set; until then
 they are conservative — bias to ADD.
 """
 
@@ -72,7 +73,7 @@ CANDIDATE_MIN_SCORE = 0.30
 
 # In the ambiguous band, exactly one candidate must clear this confidence for an
 # auto-supersede; otherwise we bias to ADD. Intentionally conservative — the
-# ADR-0003's automatic-reconciliation tuning pass points here.
+# automatic reconciliation tuning pass points here.
 AUTO_SUPERSEDE_THRESHOLD = 0.85
 
 # Seconds a verdict gets from the backend, well under the whole-transcript
