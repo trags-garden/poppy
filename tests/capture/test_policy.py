@@ -1,4 +1,4 @@
-"""Tests for ConsolidationPolicy (ADR-0002: consent and default-on precedence).
+"""Tests for ConsolidationPolicy (consent and default-on precedence).
 
 Covers the full precedence matrix: consent-absent inert, env-off beats config,
 env-on forces, explicit opt-out persists, host-CLI default-on, remote-only WARN

@@ -1,4 +1,4 @@
-"""CaptureOrchestrator — the one place ADR-0001's watermark-after-success
+"""CaptureOrchestrator — the one place the watermark-after-success
 capture pipeline tail lives.
 
 The three capture entry points (mid-session, SessionEnd backstop, PostCompact)
@@ -7,8 +7,8 @@ used to each copy-paste the same orchestration tail:
     LLM extract → build candidates → reconcile & ingest
       → (on success) advance the watermark → count the soft cap → journal
 
-ADR-0001's core invariant, *the watermark advances only after a successful
-ingest*, was a call-ordering convention hand-replicated at each site, i.e.
+The watermark-after-success rule's core invariant, *the watermark advances only
+after a successful ingest*, was a call-ordering convention hand-replicated at each site, i.e.
 several separate chances to reorder it. This module owns that sequence once:
 
 * ``CaptureOrchestrator.run(plan)`` runs the tail in the one guarded order.
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
 # Confidence stamped on auto-captured candidates before reconciliation. Lower than
 # a manual write (1.0) — these are machine-extracted and go through the
-# CaptureReconciler, following ADR-0003's automatic reconciliation rule, before
+# CaptureReconciler, following the automatic reconciliation rule, before
 # ingest.
 CAPTURE_CONFIDENCE = 0.7
 
@@ -71,7 +71,7 @@ def build_capture_memories(
 
     Provenance (source app + session id) is stamped here so every captured memory
     is auditable, in exactly one place. The candidates are not written directly —
-    they go through the CaptureReconciler, following ADR-0003's automatic
+    they go through the CaptureReconciler, following the automatic
     reconciliation rule, before ingest.
 
     Secret redaction happens here, at construction, so a captured
@@ -128,7 +128,7 @@ class CapturePlan:
     project: str | None = None
     transcript_path: str | None = None  # host-CLI backend detection for the LLM call
     max_items: int = 5
-    # ADR-0001 watermark-after-success rule: the new watermark to advance to
+    # Watermark-after-success rule: the new watermark to advance to
     # *after* a successful ingest, or
     # None for entry points that do not use the watermark (PostCompact).
     advance_watermark_to: int | None = None
@@ -147,7 +147,7 @@ class CaptureOutcome:
 
 
 class CaptureOrchestrator:
-    """Runs ADR-0001's watermark-after-success capture tail in one place.
+    """Runs the watermark-after-success capture tail in one place.
 
     Collaborators are injected so the pipeline is testable without patching
     module globals. ``llm`` and ``reconcile`` default to the production
@@ -196,7 +196,7 @@ class CaptureOrchestrator:
         )
         summary = self._reconcile(candidates, engine=self._engine, cfg=self._cfg, poppy_dir=self._poppy_dir)
 
-        # --- ADR-0001 watermark-after-success sequence, in exactly one place ---
+        # --- watermark-after-success sequence, in exactly one place ---
         # Advancing the watermark only here guarantees a failed extract/ingest
         # (which returned above, or raised before this line) leaves the turns for
         # the next fire / backstop to re-cover.

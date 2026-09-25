@@ -1,6 +1,7 @@
-"""TranscriptWindow — ADR-0001's incremental ``(watermark, now]`` windowing.
+"""TranscriptWindow — the incremental ``(watermark, now]`` windowing for the
+watermark-after-success rule.
 
-ADR-0001's watermark-after-success capture-window machinery, decoupled from
+The watermark-after-success capture-window machinery, decoupled from
 transcript parsing:
 it takes the qualifying turns a reader produced (see ``capture.transcript``) and
 returns the window ``(watermark, now]`` plus the watermark to persist next. JSONL

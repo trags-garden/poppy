@@ -13,7 +13,7 @@ A **turn** is one qualifying (text-bearing) user/assistant message,
 * :func:`read_claude_code_turns` — the Claude Code JSONL transcript (the live
   capture path). The incremental ``(watermark, now]`` windowing in
   ``capture.window`` is layered on top of these turns, so JSONL parsing and the
-  ADR-0001 watermark-after-success window machinery is now testable apart.
+  watermark-after-success window machinery is now testable apart.
 
 * :func:`read_codex_turns` — Codex rollout JSONL, identified by its leading
   ``session_meta`` record.

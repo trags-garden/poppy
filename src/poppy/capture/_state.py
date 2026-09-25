@@ -1,4 +1,4 @@
-"""Per-session capture state file for ADR-0001's watermark-after-success rule.
+"""Per-session capture state file for the watermark-after-success rule.
 
 A single JSON file under the Poppy data directory holds the per-session capture
 state — the watermark and the turn cadence counters.
