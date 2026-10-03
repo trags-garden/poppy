@@ -209,11 +209,10 @@ def _client_settings_path(client: str, claude_dir: Path) -> Path:
     """
     home = Path.home()
     if client == "claude-code":
-        # Claude Code reads MCP servers from ~/.claude.json (top-level sibling
-        # of the ~/.claude directory), NOT from ~/.claude/settings.json. The
-        # settings.json file holds hooks and permissions only.
-        # Resolve to a sibling so tests passing a tmp_path stay isolated.
-        if claude_dir.name == ".claude":
+        # CLAUDE_CONFIG_DIR moves .claude.json inside the config directory,
+        # even when that directory is named .claude. Without the override,
+        # ~/.claude.json is a sibling of ~/.claude; settings.json holds hooks.
+        if not os.environ.get("CLAUDE_CONFIG_DIR") and claude_dir.name == ".claude":
             return claude_dir.parent / ".claude.json"
         return claude_dir / ".claude.json"
     if client == "claude-desktop":

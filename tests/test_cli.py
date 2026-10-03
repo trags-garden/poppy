@@ -495,25 +495,38 @@ def test_config_set_and_get(tmp_path):
     assert result.exit_code == 0
 
 
-def test_setup_claude_code(tmp_path):
+@pytest.mark.parametrize(
+    "config_dir,relative_mcp_path",
+    [
+        (None, ".claude.json"),
+        (".claude", ".claude/.claude.json"),
+        ("work/.claude", "work/.claude/.claude.json"),
+        ("claude-config", "claude-config/.claude.json"),
+    ],
+    ids=["default", "explicit-default", "relocated-dot-claude", "relocated-other-name"],
+)
+def test_setup_claude_code(tmp_path, config_dir, relative_mcp_path):
     # Create a fake claude settings directory
-    claude_dir = tmp_path / ".claude"
-    claude_dir.mkdir()
+    claude_dir = tmp_path / (config_dir or ".claude")
+    claude_dir.mkdir(parents=True)
+    env = _fresh_setup_env(tmp_path)
+    env["CLAUDE_CONFIG_DIR"] = str(claude_dir) if config_dir else None
 
     runner = CliRunner()
+    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
     result = runner.invoke(
         cli,
         ["setup", "claude-code"],
-        env={"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(claude_dir)},
+        env=env,
     )
     assert result.exit_code == 0
     assert "MCP config" in result.output
     assert "Poppy is ready" in result.output
 
-    # Verify MCP config was written to ~/.claude.json (sibling of ~/.claude/),
-    # NOT to ~/.claude/settings.json which holds hooks only.
-    mcp_config_path = claude_dir.parent / ".claude.json"
+    mcp_config_path = tmp_path / relative_mcp_path
     assert mcp_config_path.exists()
+    other_mcp_path = (claude_dir.parent if config_dir else claude_dir) / ".claude.json"
+    assert not other_mcp_path.exists()
     mcp_data = json.loads(mcp_config_path.read_text())
     assert "poppy" in mcp_data["mcpServers"]
 
@@ -540,10 +553,17 @@ def test_setup_claude_code(tmp_path):
     doctor_result = runner.invoke(
         cli,
         ["doctor"],
-        env={"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(claude_dir)},
+        env=env,
     )
     assert doctor_result.exit_code == 0
+    assert "MCP server registered: OK" in doctor_result.output
     assert "PostCompact hook" in doctor_result.output
+
+    del mcp_data["mcpServers"]["poppy"]
+    mcp_config_path.write_text(json.dumps(mcp_data))
+    doctor_result = runner.invoke(cli, ["doctor"], env=env)
+    assert doctor_result.exit_code == 0
+    assert "MCP server registered: WARN" in doctor_result.output
 
     # Verify CLAUDE.md block was written
     md_path = claude_dir / "CLAUDE.md"

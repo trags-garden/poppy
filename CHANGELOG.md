@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy setup claude-code` now registers memory tools inside `CLAUDE_CONFIG_DIR`
+  when it is set, including when the folder is named `.claude`. `poppy doctor`
+  checks the same file.
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
   instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a
