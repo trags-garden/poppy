@@ -12,6 +12,8 @@ import datetime as dt
 import pytest
 
 from poppy.engine.seed import SeedEngine
+from poppy.sources import resolve_source
+from poppy.sync.serializer import memory_to_wire
 from poppy.ui.tombstones import TombstoneStore
 from poppy.write_flow import ForgetResult, RememberResult, forget, make_memory_id, remember, restore
 
@@ -173,6 +175,43 @@ def test_remember_emits_memory_write(engine, tmp_path, monkeypatch):
     )
     remember(engine, tmp_path, content="use ruff", memory_type="preference", project="poppy", source="cursor")
     assert ("memory_write", {"memory_type": "preference", "has_project": True, "source": "cursor"}) in events
+
+
+@pytest.mark.parametrize(
+    "client_name, resolved_source, telemetry_source",
+    [
+        ("Some Private Client", "some-private-client", "other"),
+        ("codex-cli", "codex", "codex"),
+    ],
+)
+def test_remember_telemetry_source_uses_known_clients(
+    engine, tmp_path, monkeypatch, client_name, resolved_source, telemetry_source
+):
+    events: list = []
+    monkeypatch.setattr(
+        "poppy.telemetry.capture",
+        lambda poppy_dir, event, properties=None: events.append((event, properties or {})),
+    )
+    source = resolve_source(client_name=client_name, configured=None)
+    assert source == resolved_source
+    result = remember(engine, tmp_path, content="use ruff", source=source)
+
+    assert result.wrote is True
+    assert events == [("memory_write", {"memory_type": "fact", "has_project": False, "source": telemetry_source})]
+    stored = engine.get(result.memory.id)
+    assert stored.source.type == resolved_source
+    assert memory_to_wire(stored)["source_type"] == resolved_source
+
+
+@pytest.mark.parametrize("source", ["manual", "ui", "agent", "claude-memory", "hermes-memory"])
+def test_remember_telemetry_keeps_poppy_source_names(engine, tmp_path, monkeypatch, source):
+    events: list = []
+    monkeypatch.setattr(
+        "poppy.telemetry.capture",
+        lambda poppy_dir, event, properties=None: events.append((event, properties or {})),
+    )
+    remember(engine, tmp_path, content="use ruff", source=source)
+    assert events[0][1]["source"] == source
 
 
 # ---------- forget ----------

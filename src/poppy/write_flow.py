@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from poppy.engine.interface import RetrievalEngine
 from poppy.models import Memory, Source
+from poppy.sources import KNOWN_SOURCES
 
 if TYPE_CHECKING:
     from poppy.capture.reconciler import Conflict
@@ -43,14 +44,16 @@ def _emit_memory_write(poppy_dir: Path, memory: Memory) -> None:
     It never raises or blocks. Same event name and properties
     across every surface now that the flow is shared. Privacy: send whether a
     project was set, never the project name itself (project labels can carry
-    client or codename information).
+    client or codename information). Source is a name Poppy knows or "other";
+    unknown client names stay in the memory's provenance only.
     """
     from poppy import telemetry
 
+    source = memory.source.type if memory.source.type in KNOWN_SOURCES else "other"
     telemetry.capture(
         poppy_dir,
         "memory_write",
-        {"memory_type": memory.memory_type, "has_project": memory.project is not None, "source": memory.source.type},
+        {"memory_type": memory.memory_type, "has_project": memory.project is not None, "source": source},
     )
 
 

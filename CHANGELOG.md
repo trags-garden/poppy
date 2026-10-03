@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Memory write telemetry now reports the source only when it is a name Poppy
+  knows (such as `manual` or `claude-code`), and `other` for any unknown client
+  name. The memory itself still keeps the original source, locally and in sync.
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
   instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a
