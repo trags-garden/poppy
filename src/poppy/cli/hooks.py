@@ -682,6 +682,8 @@ def _append_debug_log(
 
 def _scrub_compact_log_entry(entry: dict) -> dict:
     """Remove summary content left in compaction entries by older versions."""
+    if not isinstance(entry, dict):
+        return entry  # A stray non-object line must not block the rewrite.
     entry.pop("summary_head", None)
     payload = entry.get("payload")
     if isinstance(payload, dict):

@@ -996,6 +996,25 @@ def test_postcompact_debug_log_scrubs_existing_summaries(tmp_path, monkeypatch, 
         assert text not in log_text
 
 
+def test_postcompact_debug_log_scrub_tolerates_non_object_lines(tmp_path, monkeypatch):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
+    (tmp_path / "config.json").write_text(json.dumps({"consent": "granted"}))
+    monkeypatch.setattr("poppy.capture.policy.host_cli_available", lambda: True)
+    monkeypatch.setattr("poppy.cli.hooks._spawn_detached_worker", lambda *args: None)
+    log_path = tmp_path / "postcompact-debug.log"
+    log_path.write_text('"junk"\n' + json.dumps({"summary_head": "old summary preview"}) + "\n")
+
+    result = CliRunner().invoke(hook, ["post-compact"], input=json.dumps({"session_id": "new-session"}))
+
+    assert result.exit_code == 0
+    log_text = log_path.read_text()
+    assert "old summary preview" not in log_text
+    entries = [json.loads(line) for line in log_text.splitlines()]
+    assert len(entries) == 3
+    assert entries[-1]["session_id"] == "new-session"
+
+
 @pytest.mark.parametrize(
     "command, log_name", [("post-compact", "postcompact-debug.log"), ("session-end", "sessionend-debug.log")]
 )
