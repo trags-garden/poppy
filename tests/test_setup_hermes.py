@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from poppy.setup.hermes import (
     HERMES_PLUGIN_NAME,
@@ -174,6 +178,42 @@ def test_set_provider_preserves_neighbor_keys() -> None:
     assert "ttl: 30d" in out
     assert "other:\n  key: value" in out
     assert "provider: poppy" in out
+
+
+@pytest.mark.parametrize("line", ["\t\t\n", "  key: value\n"])
+def test_set_provider_long_block_without_provider_finishes_fast(line: str) -> None:
+    # A child process lets the timeout stop a regressed regex that never returns.
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
+        "from poppy.setup.hermes import _set_memory_provider\n"
+        f"lines = {line!r} * 40\n"
+        "assert _set_memory_provider('memory:\\n' + lines, 'poppy') "
+        "== 'memory:\\n  provider: poppy\\n' + lines\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, timeout=3)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("memory:\n  scope: profile\n", "memory:\n  provider: poppy\n  scope: profile\n"),
+        (
+            "memory:\n\t\t\n  key: value\n\tprovider:\thoncho  # legacy\nother: unchanged\n",
+            "memory:\n\t\t\n  key: value\n\tprovider:\tpoppy# legacy\nother: unchanged\n",
+        ),
+        ("memory:\n  provider: honcho", "memory:\n  provider: poppy"),
+        (
+            "memory:\n  scope: profile\nother:\n  provider: honcho\n",
+            "memory:\n  provider: poppy\n  scope: profile\nother:\n  provider: honcho\n",
+        ),
+        (
+            "memory:\n  scope: profile\nmemory:\n  provider: honcho\n",
+            "memory:\n  scope: profile\nmemory:\n  provider: poppy\n",
+        ),
+    ],
+)
+def test_set_provider_preserves_exact_content(text: str, expected: str) -> None:
+    assert _set_memory_provider(text, "poppy") == expected
 
 
 # ---------------------------------------------------------------------------

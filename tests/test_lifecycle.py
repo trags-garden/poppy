@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -67,6 +69,55 @@ def test_parse_ttl_units(text: str, expected: timedelta) -> None:
 def test_parse_ttl_rejects(bad: str) -> None:
     with pytest.raises(ValueError):
         parse_ttl(bad)
+
+
+@pytest.mark.parametrize("suffix", ["", "x", "d"])
+def test_parse_ttl_overlong_digit_run_finishes_fast(suffix: str) -> None:
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
+        "from poppy.lifecycle import parse_ttl\n"
+        f"text = '9' * 50000 + {suffix!r}\n"
+        "try:\n"
+        "    parse_ttl(text)\n"
+        "except ValueError as exc:\n"
+        "    assert str(exc) == f'unparseable TTL: {text!r} (use forms like 30d, 12h, 1w3d)'\n"
+        "else:\n"
+        "    raise AssertionError('overlong TTL accepted')\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, timeout=3)
+
+
+def test_duration_matching_long_digit_run_without_unit_finishes_fast() -> None:
+    # Exercise matching itself, independently of the input length limit.
+    code = (
+        f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / 'src')!r})\n"
+        "from poppy.lifecycle import _DURATION_RE\n"
+        "assert _DURATION_RE.findall('9' * 50000 + 'x') == []\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, timeout=3)
+
+
+@pytest.mark.parametrize("text", ["1w 3d", " 1W\t3D "])
+def test_parse_ttl_spaced_units(text: str) -> None:
+    assert parse_ttl(text) == timedelta(weeks=1, days=3)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("", "empty TTL"),
+        ("0", "TTL must be positive: '0'"),
+        ("0d", "TTL must be positive: '0d'"),
+        ("30x", "unparseable TTL: '30x' (use forms like 30d, 12h, 1w3d)"),
+        ("-1d", "unparseable TTL: '-1d'"),
+        ("30d junk", "unparseable TTL: '30d junk'"),
+        ("12 3d", "unparseable TTL: '12 3d'"),
+    ],
+)
+def test_parse_ttl_preserves_error_messages(text: str, message: str) -> None:
+    with pytest.raises(ValueError) as exc:
+        parse_ttl(text)
+    assert str(exc.value) == message
 
 
 def test_parse_expires_at_assumes_utc_when_naive() -> None:

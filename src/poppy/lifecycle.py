@@ -16,7 +16,8 @@ from pathlib import Path
 from poppy.engine.interface import RetrievalEngine
 from poppy.models import Memory
 
-_DURATION_RE = re.compile(r"(\d+)\s*([wdhms])")
+# A failed unit match must not retry from every digit in the same run.
+_DURATION_RE = re.compile(r"(?<!\d)(\d+)\s*([wdhms])")
 
 
 def parse_ttl(text: str) -> timedelta:
@@ -27,6 +28,9 @@ def parse_ttl(text: str) -> timedelta:
     s = text.strip().lower()
     if not s:
         raise ValueError("empty TTL")
+    # Bound integer conversion and matching for unusually large user input.
+    if len(s) > 1024:
+        raise ValueError(f"unparseable TTL: {text!r} (use forms like 30d, 12h, 1w3d)")
 
     if s.isdigit():
         days = int(s)
