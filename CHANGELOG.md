@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `poppy restore MEMORY_ID` brings a forgotten memory back from Trash. Trash
+  keeps it for at least 7 days; a memory whose own expiry has passed is not
+  restored. `poppy forget` now prints the command to undo it when the memory's
+  own expiry has not passed.
+
 ### Fixed
 
 - Compaction and session-end debug logs now respect capture consent and the

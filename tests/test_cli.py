@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import re
 from pathlib import Path
@@ -324,6 +325,84 @@ def test_forget(tmp_path):
     result = runner.invoke(cli, ["forget", mem_id, "--yes"], env=env)
     assert result.exit_code == 0
     assert "Forgotten" in result.output
+
+
+@pytest.mark.parametrize("ttl", [None, "1d"])
+def test_forget_then_restore(tmp_path, ttl):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
+    args = ["remember", "restore this memory"]
+    if ttl is not None:
+        args.extend(["--ttl", ttl])
+    assert runner.invoke(cli, args, env=env).exit_code == 0
+    memories = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)
+    mem_id = memories[0]["id"]
+
+    forgotten = runner.invoke(cli, ["forget", mem_id, "--yes"], env=env)
+    assert forgotten.exit_code == 0, forgotten.output
+    assert forgotten.output == f"Forgotten: {mem_id}\nRestore within 7 days with: poppy restore {mem_id}\n"
+    assert json.loads(runner.invoke(cli, ["list", "--json"], env=env).output) == []
+
+    restored = runner.invoke(cli, ["restore", mem_id], env=env)
+    assert restored.exit_code == 0, restored.output
+    assert restored.output == f"Restored: {mem_id}\n"
+    assert json.loads(runner.invoke(cli, ["list", "--json"], env=env).output) == memories
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_restore_memory_not_in_trash(tmp_path, live):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
+    mem_id = "mem_unknown"
+    if live:
+        assert runner.invoke(cli, ["remember", "still live"], env=env).exit_code == 0
+        mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+
+    result = runner.invoke(cli, ["restore", mem_id], env=env)
+    assert result.exit_code == 1, result.output
+    assert result.output == f"Error: Memory {mem_id} is not in Trash.\n"
+
+
+def test_forget_expired_memory(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
+    args = ["remember", "already expired", "--expires-at", "2020-01-01T00:00:00+00:00"]
+    assert runner.invoke(cli, args, env=env).exit_code == 0
+    mem_id = json.loads(runner.invoke(cli, ["list", "--json", "--include-expired"], env=env).output)[0]["id"]
+
+    forgotten = runner.invoke(cli, ["forget", mem_id, "--yes"], env=env)
+    assert forgotten.exit_code == 0, forgotten.output
+    assert forgotten.output == f"Forgotten: {mem_id}\n"
+
+
+def test_restore_expired_memory(tmp_path, monkeypatch):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
+    assert runner.invoke(cli, ["remember", "temporary memory", "--ttl", "1d"], env=env).exit_code == 0
+    mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+    forgotten = runner.invoke(cli, ["forget", mem_id, "--yes"], env=env)
+    assert forgotten.exit_code == 0, forgotten.output
+
+    future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)
+
+    class FutureDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return future.astimezone(tz)
+
+    monkeypatch.setattr("poppy.write_flow.datetime", FutureDatetime)
+    result = runner.invoke(cli, ["restore", mem_id], env=env)
+    assert result.exit_code == 1, result.output
+    assert result.output == f"Error: Memory {mem_id} has passed its expiry and cannot be restored.\n"
+    assert json.loads(runner.invoke(cli, ["list", "--json", "--include-expired"], env=env).output) == []
+
+    second_restore = runner.invoke(cli, ["restore", mem_id], env=env)
+    assert second_restore.exit_code == 1, second_restore.output
+    assert second_restore.output == f"Error: Memory {mem_id} has passed its expiry and cannot be restored.\n"
 
 
 def test_stats(tmp_path):
