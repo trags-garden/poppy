@@ -230,6 +230,12 @@ class PoppyMcpServer:
         min_score = load_config(self._poppy_dir).recall_min_score
         results = [r for r in results if clears_floor(r.score, min_score)]
 
+        # Deterministic order: unrounded score desc, newest first on exact ties,
+        # then id. Stable multi-key sort applied least-significant key first.
+        results.sort(key=lambda r: r.memory.id)
+        results.sort(key=lambda r: r.memory.created_at.isoformat(), reverse=True)
+        results.sort(key=lambda r: r.score, reverse=True)
+
         # Enrich each result with the signals the calling agent needs to reason
         # over the context (score, date anchor, staleness markers). The engine
         # is untouched — this is assembly only.
@@ -256,12 +262,6 @@ class PoppyMcpServer:
             for r in results
         ]
 
-        # Deterministic order: score desc, newest first on ties, then id — so
-        # the same store + query always assembles the same context. Stable
-        # multi-key sort applied least-significant key first.
-        memories.sort(key=lambda d: d["id"])
-        memories.sort(key=lambda d: d["created_at"], reverse=True)
-        memories.sort(key=lambda d: d["score"], reverse=True)
         return {"memories": memories}
 
     async def handle_recall_index(

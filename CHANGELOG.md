@@ -14,8 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restored. `poppy forget` now prints the command to undo it when the memory's
   own expiry has not passed.
 
+### Changed
+
+- `seed` relevance scores now rise with relevance (each is one minus its old
+  value), so scores shown by `poppy recall --json`, MCP recall and the dashboard
+  change value on `seed`. A positive `recall_min_score` set while using `seed`
+  should be revisited.
+
 ### Fixed
 
+- MCP recall on the `seed` engine now lists the best match first.
 - Opening the local dashboard no longer discards old Trash entries whose
   deletion is still waiting to reach the cloud when the OS keychain cannot be
   read or the sync key has been removed. This keeps a later sync from bringing

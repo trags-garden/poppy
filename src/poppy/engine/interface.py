@@ -20,6 +20,9 @@ class ConsolidationResult:
 
 
 class RetrievalEngine(ABC):
+    # Whether conflict candidates use the default retrieval score floor.
+    apply_candidate_score_floor: bool = True
+
     # Embedding model fingerprint. Engines that use a bi-encoder return a stable
     # identifier (e.g. "all-MiniLM-L6-v2"). FTS-only engines like the baseline
     # return None — they neither produce nor consume embeddings, so a stored
@@ -37,7 +40,11 @@ class RetrievalEngine(ABC):
 
     @abstractmethod
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
-        """Search memories, return ranked results."""
+        """Search memories, return ranked results.
+
+        Results are ordered best first, and `score` is higher for more relevant results.
+        Scores are only comparable within one engine.
+        """
 
     @abstractmethod
     def get(self, memory_id: str) -> Memory | None:
