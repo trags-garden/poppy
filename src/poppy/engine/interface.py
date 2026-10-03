@@ -37,7 +37,11 @@ class RetrievalEngine(ABC):
 
     @abstractmethod
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
-        """Search memories, return ranked results."""
+        """Search memories, return ranked results.
+
+        Results are ordered best first, and `score` is higher for more relevant results.
+        Scores are only comparable within one engine.
+        """
 
     @abstractmethod
     def get(self, memory_id: str) -> Memory | None:

@@ -44,6 +44,29 @@ async def test_recall(server):
 
 
 @pytest.mark.asyncio
+async def test_recall_seed_returns_best_keyword_match_first(tmp_path):
+    from poppy.config import load_config, save_config
+
+    cfg = load_config(tmp_path)
+    cfg.engine = "seed"
+    save_config(cfg)
+    server = PoppyMcpServer(poppy_dir=tmp_path)
+    ids = []
+    for repetitions in (8, 4, 1):
+        written = await server.handle_remember(content=" ".join(["python"] * repetitions))
+        ids.append(written["id"])
+    # Filler makes the full-text scores distinct after MCP rounds them.
+    for _ in range(30):
+        await server.handle_remember(content="other")
+
+    result = await server.handle_recall(query="python", limit=3)
+
+    assert [memory["id"] for memory in result["memories"]] == ids
+    scores = [memory["score"] for memory in result["memories"]]
+    assert scores[0] > scores[1] > scores[2]
+
+
+@pytest.mark.asyncio
 async def test_recall_empty(server):
     result = await server.handle_recall(query="nonexistent")
     assert len(result["memories"]) == 0

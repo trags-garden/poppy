@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP recall on the `seed` engine now lists the best match first.
 - `poppy serve` no longer drops the connection when an MCP client sends a
   request before the handshake. Some clients open with a discovery probe, which
   the daemon has no session for yet; that probe is now answered with a

@@ -198,10 +198,9 @@ def _multi_token_retrieve(
 ) -> list[ScoredMemory]:
     """Run several single-token queries; round-robin-merge by engine rank.
 
-    SeedEngine's `score` field is the inverse of BloomEngine's (lower means
-    more relevant — it's 1/(1+|bm25_rank|)). Sorting on `score` is therefore
-    not portable. Instead we treat each engine.retrieve()'s native ordering
-    as authoritative and round-robin across the per-query result lists,
+    Each engine returns results best first, with higher scores for more
+    relevant matches. We use each engine.retrieve()'s native ordering
+    to round-robin across the per-query result lists,
     deduping by memory id and stopping at ``limit``. Each query's top hit
     surfaces before any query's second hit.
     """

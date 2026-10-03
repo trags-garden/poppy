@@ -11,7 +11,7 @@ drops candidates the cross-encoder scores as only weakly related. This is a
 post-retrieve filter: it changes nothing about engine ranking.
 
 Scope note: the fast hooks (UserPromptSubmit / PreToolUse) run on SeedEngine,
-whose score is an FTS rank-reciprocal, not a cross-encoder logit — a CE
+whose score is derived from the FTS keyword rank, not a cross-encoder logit — a CE
 probability floor is not meaningful there, so this helper is applied on the
 CE-scored recall handlers, and the SessionStart recency dump (which has no score
 at all) is gated separately. See the PR / issue for the full rationale.
