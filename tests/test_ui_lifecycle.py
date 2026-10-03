@@ -97,6 +97,58 @@ def test_create_app_purges_old_deletion_without_known_remote_rows(
     assert tombstones.get(memory.id) is None
 
 
+def test_create_app_keeps_unknown_deletion_with_remote_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from poppy.sync import remote_is_configured
+    from poppy.ui import server as ui_server
+
+    monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
+    assert remote_is_configured(tmp_path)
+    engine = SeedEngine(db_path=tmp_path / "memories.db")
+    memory = _ingest(engine, "unknown", "deleted fact with no upload acknowledgement")
+    tombstones = TombstoneStore(tmp_path / "memories.db")
+    tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
+    engine.delete(memory.id)
+    assert tombstones.known_ids("https://trags.test") == set()
+
+    monkeypatch.setattr(ui_server, "get_fast_engine", lambda _d: engine)
+    app = ui_server.create_app(poppy_dir=tmp_path)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/api/memories?scope=tombstoned")
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()["items"]} == {memory.id}
+    assert tombstones.get(memory.id) is not None
+
+
+def test_create_app_purges_acknowledged_known_deletion_with_remote_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from poppy.sync import remote_is_configured
+    from poppy.ui import server as ui_server
+
+    monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
+    assert remote_is_configured(tmp_path)
+    engine = SeedEngine(db_path=tmp_path / "memories.db")
+    memory = _ingest(engine, "acknowledged", "deleted fact acknowledged by the cloud")
+    tombstones = TombstoneStore(tmp_path / "memories.db")
+    remote_url = "https://trags.test"
+    tombstones.note_remote_memories({memory.id}, remote_url)
+    deletion = tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
+    tombstones.mark_sent([deletion], remote_url)
+    engine.delete(memory.id)
+
+    monkeypatch.setattr(ui_server, "get_fast_engine", lambda _d: engine)
+    app = ui_server.create_app(poppy_dir=tmp_path)
+
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get("/api/memories?scope=tombstoned")
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert tombstones.get(memory.id) is None
+
+
 def test_memory_out_includes_expires_at(app_client: TestClient, tmp_path: Path) -> None:
     future = datetime.now(timezone.utc) + timedelta(days=10)
     db = SeedEngine(db_path=tmp_path / "memories.db")
