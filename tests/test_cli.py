@@ -248,6 +248,21 @@ def test_remember_prints_new_memory_id(tmp_path):
     assert f"  id: {mem_id}\n" in result.output
 
 
+def test_remember_supersedes_prints_new_id(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    runner.invoke(cli, ["remember", "old fact"], env=env)
+    old_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+
+    result = runner.invoke(cli, ["remember", "replacement", "--supersedes", old_id], env=env)
+    assert result.exit_code == 0, result.output
+    listed = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)
+    new_id = next(m["id"] for m in listed if m["content"] == "replacement")
+    assert new_id != old_id
+    assert f"  id: {new_id}\n" in result.output
+    assert f"  supersedes {old_id} " in result.output
+
+
 def test_remember_with_type(tmp_path):
     runner = CliRunner()
     result = runner.invoke(
@@ -336,13 +351,16 @@ def test_list_text_shows_id_and_json_is_unchanged(tmp_path):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
     runner.invoke(cli, ["remember", "memory one", "--project", "demo"], env=env)
-    rows = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)
-    assert len(rows) == 1
-    assert set(rows[0]) == {"id", "content", "type", "project", "created_at"}
+    runner.invoke(cli, ["remember", "memory two"], env=env)
+    rows = {r["content"]: r for r in json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)}
+    assert set(rows) == {"memory one", "memory two"}
+    for row in rows.values():
+        assert set(row) == {"id", "content", "type", "project", "created_at"}
 
     text = runner.invoke(cli, ["list"], env=env).output
-    date_str = rows[0]["created_at"][:10]
-    assert f"    fact [demo] | {date_str} | {rows[0]['id']}\n" in text
+    one, two = rows["memory one"], rows["memory two"]
+    assert f"    fact [demo] | {one['created_at'][:10]} | {one['id']}\n" in text
+    assert f"    fact | {two['created_at'][:10]} | {two['id']}\n" in text
 
 
 def test_forget(tmp_path):
