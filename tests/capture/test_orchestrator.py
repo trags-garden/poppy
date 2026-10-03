@@ -10,6 +10,7 @@ watermark-after-success invariant in one place.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -112,10 +113,14 @@ def test_max_items_caps_candidates(tmp_path: Path):
 def test_a_long_capture_pass_keeps_its_lock_throughout(tmp_path, monkeypatch):
     """Slow but valid steps may add up to a long pass without losing the lock.
 
-    Every step stays inside its own timeout, yet the pass as a whole runs for
-    minutes. A second worker must stay out the whole time.
+    Every step stays inside its own timeout, yet the pass as a whole runs well
+    past the five minutes after which a timed lock would be treated as
+    abandoned. The wall clock is faked, so a lock that judged staleness by age
+    would be stolen here; a second worker must stay out the whole time.
     """
     clock = SimpleNamespace(elapsed=0.0)
+    started = time.time()
+    monkeypatch.setattr(time, "time", lambda: started + clock.elapsed)
     monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: "claude")
     monkeypatch.setattr("poppy.consolidation.health.record_success", lambda *args: None)
     cfg = PoppyConfig(poppy_dir=tmp_path)

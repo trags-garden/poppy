@@ -325,8 +325,8 @@ def _read_bounded(resp: httpx.Response, *, deadline: float) -> bytes:
 
     An httpx timeout applies per socket operation, so a server that sends one
     byte just inside it holds the connection open for as long as it likes. A
-    capture pass runs while a lock another worker will steal on a fixed TTL, so
-    the read needs a real deadline and a bound on how much it will hold.
+    capture pass holds its session's lock while it waits, so the read needs a
+    real deadline and a bound on how much it will hold.
     """
     chunks: list[bytes] = []
     total = 0

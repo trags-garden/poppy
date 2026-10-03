@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import time
 from pathlib import Path
 
-from poppy.capture.lock import _lock_path, is_held, single_flight
+from poppy.capture.lock import LEGACY_LOCK_TTL_S, _legacy_lock_path, _lock_path, is_held, single_flight
 
 
 def test_grants_then_releases(tmp_path: Path) -> None:
@@ -53,12 +54,59 @@ def test_independent_sessions_both_acquire(tmp_path: Path) -> None:
         assert b is True
 
 
-def test_lock_file_left_by_an_older_version_does_not_block(tmp_path: Path) -> None:
-    path = _lock_path(tmp_path, "s1")
+def _legacy_holder(tmp_path: Path, *, age_s: float = 0) -> Path:
+    """Create the lock file an older version's worker holds while it runs."""
+    path = _legacy_lock_path(tmp_path, "s1")
     path.write_text("")
-    os.utime(path, (time.time(), time.time()))  # fresh, as an older version's live lock looked
+    then = time.time() - age_s
+    os.utime(path, (then, then))
+    return path
+
+
+def test_a_running_older_version_capture_is_respected(tmp_path: Path) -> None:
+    legacy = _legacy_holder(tmp_path)  # A: an older version's live capture
+    with single_flight(tmp_path, "s1") as b:
+        assert b is False
+    legacy.unlink()  # A finishes the way older versions release
+    with single_flight(tmp_path, "s1") as b:
+        assert b is True
+
+
+def test_an_abandoned_older_version_lock_does_not_block(tmp_path: Path) -> None:
+    legacy = _legacy_holder(tmp_path, age_s=LEGACY_LOCK_TTL_S + 1)
     with single_flight(tmp_path, "s1") as acquired:
         assert acquired is True
+    assert legacy.exists()  # never deleted by new code
+
+
+def test_an_older_version_release_cannot_free_the_new_lock(tmp_path: Path) -> None:
+    legacy = _legacy_holder(tmp_path, age_s=LEGACY_LOCK_TTL_S + 1)
+    with single_flight(tmp_path, "s1") as b:
+        assert b is True
+        legacy.unlink()  # an older worker releasing (or stealing) its own file
+        with single_flight(tmp_path, "s1") as c:
+            assert c is False
+    assert _lock_path(tmp_path, "s1").exists()
+
+
+def test_a_filesystem_without_locks_captures_instead_of_skipping(tmp_path: Path, monkeypatch, capsys) -> None:
+    def refuse(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", refuse)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is True
+        assert not is_held(_lock_path(tmp_path, "s1"))
+    assert "file locking unavailable" in capsys.readouterr().err
+
+
+def test_a_symlinked_lock_file_is_not_followed(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    tmp_path.joinpath(_lock_path(tmp_path, "s1").name).symlink_to(target)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is False
+    assert target.read_text() == "keep"
 
 
 def test_crashed_holder_releases_the_lock(tmp_path: Path) -> None:

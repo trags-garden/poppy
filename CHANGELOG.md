@@ -27,8 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session while a long one is still running, so large batches and slow model
   endpoints no longer cause overlapping captures. The capture lock is now held
   by the operating system and is released as soon as a capture finishes or its
-  process exits. `poppy doctor` reports captures in flight and no longer warns
-  about stale locks. HTTP fallback calls now also stop at a total deadline, and
+  process exits. A capture started by an older version is still respected
+  while you upgrade. `poppy doctor` reports captures in flight and no longer
+  warns about stale locks. HTTP fallback calls now also stop at a total deadline, and
   a response that arrives just as the deadline passes is no longer reported as
   a timeout.
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value

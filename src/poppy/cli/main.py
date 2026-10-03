@@ -3454,8 +3454,8 @@ def doctor():
     from poppy.capture.lock import is_held
 
     tracked_sessions = len(_capture_state.load(_get_poppy_dir()))
-    running = sum(1 for lock_path in _get_poppy_dir().glob("capture-*.lock") if is_held(lock_path))
-    in_flight = f", {running} capture in flight" if running else ""
+    running = sum(1 for lock_path in _get_poppy_dir().glob("capture-*.flock") if is_held(lock_path))
+    in_flight = f", {running} capture(s) in flight" if running else ""
     line("capture state", "OK", f"{tracked_sessions} session(s) tracked{in_flight}")
 
     if not ok:
