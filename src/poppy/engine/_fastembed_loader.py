@@ -36,7 +36,8 @@ BI_ENCODER = "BAAI/bge-small-en-v1.5"
 CROSS_ENCODER = "Xenova/ms-marco-MiniLM-L-6-v2"
 MODEL_ID = "BAAI/bge-small-en-v1.5-onnx"
 
-# CPU-only. CoreML leaks native memory per operation in long-running processes.
+# CPU-only. CoreML has been observed to leak native memory per operation in
+# long-running processes.
 # The speed difference for single 384-dimension embeddings is negligible,
 # so pin the CPU provider for the always-on process.
 _PROVIDERS = ["CPUExecutionProvider"]

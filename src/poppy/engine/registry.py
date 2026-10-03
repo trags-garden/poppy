@@ -25,8 +25,8 @@ from poppy.engine.interface import RetrievalEngine
 BUILTIN_NAMES = ("bloom", "seed")
 
 # Legacy engine names map to their current built-in equivalents so config.json
-# files written by older installs keep working. These aliases use compatible
-# models and vector formats, so they resolve silently.
+# files written by older installs keep working. They resolve silently: the bloom
+# aliases share bloom's models and vectors, and baseline was FTS-only like seed.
 LEGACY_ALIASES = {
     "petal": "bloom",
     "speaker_closet": "bloom",
