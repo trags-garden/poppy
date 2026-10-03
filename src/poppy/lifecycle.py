@@ -7,7 +7,6 @@ delete. CLI and MCP both call into here so the behavior stays identical.
 
 from __future__ import annotations
 
-import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,8 +15,6 @@ from pathlib import Path
 from poppy.engine.interface import RetrievalEngine
 from poppy.models import Memory
 
-_DURATION_RE = re.compile(r"(\d+)\s*([wdhms])")
-
 
 def parse_ttl(text: str) -> timedelta:
     """Parse a TTL string like '30d', '12h', '1w3d', or a bare integer (days).
@@ -25,27 +22,65 @@ def parse_ttl(text: str) -> timedelta:
     Raises ValueError on negative, zero, or unparseable input.
     """
     s = text.strip().lower()
+    echoed = text[:40] + ("..." if len(text) > 40 else "")
     if not s:
         raise ValueError("empty TTL")
+    # Bound integer conversion and scanning for unusually large user input.
+    if len(s) > 1024:
+        raise ValueError(f"unparseable TTL: {echoed!r} (use forms like 30d, 12h, 1w3d)")
 
     if s.isdigit():
-        days = int(s)
+        try:
+            days = int(s)
+        except ValueError:
+            # isdigit also accepts characters that int cannot convert.
+            digits = echoed if len(text) > 40 else s
+            raise ValueError(f"invalid literal for int() with base 10: {digits!r}") from None
         if days <= 0:
-            raise ValueError(f"TTL must be positive: {text!r}")
-        return timedelta(days=days)
-
-    matches = _DURATION_RE.findall(s)
-    if not matches:
-        raise ValueError(f"unparseable TTL: {text!r} (use forms like 30d, 12h, 1w3d)")
-    if "".join(f"{n}{u}" for n, u in matches) != re.sub(r"\s+", "", s):
-        raise ValueError(f"unparseable TTL: {text!r}")
+            raise ValueError(f"TTL must be positive: {echoed!r}")
+        try:
+            return timedelta(days=days)
+        except OverflowError:
+            raise ValueError(f"TTL too large: {echoed!r}") from None
 
     units = {"w": "weeks", "d": "days", "h": "hours", "m": "minutes", "s": "seconds"}
+    matches = []
+    valid = True
+    i = 0
+    while i < len(s):
+        if s[i].isspace():
+            i += 1
+            continue
+        if not s[i].isdecimal():
+            valid = False
+            i += 1
+            continue
+        start = i
+        while i < len(s) and s[i].isdecimal():
+            i += 1
+        number = s[start:i]
+        while i < len(s) and s[i].isspace():
+            i += 1
+        if i < len(s) and s[i] in units:
+            matches.append((number, s[i]))
+            i += 1
+        else:
+            valid = False
+
+    # Keep scanning malformed input to distinguish no terms from stray text.
+    if not matches:
+        raise ValueError(f"unparseable TTL: {echoed!r} (use forms like 30d, 12h, 1w3d)")
+    if not valid:
+        raise ValueError(f"unparseable TTL: {echoed!r}")
+
     total = timedelta()
-    for n, u in matches:
-        total += timedelta(**{units[u]: int(n)})
+    try:
+        for n, u in matches:
+            total += timedelta(**{units[u]: int(n)})
+    except OverflowError:
+        raise ValueError(f"TTL too large: {echoed!r}") from None
     if total.total_seconds() <= 0:
-        raise ValueError(f"TTL must be positive: {text!r}")
+        raise ValueError(f"TTL must be positive: {echoed!r}")
     return total
 
 
@@ -87,13 +122,12 @@ def parse_since(text: str, *, now: datetime | None = None) -> datetime:
     except ValueError:
         pass
     try:
-        delta = parse_ttl(s)
-    except ValueError:
+        # A duration reaching back before year 1 is refused like unparseable input.
+        return (now or datetime.now(timezone.utc)) - parse_ttl(s)
+    except (ValueError, OverflowError):
         raise ValueError(
             f"invalid --since value: {text!r} (use an ISO date like 2026-06-01 or a duration like 7d, 12h, 1w3d)"
         ) from None
-    base = now or datetime.now(timezone.utc)
-    return base - delta
 
 
 def resolve_expiry(

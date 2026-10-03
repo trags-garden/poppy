@@ -485,17 +485,37 @@ def _set_memory_provider(config_text: str, provider: str) -> str:
 
     Preserves trailing comments on the replaced line and surrounding content.
     """
-    # Case 1: existing `provider:` under a `memory:` block.
-    pattern = re.compile(r"(?ms)^(memory:[^\n]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+provider:[ \t]*)([^\n#]*)([^\n]*)$")
-    match = pattern.search(config_text)
-    if match:
-        before, _old_value, trailing = match.group(1), match.group(2), match.group(3)
-        return config_text[: match.start()] + before + provider + trailing + config_text[match.end() :]
+    # Scan each line once, including indented blank lines, to avoid backtracking.
+    insert_at = None
+    in_memory = False
+    offset = 0
+    for line in config_text.split("\n"):
+        line_end = offset + len(line)
+        if line.startswith("memory:") and line_end < len(config_text):
+            in_memory = True
+            if insert_at is None:
+                insert_at = line_end + 1
+        elif line.startswith((" ", "\t")):
+            body = line.lstrip(" \t")
+            if in_memory and body.startswith("provider:"):
+                value = body[len("provider:") :]
+                value_start = line_end - len(value.lstrip(" \t"))
+                comment_at = line.find("#", value_start - offset)
+                if comment_at >= 0:
+                    # YAML comments need the whitespace separating them from the value.
+                    while comment_at > value_start - offset and line[comment_at - 1].isspace():
+                        comment_at -= 1
+                trailing = line[comment_at:] if comment_at >= 0 else ""
+                if comment_at == value_start - offset:
+                    # An empty value leaves no whitespace before the comment.
+                    trailing = " " + trailing
+                return config_text[:value_start] + provider + trailing + config_text[line_end:]
+        else:
+            in_memory = False
+        offset = line_end + 1
 
     # Case 2: `memory:` block exists but lacks `provider:`.
-    header = re.search(r"(?m)^memory:[^\n]*\n", config_text)
-    if header:
-        insert_at = header.end()
+    if insert_at is not None:
         new_line = f"  provider: {provider}\n"
         return config_text[:insert_at] + new_line + config_text[insert_at:]
 

@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An oversized `--ttl` or `--since` duration is now reported as an invalid value
+  instead of a traceback.
+- `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a
+  long `memory:` block without a `provider:` key.
 - MCP recall on the `seed` engine now lists the best match first.
 - Opening the local dashboard no longer discards old Trash entries whose
   deletion is still waiting to reach the cloud when the OS keychain cannot be

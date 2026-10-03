@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from poppy.cli.main import cli
@@ -88,6 +89,17 @@ def test_list_since_invalid_input_is_usage_error(tmp_path):
     assert "--since" in result.output
     assert "not-a-date" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("value", ["99999999999999999999d", "999999999d", "800000d"])
+def test_list_since_oversized_duration_is_usage_error(tmp_path, value):
+    _use_seed_engine(tmp_path)
+    result = CliRunner().invoke(cli, ["list", "--since", value], env={"POPPY_DIR": str(tmp_path)})
+    assert result.exit_code == 2, result.output
+    assert "--since" in result.output
+    assert "invalid --since value" in result.output
+    assert "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit)
 
 
 # --- poppy recall --since ---
