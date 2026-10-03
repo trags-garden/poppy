@@ -340,31 +340,42 @@ class TombstoneStore:
             rows = self._conn.execute("SELECT * FROM ui_tombstones ORDER BY tombstoned_at DESC").fetchall()
         return [self._row_to_tombstone(r) for r in rows]
 
-    def purge_expired(self, *, pushed_through: str | None, require_sent: bool = False) -> int:
+    def purge_expired(
+        self, *, pushed_through: str | None, require_sent: bool = False, keep_unknown: bool = False
+    ) -> int:
         """Age out records past the restore window. Returns ui tombstones purged.
 
         A tombstone is the ONLY thing that carries a deletion to the cloud: push
-        sends deletions as tombstones and nothing else. So age alone must never
-        remove one — a laptop offline for a fortnight, an unconfigured remote or
-        a revoked key all leave week-old tombstones that have never been sent,
-        and dropping them leaves the cloud row live for the next pull to
+        sends deletions as tombstones and nothing else. Age alone must not remove
+        one that may still need to reach a remote: a laptop offline for a
+        fortnight, an unconfigured remote or a revoked key all leave week-old
+        tombstones that have never been sent, and dropping them leaves the
+        cloud row live for the next pull to
         re-ingest. The forgotten memory comes back.
 
         ``pushed_through`` is the point up to which deletions no longer need to
-        be kept. Two callers, two ways of arriving at it:
+        be kept. Both callers pass the current time and set ``require_sent``:
 
-        * ``sync``, after push, passes the current time and sets ``require_sent``:
-          known IDs must be acknowledged by every remote that knows them.
-          Sent marks are independent of the live watermark; unknown IDs have
-          no pending work.
-        * a caller on a store with NO remote configured passes the current time.
-          There is nowhere for a deletion to travel to, so nothing is waiting on
-          it and the seven-day window applies on age alone — which is what keeps
-          Trash from growing without bound for a user who never enables sync.
+        * ``sync``, after pull and push, purges deletions acknowledged by every
+          remote known to hold the memory, independent of the live watermark.
+          Its pull records remote-held IDs before the purge, so unknown IDs
+          can age out after seven days.
+        * the local dashboard, on startup, uses the same acknowledgements,
+          regardless of whether a remote key can currently be read. With sync
+          configured, it also sets ``keep_unknown`` to leave unknown IDs for
+          sync's pull to discover: a lost upload response can leave a remote
+          copy with no local record of it.
+
+        ``keep_unknown`` defaults to false. When true, IDs with no row in
+        ``sync_remote_memories`` are kept regardless of age. With both options
+        true, only IDs known to a remote and acknowledged by every remote that
+        knows them can be purged. When no remote key is resolvable, the dashboard
+        leaves ``keep_unknown`` false so unknown IDs age out after seven days;
+        known but unsent deletions are still kept by ``require_sent``.
 
         The argument is required, with no default. Passing ``None`` purges
         nothing, which is the safe answer for a caller that cannot tell which
-        situation it is in — but it has to be said out loud, because a caller
+        situation it is in, but it has to be said out loud, because a caller
         that silently got the no-op would believe it had aged Trash out.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=TTL_DAYS)).isoformat()
@@ -381,8 +392,11 @@ class TombstoneStore:
                         SELECT 1 FROM sync_remote_memories known
                         WHERE known.id = ui_tombstones.id AND NOT EXISTS (
                             SELECT 1 FROM json_each(ui_tombstones.sent_remotes) sent
-                            WHERE sent.key = known.remote_url)))""",
-                    (cutoff, pushed_through, require_sent),
+                            WHERE sent.key = known.remote_url)))
+                    AND (? = 0 OR EXISTS (
+                        SELECT 1 FROM sync_remote_memories known
+                        WHERE known.id = ui_tombstones.id))""",
+                    (cutoff, pushed_through, require_sent, keep_unknown),
                 )
                 purged = cursor.rowcount
             self._conn.commit()

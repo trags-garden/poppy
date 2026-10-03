@@ -7,12 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `poppy restore MEMORY_ID` brings a forgotten memory back from Trash. Trash
+  keeps it for at least 7 days; a memory whose own expiry has passed is not
+  restored. `poppy forget` now prints the command to undo it when the memory's
+  own expiry has not passed.
+
+### Changed
+
+- `seed` relevance scores now rise with relevance (each is one minus its old
+  value), so scores shown by `poppy recall --json`, MCP recall and the dashboard
+  change value on `seed`. A positive `recall_min_score` set while using `seed`
+  should be revisited.
+
 ### Fixed
 
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
   instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a
   long `memory:` block without a `provider:` key.
+- MCP recall on the `seed` engine now lists the best match first.
+- Opening the local dashboard no longer discards old Trash entries whose
+  deletion is still waiting to reach the cloud when the OS keychain cannot be
+  read or the sync key has been removed. This keeps a later sync from bringing
+  forgotten memories back. With sync configured, the dashboard clears entries
+  older than seven days only when every cloud destination known to hold the
+  memory has acknowledged the deletion, and leaves the rest to sync. Without a
+  resolvable sync key, entries with no known cloud destination still age out
+  after seven days.
+- Compaction and session-end debug logs now respect capture consent and the
+  per-project off switch. Compaction entries store only metadata, never summary
+  text. Old summary text is removed from `~/.poppy/postcompact-debug.log` the
+  next time a compaction is logged with capture on. With capture off, the file
+  is left untouched and can be deleted.
 - `poppy serve` no longer drops the connection when an MCP client sends a
   request before the handshake. Some clients open with a discovery probe, which
   the daemon has no session for yet; that probe is now answered with a

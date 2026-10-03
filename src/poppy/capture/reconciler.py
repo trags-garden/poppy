@@ -166,7 +166,7 @@ def find_candidates(
     new_memory: Memory,
     *,
     top_k: int = DEFAULT_TOP_K,
-    min_score: float = CANDIDATE_MIN_SCORE,
+    min_score: float | None = None,
 ) -> list[Candidate]:
     """Same project + type candidates: retrieve()-ranked first, recent-fallback after.
 
@@ -174,7 +174,11 @@ def find_candidates(
     text matcher (e.g. baseline FTS5 phrase-only) returns nothing, we top up
     with the most recent same-project / same-type memories so the LLM still
     gets a chance to spot a conflict. Filters out the new memory itself.
+    The engine controls whether the default score floor applies; an explicit
+    min_score always takes precedence.
     """
+    if min_score is None and engine.apply_candidate_score_floor:
+        min_score = CANDIDATE_MIN_SCORE
     filters = Filters(project=new_memory.project, memory_type=new_memory.memory_type)
     seen: set[str] = {new_memory.id}
     out: list[Candidate] = []
@@ -186,7 +190,7 @@ def find_candidates(
     for s in scored:
         if s.memory.id in seen:
             continue
-        if s.score is not None and s.score < min_score:
+        if min_score is not None and s.score is not None and s.score < min_score:
             continue
         out.append(Candidate(memory=s.memory, score=s.score if s.score is not None else 0.0))
         seen.add(s.memory.id)

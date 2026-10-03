@@ -12,15 +12,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from test_engine_bloom import _FakeBiEncoder, _FakeCrossEncoder
 
 from poppy.capture.reconciler import (
     Action,
     decide,
+    find_candidates,
     reconcile_and_ingest,
 )
 from poppy.config import PoppyConfig
+from poppy.engine.bloom import BloomEngine
 from poppy.engine.seed import SeedEngine
-from poppy.models import Filters, Memory, Source
+from poppy.models import Filters, Memory, ScoredMemory, Source
 
 
 def _mk(mid: str, content: str, *, project: str | None = "poppy", memory_type: str = "decision") -> Memory:
@@ -41,6 +44,58 @@ def _mk(mid: str, content: str, *, project: str | None = "poppy", memory_type: s
 @pytest.fixture
 def engine(tmp_path: Path) -> SeedEngine:
     return SeedEngine(db_path=tmp_path / "memories.db")
+
+
+@pytest.mark.parametrize("min_score", [None, 0.0, 0.30])
+def test_seed_conflict_candidates_keep_common_term_match(engine: SeedEngine, min_score: float | None) -> None:
+    engine.ingest(_mk("conflict", "Do not use SQLite in production", project="p", memory_type="fact"))
+    for i in range(5):
+        engine.ingest(_mk(f"release{i}", f"Release note number {i}", project="p", memory_type="fact"))
+    for i in range(10):
+        engine.ingest(_mk(f"other{i}", "Use SQLite in production", project="other", memory_type="fact"))
+    new = _mk("new", "Use SQLite in production", project="p", memory_type="fact")
+
+    # Common terms have near-zero FTS scores even for a real match.
+    matches = engine.retrieve(new.content, filters=Filters(project="p", memory_type="fact"))
+    assert [match.memory.id for match in matches] == ["conflict"]
+    assert 0.0 < matches[0].score < 0.00001
+
+    candidates = (
+        find_candidates(engine, new) if min_score is None else find_candidates(engine, new, min_score=min_score)
+    )
+
+    ids = [candidate.memory.id for candidate in candidates]
+    if min_score == 0.30:
+        assert "conflict" not in ids
+    else:
+        assert ids[0] == "conflict"
+    assert len(candidates) == 5
+    assert all(candidate.memory.project == "p" for candidate in candidates)
+
+
+@pytest.mark.parametrize(
+    ("min_score", "expected_ids"),
+    [(None, ["high", "boundary"]), (0.0, ["high", "boundary", "low"]), (0.5, ["high"])],
+)
+def test_bloom_conflict_candidate_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, min_score: float | None, expected_ids: list[str]
+) -> None:
+    engine = BloomEngine(
+        db_path=tmp_path / "memories.db", bi_encoder=_FakeBiEncoder(), cross_encoder=_FakeCrossEncoder()
+    )
+    scored = [
+        ScoredMemory(memory=_mk(mid, "existing fact"), score=score)
+        for mid, score in [("high", 0.6), ("boundary", 0.3), ("low", 0.1)]
+    ]
+    monkeypatch.setattr(engine, "retrieve", lambda *args, **kwargs: scored)
+    monkeypatch.setattr(engine, "list_all", lambda **kwargs: [])
+    new = _mk("new", "new fact")
+
+    candidates = (
+        find_candidates(engine, new) if min_score is None else find_candidates(engine, new, min_score=min_score)
+    )
+
+    assert [candidate.memory.id for candidate in candidates] == expected_ids
 
 
 def _ban_llm(monkeypatch: pytest.MonkeyPatch) -> list:

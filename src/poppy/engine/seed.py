@@ -247,6 +247,9 @@ def _seed_store_is_current(conn: sqlite3.Connection) -> bool:
 class SeedEngine(RetrievalEngine):
     """FTS5-only retrieval — no ML deps, no model downloads. The universal fallback."""
 
+    # Full-text matches already filter relevance; common terms can score near zero.
+    apply_candidate_score_floor = False
+
     # SeedEngine has no embedding model; migration tooling uses model_id to
     # decide which rows to re-embed, so it must be None here.
     model_id = None
@@ -426,7 +429,7 @@ class SeedEngine(RetrievalEngine):
                     continue
                 if filters.min_confidence and mem.confidence < filters.min_confidence:
                     continue
-            score = 1.0 / (1.0 + abs(row["rank"]))
+            score = abs(row["rank"]) / (1.0 + abs(row["rank"]))
             results.append(ScoredMemory(memory=mem, score=score))
             if len(results) >= limit:
                 break
