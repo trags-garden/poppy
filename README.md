@@ -47,7 +47,7 @@ and falls back to its own virtualenv if neither is there.
 poppy remember "we always use uv for python deps" --type preference
 poppy recall "python package manager"
 #   we always use uv for python deps
-#     preference | 2026-05-25 | score: 0.91
+#     preference | 2026-05-25 | score: 0.91 | mem_3f9a1c2b7d4e
 ```
 
 ## Supported clients

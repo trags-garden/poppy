@@ -239,6 +239,15 @@ def test_remember(tmp_path):
     assert "Remembered" in result.output
 
 
+def test_remember_prints_new_memory_id(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    result = runner.invoke(cli, ["remember", "use Pydantic for validation"], env=env)
+    assert result.exit_code == 0
+    mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+    assert f"  id: {mem_id}\n" in result.output
+
+
 def test_remember_with_type(tmp_path):
     runner = CliRunner()
     result = runner.invoke(
@@ -291,6 +300,21 @@ def test_recall(tmp_path):
     assert "Pydantic" in result.output
 
 
+def test_recall_text_shows_id_and_json_is_unchanged(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    runner.invoke(cli, ["remember", "always use Pydantic validation"], env=env)
+    mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+
+    text = runner.invoke(cli, ["recall", "Pydantic"], env=env).output
+    assert re.search(rf"^    fact \| \d{{4}}-\d{{2}}-\d{{2}} \| score: -?\d+\.\d{{2}} \| {mem_id}$", text, re.M), text
+
+    rows = json.loads(runner.invoke(cli, ["recall", "Pydantic", "--json"], env=env).output)
+    assert len(rows) == 1
+    assert set(rows[0]) == {"id", "content", "type", "project", "score", "created_at"}
+    assert rows[0]["id"] == mem_id
+
+
 def test_recall_no_results(tmp_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["recall", "nonexistent topic"], env={"POPPY_DIR": str(tmp_path)})
@@ -306,6 +330,19 @@ def test_list(tmp_path):
     assert result.exit_code == 0
     assert "memory one" in result.output
     assert "memory two" in result.output
+
+
+def test_list_text_shows_id_and_json_is_unchanged(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    runner.invoke(cli, ["remember", "memory one", "--project", "demo"], env=env)
+    rows = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)
+    assert len(rows) == 1
+    assert set(rows[0]) == {"id", "content", "type", "project", "created_at"}
+
+    text = runner.invoke(cli, ["list"], env=env).output
+    date_str = rows[0]["created_at"][:10]
+    assert f"    fact [demo] | {date_str} | {rows[0]['id']}\n" in text
 
 
 def test_forget(tmp_path):
