@@ -67,6 +67,33 @@ async def test_recall_seed_returns_best_keyword_match_first(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repetitions", [(8, 4, 1), (1, 1, 1)])
+async def test_recall_seed_small_store_keeps_unrounded_score_order(fast_server, repetitions):
+    ids = []
+    created_at = _dt.datetime(2026, 1, 1, tzinfo=_dt.UTC)
+    for i, count in enumerate(repetitions):
+        timestamp = created_at + _dt.timedelta(seconds=i)
+        memory = Memory(
+            id=f"python{i}",
+            content=" ".join(["python"] * count),
+            memory_type="fact",
+            source=Source(type="cli", session_id=None, timestamp=timestamp),
+            project=None,
+            related_to=[],
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        fast_server._engine.ingest(memory)
+        ids.append(memory.id)
+
+    result = await fast_server.handle_recall(query="python", limit=3)
+
+    expected_ids = ids if repetitions == (8, 4, 1) else ids[::-1]
+    assert [memory["id"] for memory in result["memories"]] == expected_ids
+    assert [memory["score"] for memory in result["memories"]] == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.asyncio
 async def test_recall_empty(server):
     result = await server.handle_recall(query="nonexistent")
     assert len(result["memories"]) == 0

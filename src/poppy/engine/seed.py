@@ -247,6 +247,9 @@ def _seed_store_is_current(conn: sqlite3.Connection) -> bool:
 class SeedEngine(RetrievalEngine):
     """FTS5-only retrieval — no ML deps, no model downloads. The universal fallback."""
 
+    # Full-text matches already filter relevance; common terms can score near zero.
+    apply_candidate_score_floor = False
+
     # SeedEngine has no embedding model; migration tooling uses model_id to
     # decide which rows to re-embed, so it must be None here.
     model_id = None

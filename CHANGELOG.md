@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `seed` relevance scores now rise with relevance (each is one minus its old
+  value), so scores shown by `poppy recall --json`, MCP recall and the dashboard
+  change value on `seed`. A positive `recall_min_score` set while using `seed`
+  should be revisited.
+
 ### Fixed
 
 - MCP recall on the `seed` engine now lists the best match first.

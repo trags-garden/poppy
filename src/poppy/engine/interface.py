@@ -20,6 +20,9 @@ class ConsolidationResult:
 
 
 class RetrievalEngine(ABC):
+    # Whether conflict candidates use the default retrieval score floor.
+    apply_candidate_score_floor: bool = True
+
     # Embedding model fingerprint. Engines that use a bi-encoder return a stable
     # identifier (e.g. "all-MiniLM-L6-v2"). FTS-only engines like the baseline
     # return None — they neither produce nor consume embeddings, so a stored

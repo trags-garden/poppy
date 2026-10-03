@@ -24,7 +24,7 @@ def _memory(memory_id: str, content: str) -> Memory:
 
 
 @pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
-def test_retrieve_scores_decrease_with_relevance(tmp_path, engine_kind):
+def test_retrieve_scores_rise_with_relevance(tmp_path, engine_kind):
     db_path = tmp_path / "memories.db"
     engine = (
         SeedEngine(db_path=db_path)
