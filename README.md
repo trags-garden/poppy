@@ -248,7 +248,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy telemetry` | `status`, `on`, `off` | Show or change anonymous usage telemetry. See [Telemetry](#telemetry). |
 | `poppy encrypt` | `status`, `enable`, `disable`, `repair` | Turn on encryption at rest for the local store. See [Encryption at rest](#encryption-at-rest-optional). |
 | `poppy serve` | | Start the Poppy MCP server (stdio). |
-| `poppy ui` | `--host`, `--port`, `--no-open` | Browse and manage memories in a local web UI. |
+| `poppy ui` | `--host`, `--port`, `--no-open`, `--allow-remote` | Browse and manage memories in a local web UI. `--allow-remote` permits a non-loopback `--host`; the UI has no authentication, so this exposes its delete and edit API to your network. |
 | `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). |
 | `poppy setup claude-desktop` | `--print-instructions`, `--print-import-prompt` | Register the Poppy MCP server in the Claude desktop app. |
 | `poppy setup cursor` | `--hooks/--no-hooks`, `--daemon` | Install Poppy into Cursor (MCP + zero-touch capture hooks). Honors `$CURSOR_HOME`. |
@@ -347,23 +347,34 @@ If you want your memories searchable across machines and inside the Trags
 web app, run `poppy setup trags` to onboard. Sync is opt-in and additive;
 your local store remains the source of truth.
 
-Forgetting a memory is a soft delete: the record sits in Trash for 7 days and
-`poppy restore` brings it back. Deletions travel only for memories the remote is
-known to hold, from successful uploads, live pulls, or a one-time upgrade
-backfill treating every existing memory and tombstone as known to each remote
-in sync state. This preserves the previous behavior of sending every deletion.
-Unreadable sync state stops the migration until repaired; absent state means
-no remotes and an empty backfill. Knowledge is
-tracked per memory and remote and checked at push time; unrelated uploads never
-unlock a deletion. Sent marks keep pulled deletions from being re-announced and
-retry failed sends without changing the live-upload watermark. Deletions carry
-the full memory snapshot, including local edits, for Trash restore elsewhere.
-A pull that sees a memory heals a lost upload response on the next push.
-Residuals: an upload whose response was lost stays unknown until a pull sees
-the row (incremental pull cannot see it below the pull cursor). A deletion
-carries the local snapshot, including edits never pushed. Pre-upgrade memories
-are treated as known, so the guarantee applies in full only to memories created
-after upgrade or in stores that had no remote at upgrade.
+Once your Trags key is set up, by default each local change (a new memory, an
+edit, a forget, a restore) starts a background sync: Poppy pulls changes from
+Trags, then pushes yours. `poppy sync run` does the same by hand. A push sends
+the memories that changed since the last push, and an upload that fails is
+tried again on the next push. When two devices edit the same memory, the newer
+edit wins.
+
+Forgetting a memory is a soft delete: Trash keeps the record for at least
+7 days and `poppy restore` brings it back, unless the memory's own expiry has
+passed. A deletion goes to Trags only when
+Trags is known to hold that memory, because this machine uploaded it or a pull
+saw it there, so a memory that never left your machine does not reach the
+server just because you deleted it. A deletion carries the whole memory, which
+lets another device restore it from its own Trash.
+
+Three limits apply:
+
+- If an upload reaches Trags but the reply is lost, Poppy does not count that
+  memory as on Trags until a later push or pull confirms it. A deletion before
+  then stays local and the copy on Trags remains. Pulls only fetch rows changed
+  since the previous pull, so a later pull may not catch it.
+- A deletion sends this machine's copy of the memory, including edits that
+  were never pushed.
+- If sync was already set up when you upgraded to the release that added this
+  check, every memory that existed then counts as already on Trags, and
+  deleting one sends it even if it never got there. The full guarantee covers
+  memories created after the upgrade, and stores that had no Trags remote at
+  upgrade time.
 
 The Trags API key goes into your operating system's keychain only when Poppy can
 write it and read it back in the same process; otherwise it stays in plaintext
