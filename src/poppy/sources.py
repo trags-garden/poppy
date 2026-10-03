@@ -64,10 +64,14 @@ DEFAULT_CAPTURE_SOURCE = "claude-code"
 # session ids for provenance, but they are not session auto-captures.
 IMPORT_SOURCE_TYPES = frozenset({"claude-memory", "hermes-memory"})
 
+# Clients that `poppy setup` configures with a fixed `--source` but that have no
+# clientInfo spellings in _ALIASES.
+_SETUP_ONLY_SOURCES = frozenset({"copilot-cli", "pi", "hermes-agent"})
+
 # Every source name Poppy itself stamps: known clients, the CLI, the web UI, an
 # unidentified MCP client, and the importers. Telemetry reports anything else
 # as "other", since an unknown client name is free text from the client.
-KNOWN_SOURCES = frozenset(_ALIASES) | {"manual", "ui", GENERIC_AGENT} | IMPORT_SOURCE_TYPES
+KNOWN_SOURCES = frozenset(_ALIASES) | _SETUP_ONLY_SOURCES | {"manual", "ui", GENERIC_AGENT} | IMPORT_SOURCE_TYPES
 
 
 def _slugify(value: str) -> str:

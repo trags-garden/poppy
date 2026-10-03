@@ -203,7 +203,9 @@ def test_remember_telemetry_source_uses_known_clients(
     assert memory_to_wire(stored)["source_type"] == resolved_source
 
 
-@pytest.mark.parametrize("source", ["manual", "ui", "agent", "claude-memory", "hermes-memory"])
+@pytest.mark.parametrize(
+    "source", ["manual", "ui", "agent", "claude-memory", "hermes-memory", "copilot-cli", "pi", "hermes-agent"]
+)
 def test_remember_telemetry_keeps_poppy_source_names(engine, tmp_path, monkeypatch, source):
     events: list = []
     monkeypatch.setattr(
@@ -212,6 +214,15 @@ def test_remember_telemetry_keeps_poppy_source_names(engine, tmp_path, monkeypat
     )
     remember(engine, tmp_path, content="use ruff", source=source)
     assert events[0][1]["source"] == source
+
+
+def test_every_setup_client_is_a_known_telemetry_source():
+    """A client `poppy setup` configures must not be reported as "other"."""
+    from poppy.cli.main import cli
+    from poppy.sources import KNOWN_SOURCES
+
+    clients = set(cli.commands["setup"].commands) - {"trags"}  # `setup trags` is cloud sync, not a client
+    assert clients <= KNOWN_SOURCES
 
 
 # ---------- forget ----------
