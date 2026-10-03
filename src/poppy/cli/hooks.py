@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import click
@@ -620,7 +621,16 @@ def _stamp_last_seen(payload: dict) -> None:
         stamp_last_seen(get_poppy_dir(), session_id)
 
 
-# Session-end replay needs metadata only; transcript content stays out of the log.
+# Replay needs metadata only; transcript content stays out of the logs.
+_COMPACT_REPLAY_KEYS = (
+    "session_id",
+    "transcript_path",
+    "cwd",
+    "trigger",
+    "compact_trigger",
+    "cursor_version",
+    "hook_event_name",
+)
 _SESSION_END_REPLAY_KEYS = ("session_id", "transcript_path", "cwd", "reason", "cursor_version", "hook_event_name")
 
 
@@ -635,7 +645,13 @@ def _replay_payload(payload: dict, keys: tuple[str, ...]) -> dict:
     return {k: payload[k] for k in keys if k in payload}
 
 
-def _append_debug_log(log_name: str, snapshot: dict, max_entries: int = 50) -> None:
+def _append_debug_log(
+    log_name: str,
+    snapshot: dict,
+    max_entries: int = 50,
+    *,
+    scrub_entry: Callable[[dict], dict] | None = None,
+) -> None:
     """Append snapshot to ~/.poppy/<log_name>, keeping at most `max_entries`.
 
     Session metadata remains private, so the file is tightened to 0600,
@@ -655,11 +671,23 @@ def _append_debug_log(log_name: str, snapshot: dict, max_entries: int = 50) -> N
                 continue
     existing.append(snapshot)
     existing = existing[-max_entries:]
+    if scrub_entry is not None:
+        existing = [scrub_entry(entry) for entry in existing]
     log_path.write_text("\n".join(json.dumps(e) for e in existing) + "\n")
     try:
         log_path.chmod(0o600)
     except OSError:
         pass  # Best-effort; a chmod failure must not break the hook.
+
+
+def _scrub_compact_log_entry(entry: dict) -> dict:
+    """Remove summary content left in compaction entries by older versions."""
+    entry.pop("summary_head", None)
+    payload = entry.get("payload")
+    if isinstance(payload, dict):
+        payload.pop("compact_summary", None)
+        payload.pop("summary", None)
+    return entry
 
 
 def _log_compact_payload(payload: dict) -> None:
@@ -674,7 +702,9 @@ def _log_compact_payload(payload: dict) -> None:
             "session_id": payload.get("session_id"),
             "trigger": payload.get("trigger") or payload.get("compact_trigger"),
             "summary_len": len(summary_text),
+            "payload": _replay_payload(payload, _COMPACT_REPLAY_KEYS),
         },
+        scrub_entry=_scrub_compact_log_entry,
     )
 
 
@@ -867,9 +897,11 @@ def _post_compact_worker():
 def replay_compact(n: int):
     """Replay a captured PostCompact payload synchronously, for testing.
 
-    Reads ~/.poppy/postcompact-debug.log and re-runs consolidate_compact_event
-    against the chosen entry. Idempotent: re-running on the same payload
-    is a no-op once memories are stored.
+    Reads ~/.poppy/postcompact-debug.log and re-runs consolidation against
+    the chosen entry. New entries do not store summary text, so only
+    transcript-based entries and entries written by older versions can be
+    replayed. Idempotent: re-running on the same payload is a no-op once
+    memories are stored.
     """
     log_path = get_poppy_dir() / "postcompact-debug.log"
     if not log_path.exists():
@@ -893,7 +925,10 @@ def replay_compact(n: int):
 
     entry = entries[-n]
     payload = entry.get("payload") or {}
-    if not (payload.get("compact_summary") or payload.get("summary")):
+    cursor_transcript = (
+        _payload_host(payload) == "cursor" and payload.get("session_id") and payload.get("transcript_path")
+    )
+    if not (payload.get("compact_summary") or payload.get("summary") or cursor_transcript):
         click.echo("nothing to replay: this entry contains no summary text")
         sys.exit(0)
     click.echo(

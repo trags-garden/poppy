@@ -927,6 +927,9 @@ def test_postcompact_debug_log_hardened_and_trimmed(tmp_path, monkeypatch, summa
         "session_id": "abc",
         summary_key: "we decided to use ruff",
         "trigger": "auto",
+        "compact_trigger": "auto",
+        "cursor_version": "2026.07.20-test",
+        "hook_event_name": "preCompact",
         "cwd": str(tmp_path / "proj"),
         "transcript_path": "/dev/null",
         "unrelated_secret": "should-not-persist",
@@ -938,12 +941,18 @@ def test_postcompact_debug_log_hardened_and_trimmed(tmp_path, monkeypatch, summa
 
     log_path = tmp_path / "postcompact-debug.log"
     entry = json.loads(log_path.read_text().strip())
-    assert set(entry) == {"ts", "session_id", "trigger", "keys", "summary_len"}
+    assert set(entry) == {"ts", "session_id", "trigger", "keys", "summary_len", "payload"}
     assert entry["ts"]
     assert entry["session_id"] == "abc"
     assert entry["trigger"] == "auto"
-    assert entry["keys"] == sorted(payload_data)
+    assert entry["keys"] == sorted([*payload_data, "_poppy_host"])
     assert entry["summary_len"] == len(payload_data[summary_key])
+    assert entry["payload"] == {
+        key: value for key, value in payload_data.items() if key not in {summary_key, "unrelated_secret"}
+    }
+    assert "summary_head" not in entry
+    assert "compact_summary" not in entry["payload"]
+    assert "summary" not in entry["payload"]
     assert payload_data[summary_key] not in log_path.read_text()
     assert "should-not-persist" not in log_path.read_text()
 
@@ -951,11 +960,48 @@ def test_postcompact_debug_log_hardened_and_trimmed(tmp_path, monkeypatch, summa
         assert _stat.S_IMODE(log_path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("summary_key", ["compact_summary", "summary"])
+def test_postcompact_debug_log_scrubs_existing_summaries(tmp_path, monkeypatch, summary_key):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
+    (tmp_path / "config.json").write_text(json.dumps({"consent": "granted"}))
+    monkeypatch.setattr("poppy.capture.policy.host_cli_available", lambda: True)
+    monkeypatch.setattr("poppy.cli.hooks._spawn_detached_worker", lambda *args: None)
+    old_payload = {"session_id": "old-session", summary_key: "old full summary", "transcript_path": "/dev/null"}
+    old_entry = {
+        "ts": "2026-05-03T18:00:00+00:00",
+        "summary_head": "old summary preview",
+        "payload": old_payload,
+    }
+    log_path = tmp_path / "postcompact-debug.log"
+    log_path.write_text(json.dumps(old_entry) + "\n")
+
+    result = CliRunner().invoke(
+        hook, ["post-compact"], input=json.dumps({"session_id": "new-session", "compact_summary": "new summary text"})
+    )
+
+    assert result.exit_code == 0
+    log_text = log_path.read_text()
+    entries = [json.loads(line) for line in log_text.splitlines()]
+    assert len(entries) == 2
+    assert entries[0] == {
+        "ts": old_entry["ts"],
+        "payload": {"session_id": "old-session", "transcript_path": "/dev/null"},
+    }
+    for entry in entries:
+        assert "summary_head" not in entry
+        assert "compact_summary" not in entry["payload"]
+        assert "summary" not in entry["payload"]
+    for text in ("old full summary", "old summary preview", "new summary text"):
+        assert text not in log_text
+
+
 @pytest.mark.parametrize(
     "command, log_name", [("post-compact", "postcompact-debug.log"), ("session-end", "sessionend-debug.log")]
 )
 @pytest.mark.parametrize("state", ["pending", "opted_out", "project_off"])
-def test_capture_hooks_do_not_log_when_disabled(tmp_path, monkeypatch, command, log_name, state):
+@pytest.mark.parametrize("existing_log", [False, True])
+def test_capture_hooks_do_not_log_when_disabled(tmp_path, monkeypatch, command, log_name, state, existing_log):
     monkeypatch.setenv("POPPY_DIR", str(tmp_path))
     monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
     project_dir = tmp_path / "sensitive-project"
@@ -971,11 +1017,18 @@ def test_capture_hooks_do_not_log_when_disabled(tmp_path, monkeypatch, command, 
     spawned = []
     monkeypatch.setattr("poppy.cli.hooks._spawn_detached_worker", lambda *args: spawned.append(args))
     payload = {"cwd": str(project_dir), "session_id": "private-session", "compact_summary": "private summary"}
+    log_path = tmp_path / log_name
+    old_log = json.dumps({"summary_head": "old preview", "payload": {"compact_summary": "old summary"}}) + "\n"
+    if existing_log:
+        log_path.write_text(old_log)
 
     result = CliRunner().invoke(hook, [command], input=json.dumps(payload))
 
     assert result.exit_code == 0
-    assert not (tmp_path / log_name).exists()
+    if existing_log:
+        assert log_path.read_text() == old_log
+    else:
+        assert not log_path.exists()
     assert not spawned
 
 
@@ -994,6 +1047,32 @@ def test_replay_compact_without_summary_has_nothing_to_replay(tmp_path, monkeypa
     assert result.exit_code == 0
     assert result.output == "nothing to replay: this entry contains no summary text\n"
     assert not calls
+
+
+def test_replay_compact_cursor_transcript_without_summary(tmp_path, monkeypatch):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(CURSOR_RESUMED_FIXTURE.read_text())
+    payload = {
+        "cursor_version": "2026.07.20-test",
+        "session_id": "cursor-compact",
+        "transcript_path": str(transcript),
+    }
+    entry = {"ts": "2026-05-03T18:00:00+00:00", "session_id": payload["session_id"], "payload": payload}
+    (tmp_path / "postcompact-debug.log").write_text(json.dumps(entry) + "\n")
+    calls = []
+
+    def consolidate(payload):
+        calls.append(payload)
+        return 1
+
+    monkeypatch.setattr("poppy.consolidation.consolidate_stop_event", consolidate)
+
+    result = CliRunner().invoke(hook, ["replay-compact"])
+
+    assert result.exit_code == 0
+    assert calls == [payload]
+    assert "stored 1 memories" in result.output
 
 
 def test_replay_compact_runs_consolidator_against_logged_payload(tmp_path, monkeypatch):
