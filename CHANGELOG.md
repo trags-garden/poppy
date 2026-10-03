@@ -65,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taking the lock, so ordinary commands and hooks never wait on a writer. The
   store itself was never damaged by these failures.
 
+### Removed
+
+- The `[llm]` install extra and its unused `anthropic` SDK dependency. Nothing
+  used the SDK. `pip install 'poppy-memory[llm]'` now installs plain Poppy with
+  a pip warning that the extra is not provided.
+
 ## [0.3.1] - 2026-09-22
 
 ### Changed

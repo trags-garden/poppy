@@ -64,10 +64,6 @@ Homepage = "https://trags.ai/poppy"
 Documentation = "https://trags.ai/docs/poppy"
 
 [project.optional-dependencies]
-# Optional: anthropic SDK for LLM-driven consolidation and conflict detection.
-llm = [
-    "anthropic>=0.50",
-]
 # Optional: encryption at rest for the local store (`poppy encrypt`).
 # sqlcipher3 ships self-contained wheels (bundled SQLCipher + FTS5) for
 # macOS/Linux/Windows on CPython 3.9-3.13, so this stays off the base install.
