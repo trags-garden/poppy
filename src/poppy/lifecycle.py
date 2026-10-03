@@ -122,13 +122,12 @@ def parse_since(text: str, *, now: datetime | None = None) -> datetime:
     except ValueError:
         pass
     try:
-        delta = parse_ttl(s)
-    except ValueError:
+        # A duration reaching back before year 1 is refused like unparseable input.
+        return (now or datetime.now(timezone.utc)) - parse_ttl(s)
+    except (ValueError, OverflowError):
         raise ValueError(
             f"invalid --since value: {text!r} (use an ISO date like 2026-06-01 or a duration like 7d, 12h, 1w3d)"
         ) from None
-    base = now or datetime.now(timezone.utc)
-    return base - delta
 
 
 def resolve_expiry(

@@ -506,6 +506,9 @@ def _set_memory_provider(config_text: str, provider: str) -> str:
                     while comment_at > value_start - offset and line[comment_at - 1].isspace():
                         comment_at -= 1
                 trailing = line[comment_at:] if comment_at >= 0 else ""
+                if comment_at == value_start - offset:
+                    # An empty value leaves no whitespace before the comment.
+                    trailing = " " + trailing
                 return config_text[:value_start] + provider + trailing + config_text[line_end:]
         else:
             in_memory = False

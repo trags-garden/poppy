@@ -224,6 +224,12 @@ def test_parse_since_rejects(bad: str) -> None:
         parse_since(bad)
 
 
+@pytest.mark.parametrize("text", ["800000d", "999999999d"])
+def test_parse_since_before_year_one_is_invalid(text: str) -> None:
+    with pytest.raises(ValueError, match="invalid --since value"):
+        parse_since(text)
+
+
 # -------- edit_memory --------------------------------------------------------
 
 

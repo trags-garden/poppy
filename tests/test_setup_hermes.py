@@ -204,6 +204,7 @@ def test_set_provider_long_block_without_provider_finishes_fast(line: str) -> No
         ("memory:\n  provider: honcho", "memory:\n  provider: poppy"),
         ("memory:\n  provider: honcho  \n", "memory:\n  provider: poppy\n"),
         ("memory:\n  provider: honcho#legacy\n", "memory:\n  provider: poppy#legacy\n"),
+        ("memory:\n  provider:   # c\n", "memory:\n  provider:   poppy # c\n"),
         ("memory:\n  provider: honcho\t # legacy\n", "memory:\n  provider: poppy\t # legacy\n"),
         (
             "memory:\n  scope: profile\nother:\n  provider: honcho\n",
