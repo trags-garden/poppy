@@ -50,7 +50,7 @@ from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 
-from poppy.capture.budget import CONFLICT_LLM_TIMEOUT_S
+from poppy.capture import lock as _lock
 from poppy.config import PoppyConfig
 from poppy.engine.interface import RetrievalEngine
 from poppy.lifecycle import supersede_memory
@@ -79,14 +79,12 @@ AUTO_SUPERSEDE_THRESHOLD = 0.85
 
 # Seconds a verdict gets from the backend, well under the whole-transcript
 # default. A verdict judges one memory against at most DEFAULT_TOP_K neighbours,
-# so it is a small prompt and a slow answer is not worth waiting for. The budget
-# has to stay small: a background capture pass runs one verdict per extracted
-# candidate while it holds the per-session capture lock, and that lock is treated
-# as abandoned after capture.lock.LOCK_TTL_S (300s), at which point a second
-# worker steals it from the one still running. capture.budget caps the batch
-# using this verdict budget and the extraction budget, leaving room for local
-# work. Each budget covers a whole call_llm rather than each backend it tries.
-# It also keeps `remember --check-conflicts` from parking a terminal.
+# so it is a small prompt and a slow answer is not worth waiting for. A capture
+# pass renews its lock per candidate, so one candidate's verdict plus its model
+# requests must stay inside capture.lock.LOCK_TTL_S (300s); a budget covers a
+# whole call_llm rather than each backend it tries. It also keeps
+# `remember --check-conflicts` from parking a terminal.
+CONFLICT_LLM_TIMEOUT_S = 20
 
 # How many same-project / same-type neighbours the prefilter / verdict inspect.
 DEFAULT_TOP_K = 5
@@ -422,6 +420,9 @@ def reconcile_and_ingest(
     """
     summary = ReconcileSummary()
     for mem in memories:
+        # Each candidate can cost several model requests (embedding, rerank,
+        # verdict, ingest); renew per candidate so a long batch keeps its lock.
+        _lock.renew()
         # Candidates arrive already secret-redacted from orchestrator.build_capture_memories
         # — redaction happens at construction, the single earliest seam, so
         # both the store and the local capture journal only ever see masked content.

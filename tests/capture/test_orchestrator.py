@@ -17,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 
 from poppy.capture import journal
-from poppy.capture.budget import CONFLICT_LLM_TIMEOUT_S, HOST_CLI_TIMEOUT_S, MAX_CAPTURE_ITEMS
 from poppy.capture.cadence import capture_count
 from poppy.capture.lock import LOCK_TTL_S, single_flight
 from poppy.capture.orchestrator import (
@@ -27,9 +26,10 @@ from poppy.capture.orchestrator import (
     build_capture_memories,
     run_capture_worker,
 )
-from poppy.capture.reconciler import ReconcileSummary
+from poppy.capture.reconciler import CONFLICT_LLM_TIMEOUT_S, ReconcileSummary
 from poppy.capture.watermark import get_watermark
-from poppy.config import PoppyConfig, resolved_consolidate_settings
+from poppy.config import PoppyConfig
+from poppy.consolidation import HOST_CLI_TIMEOUT_S
 
 
 class _RecordingReconcile:
@@ -110,22 +110,21 @@ def test_max_items_caps_candidates(tmp_path: Path):
     assert reconcile.calls == [3]
 
 
-@pytest.mark.parametrize("requested", [1, 5, 10, 1000])
-@pytest.mark.parametrize("direct_plan", [False, True])
-def test_worst_case_capture_batch_finishes_before_lock_expiry(tmp_path, monkeypatch, requested, direct_plan):
-    """Configured and direct batches cannot spend enough LLM time to lose the lock."""
+def test_a_long_capture_pass_keeps_its_lock_while_it_progresses(tmp_path, monkeypatch):
+    """Slow but valid steps may add up past the lock lifetime without losing the lock.
+
+    Every step stays inside its own timeout, yet the pass as a whole runs well
+    past LOCK_TTL_S. Renewing on progress must keep a second worker out the
+    whole time.
+    """
     clock = SimpleNamespace(elapsed=0.0)
     started = time.time()
     monkeypatch.setattr("poppy.capture.lock.time", SimpleNamespace(time=lambda: started + clock.elapsed))
-    monkeypatch.setattr("poppy.consolidation.time", SimpleNamespace(monotonic=lambda: clock.elapsed))
-    monkeypatch.setenv("POPPY_CONSOLIDATE_MAX_ITEMS", str(requested))
     monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: "claude")
     monkeypatch.setattr("poppy.consolidation.health.record_success", lambda *args: None)
     cfg = PoppyConfig(poppy_dir=tmp_path)
-    settings = resolved_consolidate_settings(cfg)
-    expected = min(requested, MAX_CAPTURE_ITEMS)
-    assert settings.max_items == expected
-    items = [{"type": "fact", "content": f"Use PostgreSQL for deployment region {i}"} for i in range(100)]
+    count = 8
+    items = [{"type": "fact", "content": f"Use PostgreSQL for deployment region {i}"} for i in range(count)]
     neighbour = build_capture_memories(
         [{"type": "fact", "content": "Use MySQL for deployment region west"}],
         source_type="claude-code",
@@ -136,27 +135,31 @@ def test_worst_case_capture_batch_finishes_before_lock_expiry(tmp_path, monkeypa
     stored = []
     verdicts = []
 
-    def assert_lock_held():
+    def step(seconds):
+        clock.elapsed += seconds
         with single_flight(tmp_path, "sess") as acquired:
-            assert acquired is False
+            assert acquired is False, f"lock lost at {clock.elapsed:.0f}s"
 
     def host(prompt, *, cli, timeout_s, record_health=True):
-        clock.elapsed += timeout_s
-        assert_lock_held()
         if timeout_s == HOST_CLI_TIMEOUT_S:
+            step(HOST_CLI_TIMEOUT_S - 1)
             return json.dumps(items)
         assert timeout_s == CONFLICT_LLM_TIMEOUT_S
+        step(CONFLICT_LLM_TIMEOUT_S - 1)
         verdicts.append(prompt)
         return "[]"
 
+    def retrieve(*args, **kwargs):
+        step(20)  # query embedding and reranking, each a valid 10s daemon request
+        return []
+
     def ingest(memory):
-        clock.elapsed += 1  # local work also consumes the lease
+        step(10)  # ingest embedding
         stored.append(memory)
-        assert_lock_held()
 
     engine = SimpleNamespace(
         apply_candidate_score_floor=False,
-        retrieve=lambda *args, **kwargs: [],
+        retrieve=retrieve,
         list_all=lambda **kwargs: [neighbour],
         ingest=ingest,
     )
@@ -164,12 +167,10 @@ def test_worst_case_capture_batch_finishes_before_lock_expiry(tmp_path, monkeypa
     orch = CaptureOrchestrator(engine=engine, cfg=cfg, poppy_dir=tmp_path)
     with single_flight(tmp_path, "sess") as acquired:
         assert acquired is True
-        clock.elapsed += 10  # transcript and engine setup
-        outcome = orch.run(_plan(max_items=requested if direct_plan else settings.max_items))
-        clock.elapsed += 5  # bookkeeping
-        assert_lock_held()
-    assert outcome.stored == len(stored) == len(verdicts) == expected
-    assert clock.elapsed < LOCK_TTL_S
+        outcome = orch.run(_plan(max_items=count))
+        step(5)  # bookkeeping after the last candidate
+    assert outcome.stored == len(stored) == len(verdicts) == count
+    assert clock.elapsed > LOCK_TTL_S
 
 
 # ---------- watermark-after-success: watermark advances only after a successful ingest ----------

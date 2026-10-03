@@ -36,7 +36,6 @@ from urllib.parse import urlsplit
 import httpx
 
 from poppy.capture import health
-from poppy.capture.budget import HOST_CLI_TIMEOUT_S
 from poppy.capture.cadence import soft_cap_reached
 from poppy.capture.lock import single_flight
 from poppy.capture.orchestrator import CaptureOrchestrator, CapturePlan
@@ -129,6 +128,11 @@ def format_transcript(messages: list[dict[str, str]], char_budget: int = 16000) 
 # four CLIs the transcript-based branch below can pick, so a no-transcript call
 # can never reach a backend a normal capture would not have used.
 HOST_CLI_PREFERENCE = ("claude", "cursor-agent", "codex", "gemini")
+
+# Seconds a host CLI gets to answer. Sized for the big job: a whole transcript
+# window to extract memories from. Callers with a small prompt pass a smaller
+# budget.
+HOST_CLI_TIMEOUT_S = 120
 
 
 def detect_host_cli(transcript_path: str | None) -> str | None:
@@ -390,7 +394,7 @@ def call_openai_compat(
     worker = threading.Thread(target=request, daemon=True)
     worker.start()
     worker.join(timeout=max(0.0, deadline - time.monotonic()))
-    if worker.is_alive() or time.monotonic() >= deadline:
+    if not result.done():
         raise OpenAICompatError("timed out reading the response")
     return result.result()
 

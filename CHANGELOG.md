@@ -23,9 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Automatic memory capture now caps large batches to fit its lock lifetime and
-  enforces a total deadline for HTTP fallback calls, preventing overlapping
-  captures when a model endpoint responds slowly.
+- Automatic memory capture no longer lets a second capture start while a long
+  but healthy one is still running: a capture keeps its lock alive as it makes
+  progress, so large batches and slow model endpoints no longer cause
+  overlapping captures. A capture that stops making progress still releases
+  the lock after five minutes. HTTP fallback calls now also stop at a total
+  deadline, and a response that arrives just as the deadline passes is no
+  longer reported as a timeout.
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
   instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a

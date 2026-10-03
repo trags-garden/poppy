@@ -278,13 +278,9 @@ def test_http_deadline_does_not_wait_for_an_inflight_operation(monkeypatch, slow
         assert closed.wait(2), "the expired request must close its stream when the operation returns"
 
 
-def test_slow_reads_within_socket_timeout_cannot_consume_capture_lock_ttl(monkeypatch, tmp_path):
+def test_slow_reads_within_socket_timeout_still_stop_at_the_deadline(monkeypatch):
     """One call cannot spend nearly two budgets on two individually valid reads."""
-    from poppy.capture.lock import single_flight
-
     budget = 0.2
-    lease = 0.25
-    monkeypatch.setattr("poppy.capture.lock.LOCK_TTL_S", lease)
     closed = threading.Event()
     reads = []
 
@@ -302,18 +298,43 @@ def test_slow_reads_within_socket_timeout_cannot_consume_capture_lock_ttl(monkey
     mock_endpoint(monkeypatch, lambda request: httpx.Response(200, stream=SlowReads()))
     started = time.monotonic()
     try:
-        with single_flight(tmp_path, "slow") as acquired:
-            assert acquired is True
-            with pytest.raises(OpenAICompatError, match="timed out"):
-                call_openai_compat(
-                    "extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=budget
-                )
-            assert time.monotonic() - started < lease
-            with single_flight(tmp_path, "slow") as second:
-                assert second is False
+        with pytest.raises(OpenAICompatError, match="timed out"):
+            call_openai_compat(
+                "extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=budget
+            )
+        assert time.monotonic() - started < 1
     finally:
         assert closed.wait(2)
     assert len(reads) == 2 and all(read < budget for read in reads)
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome"),
+    [(200, None), (401, "HTTP 401: authentication failed"), (429, "HTTP 429: rate limit exceeded")],
+)
+def test_a_finished_request_is_not_reported_as_a_timeout(monkeypatch, status, outcome):
+    """A request that completed before the caller looked keeps its own outcome."""
+    clock = SimpleNamespace(now=0.0)
+
+    class LateJoin(threading.Thread):
+        def join(self, timeout=None):
+            super().join()
+            clock.now += 1_000  # the caller wakes after the deadline
+
+    monkeypatch.setattr("poppy.consolidation.time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr("poppy.consolidation.threading", SimpleNamespace(Thread=LateJoin))
+    body = {"choices": [{"message": {"content": "answer"}}]}
+    mock_endpoint(monkeypatch, lambda request: httpx.Response(status, json=body))
+
+    def call():
+        return call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=5)
+
+    if outcome is None:
+        assert call() == "answer"
+    else:
+        with pytest.raises(OpenAICompatError) as exc_info:
+            call()
+        assert str(exc_info.value) == outcome
 
 
 def test_an_unbounded_response_body_stops_at_the_size_cap(monkeypatch):
