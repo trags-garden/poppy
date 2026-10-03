@@ -25,7 +25,8 @@ from pathlib import Path
 from poppy.paths import ensure_poppy_dir
 
 # A held lock older than this (seconds) is assumed to belong to a crashed worker
-# and is stolen. Comfortably longer than a capture's host-CLI timeout (120s).
+# and is stolen. capture.budget derives the batch cap from this lifetime,
+# reserving time for local work as well as extraction and conflict verdicts.
 LOCK_TTL_S = 300
 
 

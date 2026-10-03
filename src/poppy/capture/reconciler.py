@@ -50,6 +50,7 @@ from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 
+from poppy.capture.budget import CONFLICT_LLM_TIMEOUT_S
 from poppy.config import PoppyConfig
 from poppy.engine.interface import RetrievalEngine
 from poppy.lifecycle import supersede_memory
@@ -82,11 +83,10 @@ AUTO_SUPERSEDE_THRESHOLD = 0.85
 # has to stay small: a background capture pass runs one verdict per extracted
 # candidate while it holds the per-session capture lock, and that lock is treated
 # as abandoned after capture.lock.LOCK_TTL_S (300s), at which point a second
-# worker steals it from the one still running. One extraction (120s) plus a
-# verdict for every candidate in a default batch of five stays inside that
-# window, because a budget covers a whole call_llm rather than each backend it
-# tries. It also keeps `remember --check-conflicts` from parking a terminal.
-CONFLICT_LLM_TIMEOUT_S = 20
+# worker steals it from the one still running. capture.budget caps the batch
+# using this verdict budget and the extraction budget, leaving room for local
+# work. Each budget covers a whole call_llm rather than each backend it tries.
+# It also keeps `remember --check-conflicts` from parking a terminal.
 
 # How many same-project / same-type neighbours the prefilter / verdict inspect.
 DEFAULT_TOP_K = 5

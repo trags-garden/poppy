@@ -26,14 +26,17 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 
 from poppy.capture import health
+from poppy.capture.budget import HOST_CLI_TIMEOUT_S
 from poppy.capture.cadence import soft_cap_reached
 from poppy.capture.lock import single_flight
 from poppy.capture.orchestrator import CaptureOrchestrator, CapturePlan
@@ -126,11 +129,6 @@ def format_transcript(messages: list[dict[str, str]], char_budget: int = 16000) 
 # four CLIs the transcript-based branch below can pick, so a no-transcript call
 # can never reach a backend a normal capture would not have used.
 HOST_CLI_PREFERENCE = ("claude", "cursor-agent", "codex", "gemini")
-
-# Seconds a host CLI gets to answer. Sized for the big job: a whole transcript
-# window to extract memories from. Callers with a small prompt pass a smaller
-# budget.
-HOST_CLI_TIMEOUT_S = 120
 
 
 def detect_host_cli(transcript_path: str | None) -> str | None:
@@ -360,11 +358,58 @@ def call_openai_compat(
     max_tokens: int = 800,
     timeout_s: float = HOST_CLI_TIMEOUT_S,
 ) -> str:
-    """Request a chat completion, raising a specific, credential-free failure."""
+    """Request a completion within a total, credential-free wall-clock budget.
+
+    Socket timeouts only bound individual operations, including reads of the
+    response headers. Wait for the entire request in a daemon thread so even an
+    operation starting just before the deadline cannot extend the caller's
+    budget. The worker never touches capture state or health; a late result is
+    discarded, and it closes its client when the pending operation returns.
+    """
     deadline = time.monotonic() + timeout_s
     url, loopback = _endpoint(base_url)
+    result: Future[str] = Future()
+
+    def request() -> None:
+        try:
+            result.set_result(
+                _request_openai_compat(
+                    prompt,
+                    url=url,
+                    loopback=loopback,
+                    model=model,
+                    api_key=api_key,
+                    max_tokens=max_tokens,
+                    timeout_s=timeout_s,
+                    deadline=deadline,
+                )
+            )
+        except BaseException as exc:
+            result.set_exception(exc)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    worker.join(timeout=max(0.0, deadline - time.monotonic()))
+    if worker.is_alive() or time.monotonic() >= deadline:
+        raise OpenAICompatError("timed out reading the response")
+    return result.result()
+
+
+def _request_openai_compat(
+    prompt: str,
+    *,
+    url: str,
+    loopback: bool,
+    model: str,
+    api_key: str,
+    max_tokens: int,
+    timeout_s: float,
+    deadline: float,
+) -> str:
     try:
         with _http_client(timeout_s=timeout_s, trust_env=not loopback) as client:
+            if time.monotonic() >= deadline:
+                raise OpenAICompatError("timed out reading the response")
             with client.stream(
                 "POST",
                 url,
@@ -376,6 +421,8 @@ def call_openai_compat(
                     "max_tokens": max_tokens,
                 },
             ) as resp:
+                if time.monotonic() >= deadline:
+                    raise OpenAICompatError("timed out reading the response")
                 resp.raise_for_status()
                 body = _read_bounded(resp, deadline=deadline)
     except httpx.HTTPStatusError as exc:

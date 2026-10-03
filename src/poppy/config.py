@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from poppy.capture.budget import MAX_CAPTURE_ITEMS
 from poppy.paths import ensure_poppy_dir
 
 CONFIG_FILENAME = "config.json"
@@ -597,7 +598,8 @@ class ConsolidateSettings:
 
     @property
     def max_items(self) -> int:
-        return int(os.environ.get("POPPY_CONSOLIDATE_MAX_ITEMS", "5"))
+        requested = int(os.environ.get("POPPY_CONSOLIDATE_MAX_ITEMS", "5"))
+        return max(0, min(requested, MAX_CAPTURE_ITEMS))
 
 
 def resolved_consolidate_settings(cfg: PoppyConfig) -> ConsolidateSettings:

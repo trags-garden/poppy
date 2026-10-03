@@ -9,12 +9,17 @@ watermark-after-success invariant in one place.
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from poppy.capture import journal
+from poppy.capture.budget import CONFLICT_LLM_TIMEOUT_S, HOST_CLI_TIMEOUT_S, MAX_CAPTURE_ITEMS
 from poppy.capture.cadence import capture_count
+from poppy.capture.lock import LOCK_TTL_S, single_flight
 from poppy.capture.orchestrator import (
     CaptureOrchestrator,
     CaptureOutcome,
@@ -24,6 +29,7 @@ from poppy.capture.orchestrator import (
 )
 from poppy.capture.reconciler import ReconcileSummary
 from poppy.capture.watermark import get_watermark
+from poppy.config import PoppyConfig, resolved_consolidate_settings
 
 
 class _RecordingReconcile:
@@ -102,6 +108,68 @@ def test_max_items_caps_candidates(tmp_path: Path):
 
     assert len(outcome.candidates) == 3
     assert reconcile.calls == [3]
+
+
+@pytest.mark.parametrize("requested", [1, 5, 10, 1000])
+@pytest.mark.parametrize("direct_plan", [False, True])
+def test_worst_case_capture_batch_finishes_before_lock_expiry(tmp_path, monkeypatch, requested, direct_plan):
+    """Configured and direct batches cannot spend enough LLM time to lose the lock."""
+    clock = SimpleNamespace(elapsed=0.0)
+    started = time.time()
+    monkeypatch.setattr("poppy.capture.lock.time", SimpleNamespace(time=lambda: started + clock.elapsed))
+    monkeypatch.setattr("poppy.consolidation.time", SimpleNamespace(monotonic=lambda: clock.elapsed))
+    monkeypatch.setenv("POPPY_CONSOLIDATE_MAX_ITEMS", str(requested))
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: "claude")
+    monkeypatch.setattr("poppy.consolidation.health.record_success", lambda *args: None)
+    cfg = PoppyConfig(poppy_dir=tmp_path)
+    settings = resolved_consolidate_settings(cfg)
+    expected = min(requested, MAX_CAPTURE_ITEMS)
+    assert settings.max_items == expected
+    items = [{"type": "fact", "content": f"Use PostgreSQL for deployment region {i}"} for i in range(100)]
+    neighbour = build_capture_memories(
+        [{"type": "fact", "content": "Use MySQL for deployment region west"}],
+        source_type="claude-code",
+        session_id="earlier",
+        project="proj",
+        config=cfg,
+    )[0]
+    stored = []
+    verdicts = []
+
+    def assert_lock_held():
+        with single_flight(tmp_path, "sess") as acquired:
+            assert acquired is False
+
+    def host(prompt, *, cli, timeout_s, record_health=True):
+        clock.elapsed += timeout_s
+        assert_lock_held()
+        if timeout_s == HOST_CLI_TIMEOUT_S:
+            return json.dumps(items)
+        assert timeout_s == CONFLICT_LLM_TIMEOUT_S
+        verdicts.append(prompt)
+        return "[]"
+
+    def ingest(memory):
+        clock.elapsed += 1  # local work also consumes the lease
+        stored.append(memory)
+        assert_lock_held()
+
+    engine = SimpleNamespace(
+        apply_candidate_score_floor=False,
+        retrieve=lambda *args, **kwargs: [],
+        list_all=lambda **kwargs: [neighbour],
+        ingest=ingest,
+    )
+    monkeypatch.setattr("poppy.consolidation.call_host_cli", host)
+    orch = CaptureOrchestrator(engine=engine, cfg=cfg, poppy_dir=tmp_path)
+    with single_flight(tmp_path, "sess") as acquired:
+        assert acquired is True
+        clock.elapsed += 10  # transcript and engine setup
+        outcome = orch.run(_plan(max_items=requested if direct_plan else settings.max_items))
+        clock.elapsed += 5  # bookkeeping
+        assert_lock_held()
+    assert outcome.stored == len(stored) == len(verdicts) == expected
+    assert clock.elapsed < LOCK_TTL_S
 
 
 # ---------- watermark-after-success: watermark advances only after a successful ingest ----------
