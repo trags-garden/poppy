@@ -167,8 +167,7 @@ def test_set_provider_no_trailing_newline() -> None:
 def test_set_provider_replaces_inline_comment() -> None:
     text = "memory:\n  provider: honcho  # legacy\n"
     out = _set_memory_provider(text, "poppy")
-    assert "provider: poppy" in out
-    assert "# legacy" in out  # inline comment preserved
+    assert out == "memory:\n  provider: poppy  # legacy\n"
 
 
 def test_set_provider_preserves_neighbor_keys() -> None:
@@ -190,7 +189,8 @@ def test_set_provider_long_block_without_provider_finishes_fast(line: str) -> No
         "assert _set_memory_provider('memory:\\n' + lines, 'poppy') "
         "== 'memory:\\n  provider: poppy\\n' + lines\n"
     )
-    subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, timeout=3)
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=3)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -199,9 +199,12 @@ def test_set_provider_long_block_without_provider_finishes_fast(line: str) -> No
         ("memory:\n  scope: profile\n", "memory:\n  provider: poppy\n  scope: profile\n"),
         (
             "memory:\n\t\t\n  key: value\n\tprovider:\thoncho  # legacy\nother: unchanged\n",
-            "memory:\n\t\t\n  key: value\n\tprovider:\tpoppy# legacy\nother: unchanged\n",
+            "memory:\n\t\t\n  key: value\n\tprovider:\tpoppy  # legacy\nother: unchanged\n",
         ),
         ("memory:\n  provider: honcho", "memory:\n  provider: poppy"),
+        ("memory:\n  provider: honcho  \n", "memory:\n  provider: poppy\n"),
+        ("memory:\n  provider: honcho#legacy\n", "memory:\n  provider: poppy#legacy\n"),
+        ("memory:\n  provider: honcho\t # legacy\n", "memory:\n  provider: poppy\t # legacy\n"),
         (
             "memory:\n  scope: profile\nother:\n  provider: honcho\n",
             "memory:\n  provider: poppy\n  scope: profile\nother:\n  provider: honcho\n",

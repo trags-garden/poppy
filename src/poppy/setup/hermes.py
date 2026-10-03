@@ -501,6 +501,10 @@ def _set_memory_provider(config_text: str, provider: str) -> str:
                 value = body[len("provider:") :]
                 value_start = line_end - len(value.lstrip(" \t"))
                 comment_at = line.find("#", value_start - offset)
+                if comment_at >= 0:
+                    # YAML comments need the whitespace separating them from the value.
+                    while comment_at > value_start - offset and line[comment_at - 1].isspace():
+                        comment_at -= 1
                 trailing = line[comment_at:] if comment_at >= 0 else ""
                 return config_text[:value_start] + provider + trailing + config_text[line_end:]
         else:

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An oversized `--ttl` or `--since` duration is now reported as an invalid value
+  instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a
   long `memory:` block without a `provider:` key.
 - `poppy serve` no longer drops the connection when an MCP client sends a
