@@ -680,6 +680,7 @@ def test_session_end_consolidation_disabled_when_not_opted_in(tmp_path, monkeypa
 def test_session_end_logs_payload_and_spawns_worker(tmp_path, monkeypatch):
     """session-end must log the payload AND attempt a detached worker spawn."""
     monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setenv("POPPY_CONSOLIDATE", "1")
     spawned = {"called": False, "argv": None}
 
     class FakeProc:
@@ -861,6 +862,7 @@ def test_replay_session_end_runs_consolidator_against_logged_payload(tmp_path, m
 def test_post_compact_logs_payload_and_spawns_worker(tmp_path, monkeypatch):
     """post-compact should write the debug log AND attempt a detached worker spawn."""
     monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setenv("POPPY_CONSOLIDATE", "1")
     spawned = {"called": False, "argv": None}
 
     class FakeProc:
@@ -892,18 +894,21 @@ def test_post_compact_logs_payload_and_spawns_worker(tmp_path, monkeypatch):
     assert result.exit_code == 0
     log_path = tmp_path / "postcompact-debug.log"
     assert log_path.exists()
-    assert "we decided to use ruff" in log_path.read_text()
+    assert "we decided to use ruff" not in log_path.read_text()
     assert spawned["called"] is True
     assert spawned["argv"][1:] == ["hook", "_post-compact-worker"]
 
 
-def test_postcompact_debug_log_hardened_and_trimmed(tmp_path, monkeypatch):
-    """The post-compact debug log is written 0600 and persists only the
-    replay-relevant payload keys, not the whole raw hook blob."""
+@pytest.mark.parametrize("summary_key", ["compact_summary", "summary"])
+def test_postcompact_debug_log_hardened_and_trimmed(tmp_path, monkeypatch, summary_key):
+    """The enabled log contains only metadata and remains owner-only."""
     import stat as _stat
     import sys as _sys
 
     monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
+    (tmp_path / "config.json").write_text(json.dumps({"consent": "granted"}))
+    monkeypatch.setattr("poppy.capture.policy.host_cli_available", lambda: True)
 
     class FakeProc:
         def __init__(self, *a, **kw):
@@ -918,29 +923,77 @@ def test_postcompact_debug_log_hardened_and_trimmed(tmp_path, monkeypatch):
 
     monkeypatch.setattr("subprocess.Popen", FakeProc)
 
-    payload = json.dumps(
-        {
-            "session_id": "abc",
-            "compact_summary": "we decided to use ruff",
-            "cwd": str(tmp_path / "proj"),
-            "transcript_path": "/dev/null",
-            "unrelated_secret": "should-not-persist",
-        }
-    )
+    payload_data = {
+        "session_id": "abc",
+        summary_key: "we decided to use ruff",
+        "trigger": "auto",
+        "cwd": str(tmp_path / "proj"),
+        "transcript_path": "/dev/null",
+        "unrelated_secret": "should-not-persist",
+    }
+    payload = json.dumps(payload_data)
     runner = CliRunner()
     result = runner.invoke(hook, ["post-compact"], input=payload)
     assert result.exit_code == 0
 
     log_path = tmp_path / "postcompact-debug.log"
     entry = json.loads(log_path.read_text().strip())
-    # Replay-relevant fields survive so `replay-compact` still works...
-    assert entry["payload"]["session_id"] == "abc"
-    assert entry["payload"]["compact_summary"] == "we decided to use ruff"
-    # ...but arbitrary extra keys from the raw blob are dropped.
-    assert "unrelated_secret" not in entry["payload"]
+    assert set(entry) == {"ts", "session_id", "trigger", "keys", "summary_len"}
+    assert entry["ts"]
+    assert entry["session_id"] == "abc"
+    assert entry["trigger"] == "auto"
+    assert entry["keys"] == sorted(payload_data)
+    assert entry["summary_len"] == len(payload_data[summary_key])
+    assert payload_data[summary_key] not in log_path.read_text()
+    assert "should-not-persist" not in log_path.read_text()
 
     if _sys.platform != "win32":
         assert _stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "command, log_name", [("post-compact", "postcompact-debug.log"), ("session-end", "sessionend-debug.log")]
+)
+@pytest.mark.parametrize("state", ["pending", "opted_out", "project_off"])
+def test_capture_hooks_do_not_log_when_disabled(tmp_path, monkeypatch, command, log_name, state):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
+    project_dir = tmp_path / "sensitive-project"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text("")
+    if state == "opted_out":
+        (tmp_path / "config.json").write_text(json.dumps({"consent": "denied"}))
+    elif state == "project_off":
+        (tmp_path / "config.json").write_text(
+            json.dumps({"consent": "granted", "disabled_projects": ["sensitive-project"]})
+        )
+    monkeypatch.setattr("poppy.capture.policy.host_cli_available", lambda: True)
+    spawned = []
+    monkeypatch.setattr("poppy.cli.hooks._spawn_detached_worker", lambda *args: spawned.append(args))
+    payload = {"cwd": str(project_dir), "session_id": "private-session", "compact_summary": "private summary"}
+
+    result = CliRunner().invoke(hook, [command], input=json.dumps(payload))
+
+    assert result.exit_code == 0
+    assert not (tmp_path / log_name).exists()
+    assert not spawned
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"session_id": "abc"}, {"compact_summary": "", "summary": ""}])
+def test_replay_compact_without_summary_has_nothing_to_replay(tmp_path, monkeypatch, payload):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    entry = {"ts": "2026-05-03T18:00:00+00:00", "session_id": "abc", "summary_len": 50}
+    if payload is not None:
+        entry["payload"] = payload
+    (tmp_path / "postcompact-debug.log").write_text(json.dumps(entry) + "\n")
+    calls = []
+    monkeypatch.setattr("poppy.consolidation.consolidate_compact_event", lambda *args: calls.append(args))
+
+    result = CliRunner().invoke(hook, ["replay-compact"])
+
+    assert result.exit_code == 0
+    assert result.output == "nothing to replay: this entry contains no summary text\n"
+    assert not calls
 
 
 def test_replay_compact_runs_consolidator_against_logged_payload(tmp_path, monkeypatch):

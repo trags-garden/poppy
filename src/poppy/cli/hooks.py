@@ -620,20 +620,7 @@ def _stamp_last_seen(payload: dict) -> None:
         stamp_last_seen(get_poppy_dir(), session_id)
 
 
-# Keys of the raw hook payload that the replay commands actually re-feed to
-# consolidation. Everything else in the payload is dropped before it is written
-# to disk so the debug logs never persist the whole unbounded blob.
-_COMPACT_REPLAY_KEYS = (
-    "session_id",
-    "transcript_path",
-    "cwd",
-    "compact_summary",
-    "summary",
-    "trigger",
-    "compact_trigger",
-    "cursor_version",
-    "hook_event_name",
-)
+# Session-end replay needs metadata only; transcript content stays out of the log.
 _SESSION_END_REPLAY_KEYS = ("session_id", "transcript_path", "cwd", "reason", "cursor_version", "hook_event_name")
 
 
@@ -651,9 +638,8 @@ def _replay_payload(payload: dict, keys: tuple[str, ...]) -> dict:
 def _append_debug_log(log_name: str, snapshot: dict, max_entries: int = 50) -> None:
     """Append snapshot to ~/.poppy/<log_name>, keeping at most `max_entries`.
 
-    These logs can hold session-derived content (a PostCompact summary), so the
-    file is tightened to 0600 — owner-only, never readable by other local
-    accounts on a shared host.
+    Session metadata remains private, so the file is tightened to 0600,
+    readable only by its owner on a shared host.
     """
     ensure_poppy_dir(get_poppy_dir())
     log_path = get_poppy_dir() / log_name
@@ -688,8 +674,6 @@ def _log_compact_payload(payload: dict) -> None:
             "session_id": payload.get("session_id"),
             "trigger": payload.get("trigger") or payload.get("compact_trigger"),
             "summary_len": len(summary_text),
-            "summary_head": summary_text[:240],
-            "payload": _replay_payload(payload, _COMPACT_REPLAY_KEYS),
         },
     )
 
@@ -816,7 +800,7 @@ def post_compact():
 
     The LLM extraction can take longer than Claude Code's 60s hook timeout
     (we got "Hook cancelled" on real fires). So this entry does only fast
-    work synchronously (log the payload, then spawn a detached background
+    work synchronously (check consent, log metadata, then spawn a detached background
     worker to run the actual consolidation) and exits within ~100ms.
 
     The worker is `poppy hook _post-compact-worker`, invoked with the same
@@ -826,6 +810,12 @@ def post_compact():
     """
     try:
         payload = _read_hook_input()
+        from poppy.config import load_config
+        from poppy.consolidation import is_enabled
+
+        project = project_from_cwd(payload.get("cwd"))
+        if not is_enabled(load_config(get_poppy_dir()), project=project):
+            sys.exit(0)
     except Exception as exc:
         sys.stderr.write(f"poppy post-compact hook error: {exc}\n")
         sys.exit(0)
@@ -903,6 +893,9 @@ def replay_compact(n: int):
 
     entry = entries[-n]
     payload = entry.get("payload") or {}
+    if not (payload.get("compact_summary") or payload.get("summary")):
+        click.echo("nothing to replay: this entry contains no summary text")
+        sys.exit(0)
     click.echo(
         f"replaying entry from {entry.get('ts')}: "
         f"session={entry.get('session_id')} summary_len={entry.get('summary_len')}"
@@ -923,15 +916,20 @@ def session_end():
     """SessionEnd hook: end-of-session consolidation.
 
     Fires when the user closes the session (`/exit`, `/clear`, ctrl+c×2,
-    window close, prompt-submitted-while-busy). Logs the payload to
-    ~/.poppy/sessionend-debug.log for audit, then spawns a detached
+    window close, prompt-submitted-while-busy). Logs metadata to
+    ~/.poppy/sessionend-debug.log, then spawns a detached
     worker so the LLM call can outlive Claude Code's hook timeout.
 
-    Default: silent no-op when consolidation isn't enabled (the worker
-    short-circuits inside consolidate_stop_event).
+    Default: silent no-op when consolidation isn't enabled.
     """
     try:
         payload = _read_hook_input()
+        from poppy.config import load_config
+        from poppy.consolidation import is_enabled
+
+        project = project_from_cwd(payload.get("cwd"))
+        if not is_enabled(load_config(get_poppy_dir()), project=project):
+            sys.exit(0)
     except Exception as exc:
         sys.stderr.write(f"poppy session-end hook error: {exc}\n")
         sys.exit(0)
