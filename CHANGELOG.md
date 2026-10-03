@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `poppy restore MEMORY_ID` brings a forgotten memory back from Trash within
+  7 days, unless its own expiry has passed. `poppy forget` now prints the command
+  to undo it.
+
 ### Fixed
 
 - `poppy serve` no longer drops the connection when an MCP client sends a

@@ -235,6 +235,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy list` | `--project`, `--type`, `--since`, `--limit`, `--json`, `--include-expired` | List all memories, newest first. |
 | `poppy edit MEMORY_ID` | `--content`, `--type`, `--project`, `--no-project`, `--ttl`, `--expires-at`, `--no-expiry` | Edit a memory in place. |
 | `poppy forget MEMORY_ID` | `--yes` | Soft delete a memory by ID, restorable for 7 days. |
+| `poppy restore MEMORY_ID` | | Restore a memory from Trash within 7 days, unless its own expiry has passed. |
 | `poppy expire` | `--yes` | List memories whose TTL has passed; `--yes` purges them. |
 | `poppy stats` | | Show memory stats. |
 | `poppy engines` | | List the engine catalog with the active engine starred. |

@@ -242,7 +242,7 @@ def supersede_memory(
     """Tombstone the old memory and ingest the new, linking them via related_to.
 
     The tombstone makes supersede reversible for the standard 7-day window —
-    `poppy ui` (or a future `poppy restore`) can bring the old back.
+    `poppy ui` or `poppy restore` can bring the old back.
     """
     from poppy.db import write_gate
 
