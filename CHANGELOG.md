@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Compaction and session-end debug logs now respect capture consent and the
+  per-project off switch. Compaction entries store only metadata, never summary
+  text. Old summary text is removed from `~/.poppy/postcompact-debug.log` the
+  next time a compaction is logged with capture on. With capture off, the file
+  is left untouched and can be deleted.
 - `poppy serve` no longer drops the connection when an MCP client sends a
   request before the handshake. Some clients open with a discovery probe, which
   the daemon has no session for yet; that probe is now answered with a
