@@ -3114,6 +3114,36 @@ def test_purge_expired_requires_no_pending_deletions(tmp_path, known, sent, expe
     assert (tombstones.get("secret") is None) == bool(expected_purged)
 
 
+@pytest.mark.parametrize(
+    ("require_sent", "known", "sent", "expected_purged"),
+    [
+        (False, set(), set(), 0),
+        (True, set(), set(), 0),
+        (True, set(), {"https://trags.test"}, 0),
+        (False, {"https://trags.test"}, set(), 1),
+        (True, {"https://trags.test"}, set(), 0),
+        (True, {"https://trags.test"}, {"https://trags.test"}, 1),
+        (True, {"https://trags.test", "https://other.test"}, {"https://trags.test"}, 0),
+        (True, {"https://trags.test", "https://other.test"}, {"https://trags.test", "https://other.test"}, 1),
+    ],
+)
+def test_purge_expired_keeps_unknown_deletions(tmp_path, require_sent, known, sent, expected_purged):
+    _, tombstones = _engine_and_tombstones(tmp_path)
+    now = datetime.now(timezone.utc)
+    deleted_at = now - timedelta(days=8)
+    ts = tombstones.add(_memory("secret", updated=deleted_at), tombstoned_at=deleted_at)
+    for url in known:
+        tombstones.note_remote_memories({"secret"}, url)
+    for url in sent:
+        tombstones.mark_sent([ts], url)
+
+    assert (
+        tombstones.purge_expired(pushed_through=now.isoformat(), require_sent=require_sent, keep_unknown=True)
+        == expected_purged
+    )
+    assert (tombstones.get("secret") is None) == bool(expected_purged)
+
+
 def test_purge_keeps_a_deletion_pending_for_another_remote(tmp_path):
     engine, tombstones = _engine_and_tombstones(tmp_path)
     for url in ("https://trags.test", "https://other.test"):
