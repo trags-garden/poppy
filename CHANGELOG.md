@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The README now documents `poppy daemon`: a command-table row and a section
+  on what the shared MCP daemon is, how `poppy setup --daemon` uses it, its
+  subcommands, and the files it keeps.
 - `seed` relevance scores now rise with relevance (each is one minus its old
   value), so scores shown by `poppy recall --json`, MCP recall and the dashboard
   change value on `seed`. A positive `recall_min_score` set while using `seed`
