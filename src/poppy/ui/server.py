@@ -161,19 +161,14 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
     # Reads use the fast (FTS5-only, no models) engine — instant startup.
     # Writes lazily instantiate the BloomEngine so the embedding index that
     # MCP/CLI rely on stays in sync. First write pays the model-load cost.
-    from poppy.sync import remote_is_configured
-
     fast_engine = get_fast_engine(poppy_dir)
     tombstones = TombstoneStore(db_path)
-    # With a remote configured, a week-old tombstone may still be waiting to be
-    # pushed, and dropping it would leave the cloud row live for the next pull to
-    # re-ingest the forgotten memory — so only `sync`, which knows what it sent,
-    # may purge one. With no remote there is nowhere for it to travel, nothing is
-    # waiting on it, and the seven-day window applies on age alone; otherwise a
-    # user who never enables sync would keep every deletion for ever.
-    purged = tombstones.purge_expired(
-        pushed_through=None if remote_is_configured(poppy_dir) else datetime.now(timezone.utc).isoformat()
-    )
+    # Keep old deletions until every remote known to hold the memory has
+    # acknowledged them, even if its key is missing or unreadable. Dropping an
+    # unsent deletion would let the next pull bring the forgotten memory back.
+    # IDs no remote is known to hold have no pending work and age out after
+    # seven days, so Trash still clears for users who never enable sync.
+    purged = tombstones.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat(), require_sent=True)
     if purged:
         print(f"[poppy ui] purged {purged} expired tombstone(s)")
 

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Opening the local dashboard no longer discards old Trash entries whose
+  deletion is still waiting to reach the cloud when the OS keychain cannot be
+  read or the sync key has been removed. This keeps a later sync from bringing
+  forgotten memories back. Entries older than seven days still clear once every
+  cloud destination has acknowledged the deletion, or if the memory never synced.
 - `poppy serve` no longer drops the connection when an MCP client sends a
   request before the handshake. Some clients open with a discovery probe, which
   the daemon has no session for yet; that probe is now answered with a

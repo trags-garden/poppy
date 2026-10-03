@@ -351,16 +351,16 @@ class TombstoneStore:
         re-ingest. The forgotten memory comes back.
 
         ``pushed_through`` is the point up to which deletions no longer need to
-        be kept. Two callers, two ways of arriving at it:
+        be kept. Both callers pass the current time and set ``require_sent``:
 
-        * ``sync``, after push, passes the current time and sets ``require_sent``:
-          known IDs must be acknowledged by every remote that knows them.
-          Sent marks are independent of the live watermark; unknown IDs have
-          no pending work.
-        * a caller on a store with NO remote configured passes the current time.
-          There is nowhere for a deletion to travel to, so nothing is waiting on
-          it and the seven-day window applies on age alone — which is what keeps
-          Trash from growing without bound for a user who never enables sync.
+        * ``sync``, after push, purges deletions acknowledged by every remote
+          known to hold the memory, independent of the live watermark.
+        * the local dashboard, on startup, uses the same acknowledgements,
+          regardless of whether a remote key can currently be read.
+
+        IDs no remote is known to hold have no pending work, so the seven-day
+        window applies on age alone. Trash still clears for a user who never
+        enables sync.
 
         The argument is required, with no default. Passing ``None`` purges
         nothing, which is the safe answer for a caller that cannot tell which
