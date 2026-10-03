@@ -26,7 +26,7 @@ async def test_remember(server):
     result = await server.handle_remember(
         content="use Pydantic for validation",
         memory_type="preference",
-        project="trags-apps",
+        project="example-project",
         related_to=None,
     )
     assert "id" in result
