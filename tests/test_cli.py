@@ -327,11 +327,15 @@ def test_forget(tmp_path):
     assert "Forgotten" in result.output
 
 
-def test_forget_then_restore(tmp_path):
+@pytest.mark.parametrize("ttl", [None, "1d"])
+def test_forget_then_restore(tmp_path, ttl):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
     assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
-    assert runner.invoke(cli, ["remember", "restore this memory"], env=env).exit_code == 0
+    args = ["remember", "restore this memory"]
+    if ttl is not None:
+        args.extend(["--ttl", ttl])
+    assert runner.invoke(cli, args, env=env).exit_code == 0
     memories = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)
     mem_id = memories[0]["id"]
 
@@ -361,6 +365,19 @@ def test_restore_memory_not_in_trash(tmp_path, live):
     assert result.output == f"Error: Memory {mem_id} is not in Trash.\n"
 
 
+def test_forget_expired_memory(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
+    args = ["remember", "already expired", "--expires-at", "2020-01-01T00:00:00+00:00"]
+    assert runner.invoke(cli, args, env=env).exit_code == 0
+    mem_id = json.loads(runner.invoke(cli, ["list", "--json", "--include-expired"], env=env).output)[0]["id"]
+
+    forgotten = runner.invoke(cli, ["forget", mem_id, "--yes"], env=env)
+    assert forgotten.exit_code == 0, forgotten.output
+    assert forgotten.output == f"Forgotten: {mem_id}\n"
+
+
 def test_restore_expired_memory(tmp_path, monkeypatch):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
@@ -380,8 +397,12 @@ def test_restore_expired_memory(tmp_path, monkeypatch):
     monkeypatch.setattr("poppy.write_flow.datetime", FutureDatetime)
     result = runner.invoke(cli, ["restore", mem_id], env=env)
     assert result.exit_code == 1, result.output
-    assert result.output == f"Error: Memory {mem_id} expired while it was deleted.\n"
+    assert result.output == f"Error: Memory {mem_id} has passed its expiry and cannot be restored.\n"
     assert json.loads(runner.invoke(cli, ["list", "--json", "--include-expired"], env=env).output) == []
+
+    second_restore = runner.invoke(cli, ["restore", mem_id], env=env)
+    assert second_restore.exit_code == 1, second_restore.output
+    assert second_restore.output == f"Error: Memory {mem_id} has passed its expiry and cannot be restored.\n"
 
 
 def test_stats(tmp_path):

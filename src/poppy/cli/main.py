@@ -428,7 +428,8 @@ def forget(memory_id: str, yes: bool):
 
     _forget(engine, _get_poppy_dir(), memory_id)
     click.echo(f"Forgotten: {memory_id}")
-    click.echo(f"Restore within 7 days with: poppy restore {memory_id}")
+    if mem.expires_at is None or mem.expires_at > datetime.datetime.now(datetime.timezone.utc):
+        click.echo(f"Restore within 7 days with: poppy restore {memory_id}")
 
 
 @cli.command()
@@ -445,7 +446,7 @@ def restore(memory_id: str):
     if not result.found:
         raise click.ClickException(f"Memory {memory_id} is not in Trash.")
     if result.expired:
-        raise click.ClickException(f"Memory {memory_id} expired while it was deleted.")
+        raise click.ClickException(f"Memory {memory_id} has passed its expiry and cannot be restored.")
     click.echo(f"Restored: {memory_id}")
 
 
