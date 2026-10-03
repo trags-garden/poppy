@@ -3447,33 +3447,16 @@ def doctor():
     else:
         line("last capture", "OK", "no captures recorded yet")
 
-    # Capture watermark/lock state: per-session progress + any lock
-    # files. A fresh lock means a worker is in flight; one older than LOCK_TTL_S
-    # belonged to a crashed worker and will be auto-stolen on the next fire.
-    import time as _time
-
+    # Capture watermark/lock state: per-session progress + captures in flight.
+    # Lock files persist between runs; only a held one means a worker is running,
+    # and a crashed worker's lock is released by the OS, so none can go stale.
     from poppy.capture import _state as _capture_state
-    from poppy.capture.lock import LOCK_TTL_S
+    from poppy.capture.lock import is_held
 
     tracked_sessions = len(_capture_state.load(_get_poppy_dir()))
-    locks = sorted(_get_poppy_dir().glob("capture-*.lock"))
-    stale_locks = []
-    for lock_path in locks:
-        try:
-            if _time.time() - lock_path.stat().st_mtime > LOCK_TTL_S:
-                stale_locks.append(lock_path)
-        except OSError:
-            continue
-    if stale_locks:
-        line(
-            "capture state",
-            "WARN",
-            f"{tracked_sessions} session(s) tracked, {len(stale_locks)} stale lock(s)",
-            hint="stale locks are auto-stolen on the next capture; safe to delete",
-        )
-    else:
-        in_flight = f", {len(locks)} capture in flight" if locks else ""
-        line("capture state", "OK", f"{tracked_sessions} session(s) tracked{in_flight}")
+    running = sum(1 for lock_path in _get_poppy_dir().glob("capture-*.lock") if is_held(lock_path))
+    in_flight = f", {running} capture in flight" if running else ""
+    line("capture state", "OK", f"{tracked_sessions} session(s) tracked{in_flight}")
 
     if not ok:
         raise SystemExit(1)

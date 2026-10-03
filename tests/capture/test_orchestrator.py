@@ -10,7 +10,6 @@ watermark-after-success invariant in one place.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +17,7 @@ import pytest
 
 from poppy.capture import journal
 from poppy.capture.cadence import capture_count
-from poppy.capture.lock import LOCK_TTL_S, single_flight
+from poppy.capture.lock import single_flight
 from poppy.capture.orchestrator import (
     CaptureOrchestrator,
     CaptureOutcome,
@@ -110,16 +109,13 @@ def test_max_items_caps_candidates(tmp_path: Path):
     assert reconcile.calls == [3]
 
 
-def test_a_long_capture_pass_keeps_its_lock_while_it_progresses(tmp_path, monkeypatch):
-    """Slow but valid steps may add up past the lock lifetime without losing the lock.
+def test_a_long_capture_pass_keeps_its_lock_throughout(tmp_path, monkeypatch):
+    """Slow but valid steps may add up to a long pass without losing the lock.
 
-    Every step stays inside its own timeout, yet the pass as a whole runs well
-    past LOCK_TTL_S. Renewing on progress must keep a second worker out the
-    whole time.
+    Every step stays inside its own timeout, yet the pass as a whole runs for
+    minutes. A second worker must stay out the whole time.
     """
     clock = SimpleNamespace(elapsed=0.0)
-    started = time.time()
-    monkeypatch.setattr("poppy.capture.lock.time", SimpleNamespace(time=lambda: started + clock.elapsed))
     monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: "claude")
     monkeypatch.setattr("poppy.consolidation.health.record_success", lambda *args: None)
     cfg = PoppyConfig(poppy_dir=tmp_path)
@@ -170,7 +166,7 @@ def test_a_long_capture_pass_keeps_its_lock_while_it_progresses(tmp_path, monkey
         outcome = orch.run(_plan(max_items=count))
         step(5)  # bookkeeping after the last candidate
     assert outcome.stored == len(stored) == len(verdicts) == count
-    assert clock.elapsed > LOCK_TTL_S
+    assert clock.elapsed > 300
 
 
 # ---------- watermark-after-success: watermark advances only after a successful ingest ----------

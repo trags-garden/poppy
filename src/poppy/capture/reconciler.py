@@ -50,7 +50,6 @@ from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 
-from poppy.capture import lock as _lock
 from poppy.config import PoppyConfig
 from poppy.engine.interface import RetrievalEngine
 from poppy.lifecycle import supersede_memory
@@ -80,9 +79,9 @@ AUTO_SUPERSEDE_THRESHOLD = 0.85
 # Seconds a verdict gets from the backend, well under the whole-transcript
 # default. A verdict judges one memory against at most DEFAULT_TOP_K neighbours,
 # so it is a small prompt and a slow answer is not worth waiting for. A capture
-# pass renews its lock per candidate, so one candidate's verdict plus its model
-# requests must stay inside capture.lock.LOCK_TTL_S (300s); a budget covers a
-# whole call_llm rather than each backend it tries. It also keeps
+# pass runs one verdict per candidate while it holds the session's capture lock,
+# so a slow verdict delays every later capture for that session; a budget covers
+# a whole call_llm rather than each backend it tries. It also keeps
 # `remember --check-conflicts` from parking a terminal.
 CONFLICT_LLM_TIMEOUT_S = 20
 
@@ -420,9 +419,6 @@ def reconcile_and_ingest(
     """
     summary = ReconcileSummary()
     for mem in memories:
-        # Each candidate can cost several model requests (embedding, rerank,
-        # verdict, ingest); renew per candidate so a long batch keeps its lock.
-        _lock.renew()
         # Candidates arrive already secret-redacted from orchestrator.build_capture_memories
         # — redaction happens at construction, the single earliest seam, so
         # both the store and the local capture journal only ever see masked content.

@@ -157,17 +157,6 @@ def test_detect_conflicts_parses_backend_text(
     assert calls == {"host": ["host"], "remote": ["remote"], "fallback": ["host", "remote"]}[backend]
 
 
-def test_conflict_verdict_budget_fits_inside_the_capture_lock() -> None:
-    """One verdict must finish before its lock is treated as abandoned.
-
-    A capture worker renews its lock per candidate, so a single verdict has to
-    fit inside the stale-lock window or a second worker steals a live lock.
-    """
-    from poppy.capture.lock import LOCK_TTL_S
-
-    assert CONFLICT_LLM_TIMEOUT_S < LOCK_TTL_S
-
-
 def test_detect_conflicts_clamps_confidence(engine: SeedEngine, monkeypatch: pytest.MonkeyPatch) -> None:
     engine.ingest(_mk("a", "use all-MiniLM"))
 

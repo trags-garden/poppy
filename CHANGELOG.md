@@ -23,13 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Automatic memory capture no longer lets a second capture start while a long
-  but healthy one is still running: a capture keeps its lock alive as it makes
-  progress, so large batches and slow model endpoints no longer cause
-  overlapping captures. A capture that stops making progress still releases
-  the lock after five minutes. HTTP fallback calls now also stop at a total
-  deadline, and a response that arrives just as the deadline passes is no
-  longer reported as a timeout.
+- Automatic memory capture no longer lets a second capture start for the same
+  session while a long one is still running, so large batches and slow model
+  endpoints no longer cause overlapping captures. The capture lock is now held
+  by the operating system and is released as soon as a capture finishes or its
+  process exits. `poppy doctor` reports captures in flight and no longer warns
+  about stale locks. HTTP fallback calls now also stop at a total deadline, and
+  a response that arrives just as the deadline passes is no longer reported as
+  a timeout.
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
   instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a

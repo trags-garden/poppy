@@ -16,7 +16,7 @@ import pytest
 
 from poppy.capture.cadence import DEFAULT_SOFT_CAP_K, capture_count, record_capture
 from poppy.capture.journal import read_last
-from poppy.capture.lock import _lock_path
+from poppy.capture.lock import single_flight
 from poppy.capture.watermark import get_watermark
 from poppy.consolidation import consolidate_capture_event, consolidate_stop_event
 from poppy.engine.seed import SeedEngine
@@ -161,10 +161,10 @@ def test_single_flight_skips_when_lock_held(
         "poppy.consolidation.call_llm", lambda *a, **k: [{"type": "fact", "content": "must not be stored"}]
     )
     p = _transcript(tmp_path, 6)
-    # Simulate an in-flight worker by pre-holding the lock (fresh mtime → not stale).
-    _lock_path(tmp_path, "sess-3").write_text("")
-
-    n = consolidate_capture_event({"session_id": "sess-3", "transcript_path": str(p), "cwd": str(tmp_path)})
+    # Simulate an in-flight worker by holding the lock.
+    with single_flight(tmp_path, "sess-3") as held:
+        assert held is True
+        n = consolidate_capture_event({"session_id": "sess-3", "transcript_path": str(p), "cwd": str(tmp_path)})
 
     assert n == 0
     assert get_watermark(tmp_path, "sess-3") == 0

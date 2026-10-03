@@ -213,8 +213,8 @@ def test_a_slow_drip_response_stops_at_the_deadline(monkeypatch):
     """An httpx timeout is per read, so a drip inside it would never trip it.
 
     Each chunk arrives comfortably within the per-read timeout, so only a real
-    wall-clock deadline ends this. Without one the capture lock outlives its
-    TTL and another worker steals it from a running pass.
+    wall-clock deadline ends this. Without one a capture pass, and the
+    session lock it holds, could run indefinitely.
     """
 
     def respond(request):

@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from poppy.capture import journal as _journal
-from poppy.capture import lock as _lock
 from poppy.capture.cadence import record_capture as _record_capture
 from poppy.capture.reconciler import ReconcileSummary, reconcile_and_ingest
 from poppy.capture.redaction import load_custom_redaction, redact_secrets
@@ -185,7 +184,6 @@ class CaptureOrchestrator:
         """Extract → build → ingest, then advance the watermark / soft cap /
         journal — the watermark step only ever after a successful ingest."""
         extracted = self._extract(plan)
-        _lock.renew()  # progress: keep the capture lock from looking abandoned
         if not extracted:
             return CaptureOutcome(stored=0, candidates=[])
 
