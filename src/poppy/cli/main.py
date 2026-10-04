@@ -252,9 +252,11 @@ def remember(
         if picked is not None:
             click.echo(f"  auto-supersede: {picked.memory.id} (confidence {picked.confidence:.2f})")
         click.echo(f"Remembered ({memory_type}): {content[:80]}")
+        click.echo(f"  id: {result.memory.id}")
         click.echo(f"  supersedes {result.superseded_id} (tombstoned, restorable for 7 days)")
     else:
         click.echo(f"Remembered ({memory_type}): {content[:80]}")
+        click.echo(f"  id: {result.memory.id}")
 
     # Suggest hint after a normal write.
     if result.mode in ("suggest", "auto") and result.conflicts and not result.superseded_id:
@@ -312,7 +314,7 @@ def recall(
     if not results:
         # Distinguish "the query matched nothing" from "the filters excluded
         # everything" so a --since/--project/--type miss is not misread as an
-        # empty store (PR #3 review).
+        # empty store.
         if filters_active:
             click.echo("No memories match the given filters (--since/--project/--type).")
         else:
@@ -342,7 +344,7 @@ def recall(
         project_tag = f" [{r.memory.project}]" if r.memory.project else ""
         date_str = r.memory.created_at.strftime("%Y-%m-%d")
         click.echo(f"  {r.memory.content}")
-        click.echo(f"    {r.memory.memory_type}{project_tag} | {date_str} | score: {r.score:.2f}")
+        click.echo(f"    {r.memory.memory_type}{project_tag} | {date_str} | score: {r.score:.2f} | {r.memory.id}")
         click.echo()
 
 
@@ -389,7 +391,7 @@ def list_memories(
     if not memories:
         # An empty result under active filters does not mean an empty store:
         # say which it is, so a --since/--project/--type miss is not misread
-        # as "nothing stored" (PR #3 review).
+        # as "nothing stored".
         if filters_active:
             click.echo("No memories match the given filters (--since/--project/--type).")
         else:
@@ -400,7 +402,7 @@ def list_memories(
         project_tag = f" [{m.project}]" if m.project else ""
         date_str = m.created_at.strftime("%Y-%m-%d")
         click.echo(f"  {m.content}")
-        click.echo(f"    {m.memory_type}{project_tag} | {date_str}")
+        click.echo(f"    {m.memory_type}{project_tag} | {date_str} | {m.id}")
         click.echo()
 
 

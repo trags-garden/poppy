@@ -26,7 +26,7 @@ async def test_remember(server):
     result = await server.handle_remember(
         content="use Pydantic for validation",
         memory_type="preference",
-        project="trags-apps",
+        project="example-project",
         related_to=None,
     )
     assert "id" in result
@@ -357,7 +357,7 @@ async def test_handle_remember_default_off_skips_llm(fast_server, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_recall_since_filters_results(fast_server):
-    """`since` is wired into Filters (PR #3 review): old rows drop out."""
+    """`since` is wired into Filters: old rows drop out."""
     import datetime as dt
     import uuid
 
@@ -401,7 +401,7 @@ async def test_handle_recall_since_invalid_returns_error(fast_server):
 @pytest.mark.asyncio
 async def test_handle_recall_since_error_is_flag_free(fast_server):
     """The MCP-facing error names the tool parameter, never the CLI flag spelling
-    ("--since"), which means nothing to an MCP client (PR #4 review)."""
+    ("--since"), which means nothing to an MCP client."""
     result = await fast_server.handle_recall(query="anything", since="not-a-date")
     assert "--since" not in result["error"]
     assert "since" in result["error"]
