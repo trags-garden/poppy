@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks the same file. If you set it to such a folder before, re-run
   `poppy setup claude-code`; the old entry in the `.claude.json` beside that
   folder is no longer read and can be removed.
+- Memory write telemetry now reports the source only when it is a name Poppy
+  knows (such as `manual` or `claude-code`), and `other` for any unknown client
+  name. The memory itself still keeps the original source, locally and in sync.
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
   instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a
