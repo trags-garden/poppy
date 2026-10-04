@@ -1,4 +1,4 @@
-"""Regression tests for the PR #4 review findings on local-store encryption.
+"""Regression tests for local-store encryption hardening.
 
 Each test maps to a numbered finding from the adversarial review. The autouse
 conftest fixtures isolate POPPY_DIR and stub the keychain in-memory, so nothing
