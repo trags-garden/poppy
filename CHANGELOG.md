@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `poppy list` and `poppy recall` now show each memory's id at the end of its
+  metadata line, and `poppy remember` prints the new memory's id, so you can
+  pass it to `poppy edit`, `poppy forget` or `poppy remember --supersedes`
+  without `--json`. `--json` output is unchanged. Memories the Hermes
+  integration recalls into context now carry their ids too.
 - `seed` relevance scores now rise with relevance (each is one minus its old
   value), so scores shown by `poppy recall --json`, MCP recall and the dashboard
   change value on `seed`. A positive `recall_min_score` set while using `seed`
