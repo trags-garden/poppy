@@ -314,7 +314,7 @@ def recall(
     if not results:
         # Distinguish "the query matched nothing" from "the filters excluded
         # everything" so a --since/--project/--type miss is not misread as an
-        # empty store (PR #3 review).
+        # empty store.
         if filters_active:
             click.echo("No memories match the given filters (--since/--project/--type).")
         else:
@@ -391,7 +391,7 @@ def list_memories(
     if not memories:
         # An empty result under active filters does not mean an empty store:
         # say which it is, so a --since/--project/--type miss is not misread
-        # as "nothing stored" (PR #3 review).
+        # as "nothing stored".
         if filters_active:
             click.echo("No memories match the given filters (--since/--project/--type).")
         else:

@@ -475,7 +475,7 @@ def test_config_set_clear_is_clean_without_a_keychain_backend(tmp_path, monkeypa
 def _rejecting_key_writes(monkeypatch):
     """A backend that refuses to write this store's key entry and nothing else.
 
-    The PR #13 review case: reads of `trags-api-key:<store>` work and the
+    Reads of `trags-api-key:<store>` work and the
     throwaway `session-probe:*` entry works, so a probe run after the fact calls
     the session healthy. Only the write that was actually refused knows better.
     """

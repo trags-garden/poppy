@@ -2821,7 +2821,7 @@ def test_doctor_ok_for_stdio_command_entry(tmp_path):
     assert "daemon installed" not in result.output  # not a daemon client → no daemon section
 
 
-# ---------- Review fixes (PR #63) ----------
+# ---------- Regression tests ----------
 
 
 @pytest.mark.parametrize(
