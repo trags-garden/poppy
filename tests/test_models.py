@@ -10,7 +10,7 @@ def test_memory_creation():
         content="always use Pydantic validation on FastAPI endpoints",
         memory_type="preference",
         source=source,
-        project="trags-apps",
+        project="example-project",
         related_to=[],
         created_at=datetime.datetime.now(datetime.UTC),
         updated_at=datetime.datetime.now(datetime.UTC),
@@ -18,7 +18,7 @@ def test_memory_creation():
     )
     assert memory.id == "mem_001"
     assert memory.memory_type == "preference"
-    assert memory.project == "trags-apps"
+    assert memory.project == "example-project"
 
 
 def test_memory_creation_no_project():

@@ -24,11 +24,9 @@ from poppy.engine.interface import RetrievalEngine
 
 BUILTIN_NAMES = ("bloom", "seed")
 
-# Engine names from earlier releases and the dev-era vocabulary, mapped to their
-# current builtin equivalents so a config.json written by an older install keeps
-# working. `petal` was this engine's own name before 0.3.0 — same architecture,
-# same models, same model_id — so it maps silently, as do speaker_closet/best
-# (the promoted champion) and baseline (the FTS-only floor).
+# Legacy engine names map to their current built-in equivalents so config.json
+# files written by older installs keep working. They resolve silently: the bloom
+# aliases share bloom's models and vectors, and baseline was FTS-only like seed.
 LEGACY_ALIASES = {
     "petal": "bloom",
     "speaker_closet": "bloom",
@@ -36,9 +34,9 @@ LEGACY_ALIASES = {
     "baseline": "seed",
 }
 
-# Removed in 0.3.0 (the torch stack moved out of the publish repo). These map to
-# bloom too, but loudly: their vectors were written by a different bi-encoder, so
-# those rows fall back to FTS-only until `poppy migrate-engine` re-embeds them.
+# Engines removed in 0.3.0 also map to bloom, but emit a notice: their vectors
+# were written by a different bi-encoder, so those rows fall back to FTS-only
+# until `poppy migrate-engine` re-embeds them.
 RETIRED_ALIASES = {
     "sprout": "bloom",
 }

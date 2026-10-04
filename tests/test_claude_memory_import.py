@@ -25,7 +25,7 @@ def _write_memory(projects_dir: Path, slug: str, filename: str, body: str) -> Pa
 def test_parse_memory_file(tmp_path):
     path = _write_memory(
         tmp_path,
-        "-Users-haris-code-personal-trags-poppy",
+        "-home-user-project",
         "feedback_commit_push.md",
         "---\nname: Always commit and push\ndescription: Push immediately after commit\ntype: feedback\n---\n\nBody text here.\n",
     )
@@ -44,8 +44,8 @@ def test_parse_memory_file_no_frontmatter(tmp_path):
 
 
 def test_project_name_from_slug():
-    assert project_name_from_slug("-Users-haris-code-personal-trags-poppy") == "poppy"
-    assert project_name_from_slug("-Users-haris--config") == "config"
+    assert project_name_from_slug("-home-user-project") == "project"
+    assert project_name_from_slug("-home-user--config") == "config"
 
 
 def test_map_memory_type():
@@ -81,13 +81,13 @@ def test_import_claude_memories_idempotent(tmp_path):
     projects = tmp_path / "projects"
     _write_memory(
         projects,
-        "-Users-haris-code-personal-trags-poppy",
+        "-home-user-project",
         "user_role.md",
         "---\nname: Role\ndescription: senior dev\ntype: user\n---\n\nUser is a senior dev.\n",
     )
     _write_memory(
         projects,
-        "-Users-haris-code-personal-trags-poppy",
+        "-home-user-project",
         "feedback_x.md",
         "---\nname: X\ndescription: do X\ntype: feedback\n---\n\nDo X.\n",
     )
@@ -144,7 +144,7 @@ def test_cli_import_claude_memories(tmp_path):
     projects = tmp_path / "projects"
     _write_memory(
         projects,
-        "-Users-haris-code-personal-trags-poppy",
+        "-home-user-project",
         "p.md",
         "---\nname: P\ndescription: d\ntype: project\n---\n\nbody\n",
     )

@@ -47,7 +47,7 @@ and falls back to its own virtualenv if neither is there.
 poppy remember "we always use uv for python deps" --type preference
 poppy recall "python package manager"
 #   we always use uv for python deps
-#     preference | 2026-05-25 | score: 0.91
+#     preference | 2026-05-25 | score: 0.91 | mem_3f9a1c2b7d4e
 ```
 
 ## Supported clients
@@ -448,7 +448,7 @@ Poppy can emit is in this table; there are no others.
 | Event | When | Properties |
 |---|---|---|
 | `cli_install` | once, before the first event from a machine | `version` (Poppy version), `python_version`, `platform` (`darwin`, `linux`, `win32`) |
-| `memory_write` | every stored memory (`poppy remember`, the MCP `remember` tool, and automatic capture) | `memory_type` (`fact`, `decision`, `preference`, `lesson`, `summary`, `context`), `has_project` (true/false, never the project name), `source` (source app: `manual`, `claude-code`, `cursor`, ...) |
+| `memory_write` | every stored memory (`poppy remember`, the MCP `remember` tool, and automatic capture) | `memory_type` (`fact`, `decision`, `preference`, `lesson`, `summary`, `context`), `has_project` (true/false, never the project name), `source` (`manual`, `ui`, a known client such as `claude-code` or `cursor`, or `other` for any client Poppy does not know) |
 | `recall_call` | `poppy recall` | `query_length` (character count, never the query text), `result_count`, `engine` (engine name) |
 | `agent_setup` | every `poppy setup <client>` | `agent` (client name, for example `claude-code`) |
 | `setup_completed` | once per machine, on the first `poppy setup <client>` | `agent` (client name) |
