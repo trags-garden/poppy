@@ -417,7 +417,7 @@ def test_setup_claude_code_daemon_is_idempotent_and_secures_token(tmp_path, monk
     token = token_path.read_text().strip()
     assert len(token) == 64
     assert token_path.stat().st_mode & 0o777 == 0o600
-    settings = json.loads((tmp_path / ".claude.json").read_text())
+    settings = json.loads((claude_dir / ".claude.json").read_text())
     assert settings["mcpServers"]["poppy"] == {
         "type": "http",
         "url": "http://127.0.0.1:7679/mcp",
@@ -430,7 +430,8 @@ def test_setup_claude_code_daemon_is_idempotent_and_secures_token(tmp_path, monk
 def test_setup_claude_code_daemon_failure_preserves_client_config(tmp_path, monkeypatch):
     poppy_dir = tmp_path / "poppy"
     claude_dir = tmp_path / ".claude"
-    config_path = tmp_path / ".claude.json"
+    claude_dir.mkdir()
+    config_path = claude_dir / ".claude.json"
     original = '{"mcpServers": {"existing": {"command": "keep"}}}\n'
     config_path.write_text(original)
     monkeypatch.setattr(lifecycle, "install_agent", lambda _path: None)

@@ -880,7 +880,7 @@ def test_setup_refuses_malformed_hooks_before_any_changes(tmp_path, monkeypatch,
     monkeypatch.setenv("CODEX_HOME", str(client_dir))
     settings_path = client_dir / ("settings.json" if client == "claude-code" else "hooks.json")
     settings_path.write_bytes(b'{"hooks": {},\r\n')
-    mcp_path = tmp_path / ".claude.json" if client == "claude-code" else client_dir / "config.toml"
+    mcp_path = client_dir / (".claude.json" if client == "claude-code" else "config.toml")
     mcp_path.write_text(
         '{"mcpServers": {"other": {"command": "keep"}}}' if client == "claude-code" else 'model = "keep"\n'
     )
@@ -937,7 +937,7 @@ _REFUSED_CLIENT_CONFIGS = (
         (client, path, b"\xff\xfe", None)
         for client, path in (
             ("claude-code", ".claude/settings.json"),
-            ("claude-code", ".claude.json"),
+            ("claude-code", ".claude/.claude.json"),
             ("cursor", ".cursor/hooks.json"),
             ("cursor", ".cursor/mcp.json"),
             ("codex", ".codex/hooks.json"),
@@ -962,7 +962,7 @@ def test_setup_refuses_invalid_config_before_any_changes(
     mcp_path = (
         tmp_path
         / {
-            "claude-code": ".claude.json",
+            "claude-code": ".claude/.claude.json",
             "cursor": ".cursor/mcp.json",
             "codex": ".codex/config.toml",
         }[client]
