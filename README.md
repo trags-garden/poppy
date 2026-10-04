@@ -47,7 +47,7 @@ and falls back to its own virtualenv if neither is there.
 poppy remember "we always use uv for python deps" --type preference
 poppy recall "python package manager"
 #   we always use uv for python deps
-#     preference | 2026-05-25 | score: 0.91
+#     preference | 2026-05-25 | score: 0.91 | mem_3f9a1c2b7d4e
 ```
 
 ## Supported clients
@@ -248,6 +248,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy telemetry` | `status`, `on`, `off` | Show or change anonymous usage telemetry. See [Telemetry](#telemetry). |
 | `poppy encrypt` | `status`, `enable`, `disable`, `repair` | Turn on encryption at rest for the local store. See [Encryption at rest](#encryption-at-rest-optional). |
 | `poppy serve` | | Start the Poppy MCP server (stdio). |
+| `poppy daemon` | `status`, `install`, `uninstall`, `start`, `stop`, `restart`, `run` | Manage the shared MCP daemon that `poppy setup --daemon` connects clients to. See [MCP daemon](#mcp-daemon). |
 | `poppy ui` | `--host`, `--port`, `--no-open`, `--allow-remote` | Browse and manage memories in a local web UI. `--allow-remote` permits a non-loopback `--host`; the UI has no authentication, so this exposes its delete and edit API to your network. |
 | `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). |
 | `poppy setup claude-desktop` | `--print-instructions`, `--print-import-prompt` | Register the Poppy MCP server in the Claude desktop app. |
@@ -291,6 +292,39 @@ a hook command later requires approval again. Poppy never adds a trust-bypass
 flag to Codex commands.
 
 Run `poppy COMMAND --help` for full flag descriptions.
+
+### MCP daemon
+
+By default each client starts its own `poppy serve` process over stdio.
+`poppy setup <client> --daemon` instead points the client at one shared HTTP
+server at `http://127.0.0.1:7679/mcp`, so every client talks to the same
+process and the same loaded engine.
+Setup installs and starts the daemon first, then writes its URL and a bearer
+token into the client config. A plain stdio `poppy serve` also forwards to the
+daemon when one is running or installed; pass `--no-daemon` to keep it in
+process.
+
+| Subcommand | What it does |
+|---|---|
+| `poppy daemon status` | Show whether the service is installed, whether the daemon holds its lock, whether it answers over HTTP, and its version. |
+| `poppy daemon install` | Install and load a per-user service: a launchd agent on macOS, a systemd user unit on Linux. Other platforms are not supported. |
+| `poppy daemon uninstall` | Unload and remove that service. |
+| `poppy daemon start` | Start the daemon through the installed service, or as a detached background process when no service is installed. |
+| `poppy daemon stop` | Stop the daemon, through the service when one is installed. On Linux, the next client that starts `poppy serve` starts the service again; use `uninstall` to keep it off. |
+| `poppy daemon restart` | Stop a running daemon, then start it again. Run it after upgrading Poppy so clients reach the new version. |
+| `poppy daemon run` | Run the daemon in the foreground. This is what the service runs. |
+
+The daemon keeps its files in `~/.poppy`: `daemon.token` holds the bearer
+token and is readable only by you, and `daemon.lock` holds the PID of the
+daemon that last held the lock. On macOS, and when no service is installed,
+output goes to `~/.poppy/logs/daemon.log`. On Linux, the service logs to the
+journal: run `journalctl --user -u poppy-daemon.service`. If
+`poppy daemon start` reports the daemon did not become reachable, check the
+log.
+
+The installed service does not read your shell's environment, so
+`POPPY_DAEMON_PORT` and `POPPY_DIR` only apply to `poppy daemon run` and to a
+daemon started without a service.
 
 ## Storage
 
@@ -414,7 +448,7 @@ Poppy can emit is in this table; there are no others.
 | Event | When | Properties |
 |---|---|---|
 | `cli_install` | once, before the first event from a machine | `version` (Poppy version), `python_version`, `platform` (`darwin`, `linux`, `win32`) |
-| `memory_write` | every stored memory (`poppy remember`, the MCP `remember` tool, and automatic capture) | `memory_type` (`fact`, `decision`, `preference`, `lesson`, `summary`, `context`), `has_project` (true/false, never the project name), `source` (source app: `manual`, `claude-code`, `cursor`, ...) |
+| `memory_write` | every stored memory (`poppy remember`, the MCP `remember` tool, and automatic capture) | `memory_type` (`fact`, `decision`, `preference`, `lesson`, `summary`, `context`), `has_project` (true/false, never the project name), `source` (`manual`, `ui`, a known client such as `claude-code` or `cursor`, or `other` for any client Poppy does not know) |
 | `recall_call` | `poppy recall` | `query_length` (character count, never the query text), `result_count`, `engine` (engine name) |
 | `agent_setup` | every `poppy setup <client>` | `agent` (client name, for example `claude-code`) |
 | `setup_completed` | once per machine, on the first `poppy setup <client>` | `agent` (client name) |

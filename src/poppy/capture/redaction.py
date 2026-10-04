@@ -4,12 +4,11 @@ Automatic capture can embed a credential verbatim into a memory when the
 extraction LLM copies one out of the transcript ("lesson: staging DB is
 postgres://admin:hunter2@db"). Sync encryption is local-at-rest only (SQLCipher,
 deliberately not end-to-end), so such a memory would reach Trags Cloud in
-server-readable form — a launch-ending screenshot for a privacy-first product.
+server-readable form unless credentials are redacted before storage.
 
-This is a **minimal deny-list pass**, not the full scrubbing the PRD deferred: a
-handful of high-signal, low-false-positive token shapes are masked in place, and
-the memory is always kept (masking a token loses far less than dropping a whole
-lesson). It is applied once, early, at candidate construction
+This deny-list pass masks a handful of high-signal, low-false-positive token
+shapes in place and always keeps the memory (masking a token loses far less
+than dropping a whole lesson). It is applied once, early, at candidate construction
 (`capture.orchestrator.build_capture_memories`) — the single earliest seam — so a raw secret
 never becomes a Memory and every downstream consumer (the reconciler/store, sync,
 and the plaintext local capture journal preview) sees only the masked content.

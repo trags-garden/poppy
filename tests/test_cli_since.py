@@ -192,7 +192,7 @@ def test_recall_since_excludes_nothing_when_old_enough(tmp_path):
     assert "alpha old entry" in result.output
 
 
-# --- empty-state messaging (PR #3 review follow-up) ---
+# --- empty-state messaging ---
 
 
 def test_list_filtered_empty_says_filters_not_empty_store(tmp_path):

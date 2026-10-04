@@ -16,13 +16,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `poppy list` and `poppy recall` now show each memory's id at the end of its
+  metadata line, and `poppy remember` prints the new memory's id, so you can
+  pass it to `poppy edit`, `poppy forget` or `poppy remember --supersedes`
+  without `--json`. `--json` output is unchanged. Memories the Hermes
+  integration recalls into context now carry their ids too.
+- The README now documents `poppy daemon`: a command-table row and a section
+  on what the shared MCP daemon is, how `poppy setup --daemon` uses it, its
+  subcommands, and the files it keeps.
 - `seed` relevance scores now rise with relevance (each is one minus its old
   value), so scores shown by `poppy recall --json`, MCP recall and the dashboard
   change value on `seed`. A positive `recall_min_score` set while using `seed`
   should be revisited.
 
+### Removed
+
+- The `[llm]` install extra and its unused `anthropic` SDK dependency. Nothing
+  used the SDK. `pip install 'poppy-memory[llm]'` now installs plain Poppy with
+  a pip warning that the extra is not provided.
+
 ### Fixed
 
+- `poppy setup claude-code` now registers memory tools inside `CLAUDE_CONFIG_DIR`
+  when it is set, including when the folder is named `.claude`. `poppy doctor`
+  checks the same file. If you set it to such a folder before, re-run
+  `poppy setup claude-code`; the old entry in the `.claude.json` beside that
+  folder is no longer read and can be removed.
+- Memory write telemetry now reports the source only when it is a name Poppy
+  knows (such as `manual` or `claude-code`), and `other` for any unknown client
+  name. The memory itself still keeps the original source, locally and in sync.
 - Automatic memory capture no longer lets a second capture start for the same
   session while a long one is still running, so large batches and slow model
   endpoints no longer cause overlapping captures. The capture lock is now held

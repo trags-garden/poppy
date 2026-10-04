@@ -22,6 +22,7 @@ def _isolate_poppy_env(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
     monkeypatch.setenv("POPPY_DIR", str(poppy_dir))
     monkeypatch.setenv("POPPY_TELEMETRY_OFF", "1")
     monkeypatch.delenv("POPPY_TELEMETRY_HOST", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
 @pytest.fixture(autouse=True)

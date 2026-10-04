@@ -239,6 +239,30 @@ def test_remember(tmp_path):
     assert "Remembered" in result.output
 
 
+def test_remember_prints_new_memory_id(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    result = runner.invoke(cli, ["remember", "use Pydantic for validation"], env=env)
+    assert result.exit_code == 0
+    mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+    assert f"  id: {mem_id}\n" in result.output
+
+
+def test_remember_supersedes_prints_new_id(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    runner.invoke(cli, ["remember", "old fact"], env=env)
+    old_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+
+    result = runner.invoke(cli, ["remember", "replacement", "--supersedes", old_id], env=env)
+    assert result.exit_code == 0, result.output
+    listed = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)
+    new_id = next(m["id"] for m in listed if m["content"] == "replacement")
+    assert new_id != old_id
+    assert f"  id: {new_id}\n" in result.output
+    assert f"  supersedes {old_id} " in result.output
+
+
 def test_remember_with_type(tmp_path):
     runner = CliRunner()
     result = runner.invoke(
@@ -291,6 +315,21 @@ def test_recall(tmp_path):
     assert "Pydantic" in result.output
 
 
+def test_recall_text_shows_id_and_json_is_unchanged(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    runner.invoke(cli, ["remember", "always use Pydantic validation"], env=env)
+    mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
+
+    text = runner.invoke(cli, ["recall", "Pydantic"], env=env).output
+    assert re.search(rf"^    fact \| \d{{4}}-\d{{2}}-\d{{2}} \| score: -?\d+\.\d{{2}} \| {mem_id}$", text, re.M), text
+
+    rows = json.loads(runner.invoke(cli, ["recall", "Pydantic", "--json"], env=env).output)
+    assert len(rows) == 1
+    assert set(rows[0]) == {"id", "content", "type", "project", "score", "created_at"}
+    assert rows[0]["id"] == mem_id
+
+
 def test_recall_no_results(tmp_path):
     runner = CliRunner()
     result = runner.invoke(cli, ["recall", "nonexistent topic"], env={"POPPY_DIR": str(tmp_path)})
@@ -306,6 +345,22 @@ def test_list(tmp_path):
     assert result.exit_code == 0
     assert "memory one" in result.output
     assert "memory two" in result.output
+
+
+def test_list_text_shows_id_and_json_is_unchanged(tmp_path):
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+    runner.invoke(cli, ["remember", "memory one", "--project", "demo"], env=env)
+    runner.invoke(cli, ["remember", "memory two"], env=env)
+    rows = {r["content"]: r for r in json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)}
+    assert set(rows) == {"memory one", "memory two"}
+    for row in rows.values():
+        assert set(row) == {"id", "content", "type", "project", "created_at"}
+
+    text = runner.invoke(cli, ["list"], env=env).output
+    one, two = rows["memory one"], rows["memory two"]
+    assert f"    fact [demo] | {one['created_at'][:10]} | {one['id']}\n" in text
+    assert f"    fact | {two['created_at'][:10]} | {two['id']}\n" in text
 
 
 def test_forget(tmp_path):
@@ -495,25 +550,38 @@ def test_config_set_and_get(tmp_path):
     assert result.exit_code == 0
 
 
-def test_setup_claude_code(tmp_path):
+@pytest.mark.parametrize(
+    "config_dir,relative_mcp_path",
+    [
+        (None, ".claude.json"),
+        (".claude", ".claude/.claude.json"),
+        ("work/.claude", "work/.claude/.claude.json"),
+        ("claude-config", "claude-config/.claude.json"),
+    ],
+    ids=["default", "explicit-default", "relocated-dot-claude", "relocated-other-name"],
+)
+def test_setup_claude_code(tmp_path, config_dir, relative_mcp_path):
     # Create a fake claude settings directory
-    claude_dir = tmp_path / ".claude"
-    claude_dir.mkdir()
+    claude_dir = tmp_path / (config_dir or ".claude")
+    claude_dir.mkdir(parents=True)
+    env = _fresh_setup_env(tmp_path)
+    env["CLAUDE_CONFIG_DIR"] = str(claude_dir) if config_dir else None
 
     runner = CliRunner()
+    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
     result = runner.invoke(
         cli,
         ["setup", "claude-code"],
-        env={"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(claude_dir)},
+        env=env,
     )
     assert result.exit_code == 0
     assert "MCP config" in result.output
     assert "Poppy is ready" in result.output
 
-    # Verify MCP config was written to ~/.claude.json (sibling of ~/.claude/),
-    # NOT to ~/.claude/settings.json which holds hooks only.
-    mcp_config_path = claude_dir.parent / ".claude.json"
+    mcp_config_path = tmp_path / relative_mcp_path
     assert mcp_config_path.exists()
+    other_mcp_path = (claude_dir.parent if config_dir else claude_dir) / ".claude.json"
+    assert not other_mcp_path.exists()
     mcp_data = json.loads(mcp_config_path.read_text())
     assert "poppy" in mcp_data["mcpServers"]
 
@@ -540,10 +608,17 @@ def test_setup_claude_code(tmp_path):
     doctor_result = runner.invoke(
         cli,
         ["doctor"],
-        env={"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(claude_dir)},
+        env=env,
     )
     assert doctor_result.exit_code == 0
+    assert "MCP server registered: OK" in doctor_result.output
     assert "PostCompact hook" in doctor_result.output
+
+    del mcp_data["mcpServers"]["poppy"]
+    mcp_config_path.write_text(json.dumps(mcp_data))
+    doctor_result = runner.invoke(cli, ["doctor"], env=env)
+    assert doctor_result.exit_code == 0
+    assert "MCP server registered: WARN" in doctor_result.output
 
     # Verify CLAUDE.md block was written
     md_path = claude_dir / "CLAUDE.md"
@@ -2766,7 +2841,7 @@ def test_doctor_ok_for_stdio_command_entry(tmp_path):
     assert "daemon installed" not in result.output  # not a daemon client → no daemon section
 
 
-# ---------- Review fixes (PR #63) ----------
+# ---------- Regression tests ----------
 
 
 @pytest.mark.parametrize(
