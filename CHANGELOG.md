@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change value on `seed`. A positive `recall_min_score` set while using `seed`
   should be revisited.
 
+### Removed
+
+- The `[llm]` install extra and its unused `anthropic` SDK dependency. Nothing
+  used the SDK. `pip install 'poppy-memory[llm]'` now installs plain Poppy with
+  a pip warning that the extra is not provided.
+
 ### Fixed
 
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
