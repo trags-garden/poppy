@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy setup --daemon` now keeps the daemon token private in more cases.
+  New configs are written through an unpredictable temporary file, and a
+  backup slot that is a symlink is refused, so a planted symlink can no longer
+  redirect either write onto another file. A config owned by another user is
+  refused even when its mode is already 0600. On macOS, an access control list
+  that lets other users read the file is removed before the token is written,
+  and setup refuses if it cannot remove one, so "owner-only" is now true when
+  Poppy says it.
+- A backup Poppy cannot read is no longer described as holding a daemon token;
+  the warning now says it could not be checked.
+
 ## [0.3.2] - 2026-10-05
 
 ### Added

@@ -17,6 +17,7 @@ import locale
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from collections.abc import MutableMapping
@@ -387,9 +388,20 @@ def _restrict_to_owner(fd: int, path: Path) -> None:
     a failure here means nothing sensitive has been written yet and the write
     can still be abandoned. Changing a file's mode requires owning it, which
     being merely able to write it (through a group, say) does not grant.
+
+    A file another user owns is refused even when it is already 0600: that
+    user can read it, and the token opens this user's daemon.
     """
     try:
+        owner = os.fstat(fd).st_uid
+        if hasattr(os, "geteuid") and owner != os.geteuid():
+            raise CorruptConfigError(
+                f"Refusing to write the Poppy daemon token to {path}: it is owned by another user "
+                f"(uid {owner}), who could read the token. Take ownership of the file, or re-run "
+                "`poppy setup` without `--daemon`."
+            )
         os.fchmod(fd, 0o600)
+        _clear_acl(fd)
     except (AttributeError, OSError) as exc:
         reason = getattr(exc, "strerror", None) or str(exc)
         raise CorruptConfigError(
@@ -397,6 +409,40 @@ def _restrict_to_owner(fd: int, path: Path) -> None:
             f"narrowed to owner-only ({reason}), so another user on this machine could read the "
             "token. Take ownership of the file, or re-run `poppy setup` without `--daemon`."
         ) from exc
+
+
+# Absolute path, so a different `chmod` earlier on PATH is never run.
+_MACOS_CHMOD = "/bin/chmod"
+
+
+def _clear_acl(fd: int) -> None:
+    """Remove any macOS access control list from an open file.
+
+    On macOS an ACL entry (often inherited from the folder) can grant other
+    users read access that mode 0600 does not take away, so owner-only is only
+    true once the ACL is gone. The standard library cannot edit ACLs, so this
+    runs the system ``chmod -N`` on the open file itself, which keeps it on the
+    file already opened rather than whatever the name points to now. If that
+    cannot be done the error is raised, so callers refuse rather than claim
+    owner-only. Linux needs nothing here: ``chmod`` narrows a POSIX ACL's mask,
+    so mode 0600 already shuts out every other user.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        result = subprocess.run(
+            [_MACOS_CHMOD, "-N", f"/dev/fd/{fd}"],
+            pass_fds=(fd,),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"could not run {_MACOS_CHMOD} to remove its access control list: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        raise OSError(f"could not remove its access control list: {detail}")
 
 
 def _report_tightened(path: Path, *, reason: str = "it now holds the daemon token") -> None:
@@ -434,12 +480,14 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
     # Atomic write: render to a temp file in the same directory, then os.replace
     # onto the target so a crash mid-write can't leave a half-written config.
     # Same-dir tmp keeps the rename on one filesystem (os.replace requirement).
-    tmp = path.with_name(f"{path.name}.poppy-tmp-{os.getpid()}")
+    # mkstemp creates a new 0600 file under an unpredictable name and refuses
+    # an existing one, so a symlink planted beside the config cannot redirect
+    # the write onto another file.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.poppy-tmp-")
+    tmp = Path(tmp_name)
     try:
-        # Create the temp file and chmod it to the final mode BEFORE writing any
-        # content, so a bearer token is never briefly readable at the umask
-        # default (e.g. 0644) while the write is in flight.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        # Set the final mode BEFORE writing any content, so a bearer token is
+        # never readable through a wider mode or an inherited ACL mid-write.
         try:
             # Name the config rather than the temp file: the temp name is an
             # implementation detail the user cannot act on.
@@ -486,10 +534,10 @@ def _write_in_place(link: Path, content: str, *, target: Path, contains_token: b
     try:
         previous_mode = stat.S_IMODE(os.fstat(fd).st_mode)
         tighten = contains_token and previous_mode != 0o600
-        if tighten:
-            # Narrow the existing inode before any token byte reaches it. A file
-            # already at 0600 is left alone, so a config someone else owns but
-            # keeps private does not fail the write for no gain.
+        if contains_token:
+            # Narrow the existing inode before any token byte reaches it. This
+            # also runs for a file already at 0600, since another owner or an
+            # ACL can still let someone else read it.
             _restrict_to_owner(fd, resolved)
         data = content.encode(locale.getpreferredencoding(False))
         # Pad shorter content with trailing whitespace up to the old size, so
@@ -517,6 +565,8 @@ def _save_previous_content(link: Path, resolved: Path) -> None:
         fd, tmp = tempfile.mkstemp(dir=link.parent, prefix=f".{backup.name}.")
         try:
             with os.fdopen(fd, "wb") as fh:
+                if _contains_daemon_token(data.decode(errors="replace")):
+                    _clear_acl(fh.fileno())
                 fh.write(data)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -592,6 +642,7 @@ def _tighten_existing_backups(path: Path) -> None:
     slots = _rotating_backup_slots(path, CONFIG_BACKUP_SUFFIX)
     slots.append(path.with_name(path.name + PREVIOUS_CONTENT_BACKUP_SUFFIX))
     for slot in slots:
+        content = None
         try:
             if slot.is_symlink() or not slot.is_file():
                 continue
@@ -599,11 +650,25 @@ def _tighten_existing_backups(path: Path) -> None:
             # already private, and that costs one stat instead of a full read.
             if stat.S_IMODE(slot.stat().st_mode) == 0o600:
                 continue
-            if not _contains_daemon_token(slot.read_text(errors="replace")):
+            content = slot.read_text(errors="replace")
+            if not _contains_daemon_token(content):
                 continue
             slot.chmod(0o600)
+            fd = os.open(slot, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                _clear_acl(fd)
+            finally:
+                os.close(fd)
         except OSError as exc:
             reason = getattr(exc, "strerror", None) or str(exc)
+            if content is None:
+                # Never read, so whether it holds a token is unknown.
+                click.echo(
+                    f"Could not check the older backup {slot} for a daemon token ({reason}). "
+                    "If it holds one, other users on this machine may be able to read it.",
+                    err=True,
+                )
+                continue
             click.echo(
                 f"Could not narrow permissions on the older backup {slot} ({reason}). "
                 "It holds a daemon token that other users on this machine can read.",
@@ -631,16 +696,28 @@ def _backup_once(path: Path, suffix: str) -> Path | None:
     # too, so that backup stays owner-only rather than inheriting the source's
     # wider mode. Repeated setups rotate through the slots, so this is the
     # normal path once a client has been set up with the daemon before.
-    if _contains_daemon_token(data.decode(errors="replace")):
+    contains_token = _contains_daemon_token(data.decode(errors="replace"))
+    if contains_token:
         mode = 0o600
     # Open the slot (fresh or reused) and lock the fd to 0600 BEFORE writing any
     # bytes, applying the final mode only afterwards: a reused slot can still
     # carry a wider mode from an earlier rotation, and the bytes being copied
     # may be credentials, so the write itself must never happen at a mode other
-    # users can read.
-    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # users can read. O_NOFOLLOW refuses a symlink planted at the slot rather
+    # than following it onto whatever file it names.
     try:
-        _set_mode(fd, 0o600, backup)
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        if not backup.is_symlink():
+            raise
+        raise CorruptConfigError(
+            f"Refusing to back up {path}: the backup slot {backup} is a symlink. Remove it, then re-run `poppy setup`."
+        ) from exc
+    try:
+        if contains_token:
+            _restrict_to_owner(fd, backup)
+        else:
+            _set_mode(fd, 0o600, backup)
         os.write(fd, data)
         try:
             os.fchmod(fd, mode)
