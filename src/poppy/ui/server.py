@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -49,6 +49,21 @@ CSP_POLICY = (
     "frame-ancestors 'none'; "
     "object-src 'none'"
 )
+
+
+def require_json_content_type(request: Request) -> None:
+    """Reject a POST whose Content-Type is not application/json.
+
+    A cross-site page can send a form-encoded, text/plain or untyped POST to
+    localhost without a CORS preflight, so the browser would deliver it before
+    any same-origin check. application/json is not CORS-safelisted: a page on
+    another origin can only send it after a preflight this server never grants.
+    Used as a route dependency, so it runs before the handler and before the
+    request body is validated.
+    """
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
 
 
 class MemoryOut(BaseModel):
@@ -294,7 +309,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
         _autosync()
         return MemoryOut.from_memory(result.memory).model_dump()
 
-    @app.post("/api/memories/{memory_id}/supersede")
+    @app.post("/api/memories/{memory_id}/supersede", dependencies=[Depends(require_json_content_type)])
     def supersede_endpoint(memory_id: str, body: SupersedeBody) -> dict[str, Any]:
         """Tombstone the old memory and ingest a new one in its place."""
         from poppy.lifecycle import resolve_expiry, supersede_memory
@@ -363,7 +378,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             "ttl_days": TTL_DAYS,
         }
 
-    @app.post("/api/memories/{memory_id}/restore")
+    @app.post("/api/memories/{memory_id}/restore", dependencies=[Depends(require_json_content_type)])
     def restore_memory(memory_id: str) -> dict[str, Any]:
         from poppy.write_flow import restore
 

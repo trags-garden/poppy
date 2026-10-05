@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The dashboard's restore and supersede actions now refuse requests that are
+  not sent as `application/json` (HTTP 415), so a page on another site can no
+  longer trigger them from your browser without a CORS preflight. The
+  dashboard itself already sends JSON and is unaffected.
+
 ## [0.3.2] - 2026-10-05
 
 ### Added
