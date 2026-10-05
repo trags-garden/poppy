@@ -13,8 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -51,19 +51,17 @@ CSP_POLICY = (
 )
 
 
-def require_json_content_type(request: Request) -> None:
-    """Reject a POST whose Content-Type is not application/json.
+def has_json_content_type(request: Request) -> bool:
+    """Whether the request's Content-Type media type is application/json.
 
-    A cross-site page can send a form-encoded, text/plain or untyped POST to
-    localhost without a CORS preflight, so the browser would deliver it before
-    any same-origin check. application/json is not CORS-safelisted: a page on
-    another origin can only send it after a preflight this server never grants.
-    Used as a route dependency, so it runs before the handler and before the
-    request body is validated.
+    A cross-site page can send a form-encoded, multipart, text/plain or untyped
+    POST to localhost without a CORS preflight, so the browser would deliver it
+    before any same-origin check. application/json is not CORS-safelisted: a
+    page on another origin can only send it after a preflight this server never
+    grants.
     """
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    if media_type != "application/json":
-        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
+    return media_type == "application/json"
 
 
 class MemoryOut(BaseModel):
@@ -207,6 +205,17 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
 
     app = FastAPI(title="Poppy", docs_url=None, redoc_url=None, openapi_url=None)
 
+    # Refuse API POSTs that are not sent as JSON. This runs as middleware, ahead
+    # of routing and body decoding, so a malformed body cannot turn the 415 into
+    # a validation error. Registered before the Host check below, which makes
+    # it the inner of the two: a request from an untrusted Host is still
+    # rejected by that check first.
+    @app.middleware("http")
+    async def _require_json_posts(request: Request, call_next: Any) -> Any:
+        if request.method == "POST" and request.url.path.startswith("/api/") and not has_json_content_type(request):
+            return JSONResponse(status_code=415, content={"detail": "Content-Type must be application/json"})
+        return await call_next(request)
+
     # Reject non-allowlisted Host headers (DNS-rebinding defense). `["*"]` (set
     # by `poppy ui --allow-remote`) disables the check for deliberate exposure.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or LOOPBACK_HOSTS)
@@ -309,7 +318,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
         _autosync()
         return MemoryOut.from_memory(result.memory).model_dump()
 
-    @app.post("/api/memories/{memory_id}/supersede", dependencies=[Depends(require_json_content_type)])
+    @app.post("/api/memories/{memory_id}/supersede")
     def supersede_endpoint(memory_id: str, body: SupersedeBody) -> dict[str, Any]:
         """Tombstone the old memory and ingest a new one in its place."""
         from poppy.lifecycle import resolve_expiry, supersede_memory
@@ -378,7 +387,7 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
             "ttl_days": TTL_DAYS,
         }
 
-    @app.post("/api/memories/{memory_id}/restore", dependencies=[Depends(require_json_content_type)])
+    @app.post("/api/memories/{memory_id}/restore")
     def restore_memory(memory_id: str) -> dict[str, Any]:
         from poppy.write_flow import restore
 
