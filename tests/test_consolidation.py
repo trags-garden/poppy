@@ -1,6 +1,9 @@
 import json
+import select
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -212,8 +215,8 @@ def test_a_slow_drip_response_stops_at_the_deadline(monkeypatch):
     """An httpx timeout is per read, so a drip inside it would never trip it.
 
     Each chunk arrives comfortably within the per-read timeout, so only a real
-    wall-clock deadline ends this. Without one the capture lock outlives its
-    TTL and another worker steals it from a running pass.
+    wall-clock deadline ends this. Without one a capture pass, and the
+    session lock it holds, could run indefinitely.
     """
 
     def respond(request):
@@ -226,6 +229,155 @@ def test_a_slow_drip_response_stops_at_the_deadline(monkeypatch):
     elapsed = time.monotonic() - started
     assert str(excinfo.value) == "timed out reading the response"
     assert elapsed < 5, f"the deadline did not bound the read ({elapsed:.1f}s)"
+
+
+@pytest.mark.parametrize("slow_phase", ["headers", "body", "close"])
+def test_http_deadline_does_not_wait_for_an_inflight_operation(monkeypatch, slow_phase):
+    """The caller's deadline holds even while a transport operation is blocked."""
+    release = threading.Event()
+    entered = threading.Event()
+    closed = threading.Event()
+    read_timeout = []
+
+    def block():
+        entered.set()
+        assert release.wait(2)
+
+    class SlowStream(httpx.SyncByteStream):
+        def __iter__(self):
+            # Hold a pending read until the caller has timed out, independently
+            # of the mock transport's per-operation timeout behavior.
+            yield b'{"choices":'
+            if slow_phase == "body":
+                block()
+            yield b'[{"message":{"content":"[]"}}]}'
+
+        def close(self):
+            if slow_phase == "close":
+                block()
+            closed.set()
+
+    def respond(request):
+        read_timeout.append(request.extensions["timeout"]["read"])
+        if slow_phase == "headers":
+            block()
+        return httpx.Response(200, stream=SlowStream())
+
+    mock_endpoint(monkeypatch, respond)
+    budget = 0.1
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpenAICompatError, match="timed out"):
+            call_openai_compat(
+                "extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=budget
+            )
+        assert entered.is_set()
+        assert read_timeout == [budget]
+        assert not release.is_set(), "the caller must return while the operation is still blocked"
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+        assert closed.wait(2), "the expired request must close its stream when the operation returns"
+
+
+def test_slow_reads_within_socket_timeout_still_stop_at_the_deadline(monkeypatch):
+    """One call cannot spend nearly two budgets on two individually valid reads."""
+    budget = 0.2
+    closed = threading.Event()
+    reads = []
+
+    class SlowReads(httpx.SyncByteStream):
+        def __iter__(self):
+            for chunk in (b'{"choices":', b'[{"message":{"content":"[]"}}]}'):
+                started = time.monotonic()
+                time.sleep(0.14)  # each read stays inside its own 0.2s timeout
+                reads.append(time.monotonic() - started)
+                yield chunk
+
+        def close(self):
+            closed.set()
+
+    mock_endpoint(monkeypatch, lambda request: httpx.Response(200, stream=SlowReads()))
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpenAICompatError, match="timed out"):
+            call_openai_compat(
+                "extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=budget
+            )
+        assert time.monotonic() - started < 1
+    finally:
+        assert closed.wait(2)
+    assert len(reads) == 2 and all(read < budget for read in reads)
+
+
+def test_a_timed_out_request_closes_its_connection_and_thread():
+    """An endpoint sending endless 1xx responses cannot keep a request alive."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    closed_at = []
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            while True:
+                if select.select([conn], [], [], 0.05)[0]:
+                    try:
+                        if conn.recv(65536):
+                            continue  # the request itself
+                    except OSError:
+                        pass
+                    break
+                try:
+                    conn.sendall(b"HTTP/1.1 103 Early Hints\r\n\r\n")
+                except OSError:
+                    break
+        closed_at.append(time.monotonic())
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    before = set(threading.enumerate())
+    try:
+        with pytest.raises(OpenAICompatError, match="timed out reading the response"):
+            call_openai_compat(
+                "extract", model="m", base_url=f"http://127.0.0.1:{port}/v1", api_key="test-key", timeout_s=0.3
+            )
+        deadline = time.monotonic()
+        server.join(2)
+        assert closed_at and closed_at[0] - deadline < 1
+        for worker in set(threading.enumerate()) - before:
+            worker.join(2)
+            assert not worker.is_alive()
+    finally:
+        listener.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome"),
+    [(200, None), (401, "HTTP 401: authentication failed"), (429, "HTTP 429: rate limit exceeded")],
+)
+def test_a_finished_request_is_not_reported_as_a_timeout(monkeypatch, status, outcome):
+    """A request that completed before the caller looked keeps its own outcome."""
+    clock = SimpleNamespace(now=0.0)
+
+    class LateJoin(threading.Thread):
+        def join(self, timeout=None):
+            super().join()
+            clock.now += 1_000  # the caller wakes after the deadline
+
+    monkeypatch.setattr("poppy.consolidation.time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr("poppy.consolidation.threading", SimpleNamespace(Thread=LateJoin))
+    body = {"choices": [{"message": {"content": "answer"}}]}
+    mock_endpoint(monkeypatch, lambda request: httpx.Response(status, json=body))
+
+    def call():
+        return call_openai_compat("extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=5)
+
+    if outcome is None:
+        assert call() == "answer"
+    else:
+        with pytest.raises(OpenAICompatError) as exc_info:
+            call()
+        assert str(exc_info.value) == outcome
 
 
 def test_an_unbounded_response_body_stops_at_the_size_cap(monkeypatch):

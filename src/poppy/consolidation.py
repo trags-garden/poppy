@@ -24,10 +24,13 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -323,8 +326,8 @@ def _read_bounded(resp: httpx.Response, *, deadline: float) -> bytes:
 
     An httpx timeout applies per socket operation, so a server that sends one
     byte just inside it holds the connection open for as long as it likes. A
-    capture pass runs while a lock another worker will steal on a fixed TTL, so
-    the read needs a real deadline and a bound on how much it will hold.
+    capture pass holds its session's lock while it waits, so the read needs a
+    real deadline and a bound on how much it will hold.
     """
     chunks: list[bytes] = []
     total = 0
@@ -360,11 +363,82 @@ def call_openai_compat(
     max_tokens: int = 800,
     timeout_s: float = HOST_CLI_TIMEOUT_S,
 ) -> str:
-    """Request a chat completion, raising a specific, credential-free failure."""
+    """Request a completion within a total, credential-free wall-clock budget.
+
+    Socket timeouts only bound individual operations, including reads of the
+    response headers. Wait for the entire request in a daemon thread so even an
+    operation starting just before the deadline cannot extend the caller's
+    budget. The worker never touches capture state or health; a late result is
+    discarded. At the deadline every connection the worker opened is shut down,
+    which wakes a read blocked in the kernel (closing the client from this
+    thread would not), so the worker and its socket do not outlive the call.
+    """
     deadline = time.monotonic() + timeout_s
     url, loopback = _endpoint(base_url)
+    result: Future[str] = Future()
+    streams: list = []
+    expired: list[bool] = []
+
+    def trace(event: str, info: dict) -> None:
+        if not event.endswith(("connect_tcp.complete", "start_tls.complete")):
+            return
+        streams.append(info["return_value"])
+        if expired:  # connected after the caller gave up
+            _shut_down(info["return_value"])
+
+    def request() -> None:
+        try:
+            result.set_result(
+                _request_openai_compat(
+                    prompt,
+                    url=url,
+                    loopback=loopback,
+                    model=model,
+                    api_key=api_key,
+                    max_tokens=max_tokens,
+                    timeout_s=timeout_s,
+                    deadline=deadline,
+                    trace=trace,
+                )
+            )
+        except BaseException as exc:
+            result.set_exception(exc)
+
+    worker = threading.Thread(target=request, daemon=True)
+    worker.start()
+    worker.join(timeout=max(0.0, deadline - time.monotonic()))
+    if not result.done():
+        expired.append(True)
+        for stream in list(streams):
+            _shut_down(stream)
+        raise OpenAICompatError("timed out reading the response")
+    return result.result()
+
+
+def _shut_down(stream) -> None:
+    """Shut down a request's socket so a read blocked on it returns at once."""
+    try:
+        stream.get_extra_info("socket").shutdown(socket.SHUT_RDWR)
+    except (AttributeError, OSError):
+        pass  # already closed, or replaced by its TLS wrapper
+
+
+def _request_openai_compat(
+    prompt: str,
+    *,
+    url: str,
+    loopback: bool,
+    model: str,
+    api_key: str,
+    max_tokens: int,
+    timeout_s: float,
+    deadline: float,
+    trace: Callable[[str, dict], None],
+) -> str:
     try:
         with _http_client(timeout_s=timeout_s, trust_env=not loopback) as client:
+            if time.monotonic() >= deadline:
+                raise OpenAICompatError("timed out reading the response")
             with client.stream(
                 "POST",
                 url,
@@ -375,7 +449,10 @@ def call_openai_compat(
                     "temperature": 0.2,
                     "max_tokens": max_tokens,
                 },
+                extensions={"trace": trace},
             ) as resp:
+                if time.monotonic() >= deadline:
+                    raise OpenAICompatError("timed out reading the response")
                 resp.raise_for_status()
                 body = _read_bounded(resp, deadline=deadline)
     except httpx.HTTPStatusError as exc:
@@ -495,7 +572,7 @@ def call_llm(
     capture pass runs one extraction plus a verdict per candidate while holding
     the per-session lock, and that budget is sized on one timeout per call; a
     fallback free to spend a second full timeout after a slow host CLI would
-    let the lock go stale under a worker that is still running.
+    hold up every later capture for the session that much longer.
     """
     deadline = time.monotonic() + host_timeout_s
     cli = detect_host_cli(transcript_path)

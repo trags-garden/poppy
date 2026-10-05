@@ -157,21 +157,6 @@ def test_detect_conflicts_parses_backend_text(
     assert calls == {"host": ["host"], "remote": ["remote"], "fallback": ["host", "remote"]}[backend]
 
 
-def test_conflict_verdict_budget_fits_inside_the_capture_lock() -> None:
-    """A whole capture batch must finish before its lock is treated as abandoned.
-
-    A capture worker holds the per-session lock across one extraction plus a
-    verdict for every candidate it extracted. If that can outlast the stale-lock
-    window, a second worker steals the lock from a live one and both read the
-    same turns.
-    """
-    from poppy.capture.lock import LOCK_TTL_S
-    from poppy.consolidation import HOST_CLI_TIMEOUT_S
-
-    default_batch = 5  # resolved_consolidate_settings().max_items
-    assert HOST_CLI_TIMEOUT_S + default_batch * CONFLICT_LLM_TIMEOUT_S < LOCK_TTL_S
-
-
 def test_detect_conflicts_clamps_confidence(engine: SeedEngine, monkeypatch: pytest.MonkeyPatch) -> None:
     engine.ingest(_mk("a", "use all-MiniLM"))
 

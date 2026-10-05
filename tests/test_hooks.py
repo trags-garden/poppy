@@ -1649,7 +1649,7 @@ def test_cursor_precompact_routes_to_transcript_backstop(tmp_path, monkeypatch):
 
 
 def test_cursor_precompact_skips_extraction_when_session_lock_is_held(tmp_path, monkeypatch):
-    from poppy.capture.lock import _lock_path
+    from poppy.capture.lock import single_flight
     from poppy.capture.watermark import get_watermark
 
     monkeypatch.setenv("POPPY_DIR", str(tmp_path))
@@ -1659,7 +1659,6 @@ def test_cursor_precompact_skips_extraction_when_session_lock_is_held(tmp_path, 
         "poppy.consolidation.call_llm",
         lambda *args, **kwargs: calls.append((args, kwargs)) or [{"type": "fact", "content": "duplicate"}],
     )
-    _lock_path(tmp_path, "cursor-compact-locked").write_text("")
     payload = json.dumps(
         {
             "session_id": "cursor-compact-locked",
@@ -1670,7 +1669,9 @@ def test_cursor_precompact_skips_extraction_when_session_lock_is_held(tmp_path, 
         }
     )
 
-    result = CliRunner().invoke(hook, ["_post-compact-worker"], input=payload)
+    with single_flight(tmp_path, "cursor-compact-locked") as held:
+        assert held is True
+        result = CliRunner().invoke(hook, ["_post-compact-worker"], input=payload)
 
     assert result.exit_code == 0
     assert calls == []
