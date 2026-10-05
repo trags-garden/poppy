@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The Hermes plugin no longer runs `poppy consolidate` when a session ends or
+  before Hermes compresses context. Poppy has no `consolidate` command, so the
+  call always failed silently and never stored anything. Rerun
+  `poppy setup hermes-agent` to update an installed plugin. Memories still
+  reach Poppy through the plugin's tools and mirrored `MEMORY.md` / `USER.md`
+  writes.
+
 ## [0.3.2] - 2026-10-05
 
 ### Added

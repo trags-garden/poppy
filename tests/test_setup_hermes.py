@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import ast
+import importlib.util
+import json
 import subprocess
 import sys
+import types
 from importlib import resources
 from pathlib import Path
 
 import pytest
 
+from poppy.cli.main import cli
 from poppy.setup.hermes import (
     HERMES_PLUGIN_NAME,
     HERMES_SOUL_BODY,
@@ -271,3 +276,113 @@ def test_plugin_init_references_memory_provider_abc(tmp_path: Path) -> None:
     # Sanity: tool schemas the agent will see
     for tool in ("poppy_recall", "poppy_remember", "poppy_forget", "poppy_status"):
         assert tool in init_src
+
+
+# ---------------------------------------------------------------------------
+# Plugin behaviour: load the installed file against stub Hermes modules
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Import the installed plugin with Hermes' two imports stubbed and the
+    poppy subprocess replaced by a recorder. Yields (module, calls)."""
+
+    class MemoryProvider:
+        pass
+
+    def tool_error(message: str) -> str:
+        return json.dumps({"error": message})
+
+    agent = types.ModuleType("agent")
+    memory_provider = types.ModuleType("agent.memory_provider")
+    memory_provider.MemoryProvider = MemoryProvider
+    tools = types.ModuleType("tools")
+    registry = types.ModuleType("tools.registry")
+    registry.tool_error = tool_error
+    for name, module in {
+        "agent": agent,
+        "agent.memory_provider": memory_provider,
+        "tools": tools,
+        "tools.registry": registry,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    install_for_hermes(hermes_home=tmp_path)
+    init_path = tmp_path / "plugins" / "poppy" / "__init__.py"
+    spec = importlib.util.spec_from_file_location("hermes_poppy_plugin", init_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    calls: list[list[str]] = []
+
+    def fake_run_poppy(args, timeout=0):
+        calls.append(list(args))
+        return {"success": True, "output": "ok"}
+
+    monkeypatch.setattr(module, "_run_poppy", fake_run_poppy)
+    return module, calls
+
+
+def test_plugin_recall_tool_runs_poppy_recall(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    provider.handle_tool_call("poppy_recall", {"query": "auth flow", "project": "web", "limit": 3})
+    assert calls == [["recall", "auth flow", "--json", "--project", "web", "--limit", "3"]]
+
+
+def test_plugin_remember_tool_runs_poppy_remember(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    result = provider.handle_tool_call(
+        "poppy_remember", {"content": "use uv", "memory_type": "decision", "project": "web"}
+    )
+    assert calls == [["remember", "use uv", "--type", "decision", "--project", "web"]]
+    assert json.loads(result) == {"result": "ok"}
+
+
+def test_plugin_forget_tool_runs_poppy_forget(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    provider.handle_tool_call("poppy_forget", {"memory_id": "abc123"})
+    assert calls == [["forget", "abc123", "--yes"]]
+
+
+def test_plugin_unknown_tool_returns_error_without_running_poppy(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    result = provider.handle_tool_call("poppy_nope", {})
+    assert json.loads(result) == {"error": "Unknown tool: poppy_nope"}
+    assert calls == []
+
+
+def _plugin_subcommands(source: str) -> list[str]:
+    """The first argument of every ``_run_poppy`` call in the plugin: either an
+    inline list or a local variable assigned a list in the same function."""
+    subcommands = []
+    for func in ast.walk(ast.parse(source)):
+        if not isinstance(func, ast.FunctionDef):
+            continue
+        lists = {
+            node.targets[0].id: node.value
+            for node in ast.walk(func)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.List)
+        }
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_run_poppy":
+                argv = node.args[0]
+                if isinstance(argv, ast.Name):
+                    argv = lists[argv.id]
+                assert isinstance(argv, ast.List), ast.unparse(node)
+                subcommands.append(ast.literal_eval(argv.elts[0]))
+    return subcommands
+
+
+def test_plugin_only_runs_registered_poppy_subcommands(tmp_path: Path) -> None:
+    install_for_hermes(hermes_home=tmp_path)
+    source = (tmp_path / "plugins" / "poppy" / "__init__.py").read_text()
+    subcommands = _plugin_subcommands(source)
+    assert {"recall", "remember", "forget", "stats"} <= set(subcommands)
+    assert set(subcommands) <= set(cli.commands)

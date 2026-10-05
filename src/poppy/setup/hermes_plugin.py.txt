@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 _RECALL_TIMEOUT = 10
 _REMEMBER_TIMEOUT = 30
-_CONSOLIDATE_TIMEOUT = 180
 
 _MIN_QUERY_LEN = 8
 _MIN_OUTPUT_LEN = 20
@@ -218,40 +217,7 @@ class PoppyMemoryProvider(MemoryProvider):
         """No-op: prefetch runs synchronously at turn start."""
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Turn-level sync is a no-op for Poppy — consolidation happens at session end."""
-
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Run poppy consolidate over the session transcript."""
-        if not messages:
-            return
-
-        def _consolidate():
-            try:
-                parts = []
-                for msg in messages[-50:]:
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if isinstance(content, str) and content.strip() and role in ("user", "assistant"):
-                        parts.append(f"{role}: {content[:1500]}")
-                if not parts:
-                    return
-                transcript = "\n\n".join(parts)
-                _run_poppy(
-                    ["consolidate", "--source", "hermes-agent", "--text", transcript[:50000]],
-                    timeout=_CONSOLIDATE_TIMEOUT,
-                )
-            except Exception as e:
-                logger.debug("Poppy consolidation failed: %s", e)
-
-        t = threading.Thread(target=_consolidate, daemon=True, name="poppy-consolidate")
-        t.start()
-
-    def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        """Extract insights before context compression discards turns."""
-        if not messages:
-            return ""
-        self.on_session_end(messages)
-        return ""
+        """No-op: Poppy stores memories through its tools and mirrored memory writes."""
 
     def on_memory_write(self, action: str, target: str, content: str, metadata=None) -> None:
         """Mirror hermes' built-in MEMORY.md / USER.md writes into Poppy."""

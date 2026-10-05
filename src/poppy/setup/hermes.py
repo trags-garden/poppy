@@ -114,8 +114,7 @@ hermes config set memory.provider poppy
 | `poppy_status` | Engine info + memory count |
 
 Hermes' built-in `MEMORY.md` / `USER.md` writes are mirrored into Poppy via
-the `on_memory_write` hook. Session-end transcripts trigger
-`poppy consolidate` for automatic fact extraction.
+the `on_memory_write` hook.
 """
 
 
