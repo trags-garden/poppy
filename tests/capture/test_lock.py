@@ -5,6 +5,8 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -159,3 +161,31 @@ def test_a_lock_held_past_the_retry_window_still_skips(tmp_path: Path, monkeypat
         assert acquired is False
     os.close(fd)
     assert slept and sum(slept) <= CONTENDED_RETRY_S + 1e-9
+
+
+def test_a_doctor_check_never_touches_the_capture_lock(tmp_path: Path, monkeypatch) -> None:
+    real_flock = fcntl.flock
+    probes = []
+
+    def recording_flock(fd, op):
+        probes.append(op)
+        return real_flock(fd, op)
+
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is True
+        monkeypatch.setattr(fcntl, "flock", recording_flock)
+        assert is_held(_lock_path(tmp_path, "s1"))
+        assert probes == []
+        monkeypatch.setattr(fcntl, "flock", real_flock)
+    monkeypatch.setattr(fcntl, "flock", recording_flock)
+    assert not is_held(_lock_path(tmp_path, "s1"))
+    assert probes == []
+
+
+def test_a_dead_holders_pid_is_not_a_capture_in_flight(tmp_path: Path) -> None:
+    gone = subprocess.Popen([sys.executable, "-c", ""])
+    gone.wait()
+    tmp_path.joinpath(_lock_path(tmp_path, "s1").name).write_text(f"{gone.pid}\n")
+    assert not is_held(_lock_path(tmp_path, "s1"))
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is True

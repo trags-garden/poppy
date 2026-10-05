@@ -12,7 +12,8 @@ Poppy directory, held for the whole run. The kernel releases it when the holder
 exits, so a crashed worker can never wedge capture, and a live worker can never
 lose it mid-run however long it takes. The file itself is never deleted:
 unlinking a locked file would let a second worker create and lock a fresh one
-alongside it.
+alongside it. The holder writes its pid into the file while it runs, so
+``poppy doctor`` can see a capture in flight without touching the lock.
 
 Older versions used a ``.lock`` file created exclusively and deleted on release,
 treated as abandoned after ``LEGACY_LOCK_TTL_S``. A worker started by an older
@@ -44,8 +45,9 @@ LEGACY_LOCK_TTL_S = 300
 
 _OPEN_FLAGS = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
 
-# ``is_held`` briefly takes the lock to test it, so a contended lock is retried
-# for this long (seconds, in steps) before another worker is taken to hold it.
+# ``poppy doctor`` from an older version briefly takes the lock to test it, so
+# a contended lock is retried for this long (seconds, in steps) before another
+# worker is taken to hold it.
 CONTENDED_RETRY_S = 0.1
 _CONTENDED_STEPS = 4
 
@@ -82,18 +84,42 @@ def _try_lock(fd: int) -> bool | None:
     return True
 
 
-def is_held(path: Path) -> bool:
-    """Whether a live worker currently holds the ``.flock`` file at ``path``."""
-    if fcntl is None:
-        return False
+def _write_pid(fd: int, pid: int | None) -> None:
+    """Record the holder's pid in the lock file, or clear it."""
     try:
-        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        os.ftruncate(fd, 0)
+        if pid is not None:
+            os.pwrite(fd, f"{pid}\n".encode(), 0)
+    except OSError:
+        pass  # only ``is_held`` reads it
+
+
+def is_held(path: Path) -> bool:
+    """Whether a live worker currently holds the ``.flock`` file at ``path``.
+
+    Reads the holder's pid instead of probing the lock, so a check can never
+    make a capture skip. A pid reused since a crash can show a capture in flight
+    that is not; the answer is informational only.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         return False
     try:
-        return _try_lock(fd) is False
+        pid = int(os.read(fd, 32).strip() or 0)
+    except (OSError, ValueError):
+        return False
     finally:
-        os.close(fd)  # closing drops a probe lock we may have taken
+        os.close(fd)
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True  # alive, owned by another user
+    except OSError:
+        return False
+    return True
 
 
 @contextmanager
@@ -102,9 +128,9 @@ def single_flight(poppy_dir: Path, session_id: str) -> Iterator[bool]:
 
     Yields ``True`` if the lock was acquired (caller should do the capture) or
     ``False`` if another worker still holds it after ``CONTENDED_RETRY_S``
-    (caller should skip). Always releases a lock it acquired, even on error. Where locking is unavailable (Windows, or a
-    filesystem that refuses locks) it acquires without exclusion rather than
-    skipping every capture.
+    (caller should skip). Always releases a lock it acquired, even on error.
+    Where locking is unavailable (Windows, or a filesystem that refuses locks)
+    it acquires without exclusion rather than skipping every capture.
     """
     ensure_poppy_dir(poppy_dir)
     if _legacy_held(poppy_dir, session_id):
@@ -127,10 +153,13 @@ def single_flight(poppy_dir: Path, session_id: str) -> Iterator[bool]:
             acquired = _try_lock(fd)
         if acquired is None:
             sys.stderr.write("poppy capture: file locking unavailable here; capturing without the session lock\n")
+        if acquired:
+            _write_pid(fd, os.getpid())
         try:
             yield acquired is not False
         finally:
             if acquired:
+                _write_pid(fd, None)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:
