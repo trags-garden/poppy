@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy build mcpb` now reports that it requires a source checkout and points
+  installed users to `poppy setup claude-desktop`, before suggesting npm tooling.
+- Claude Desktop bundles no longer install development dependencies on startup.
+- Claude Desktop bundles now exclude cached Python bytecode from the server shim.
+
 ## [0.3.2] - 2026-10-05
 
 ### Added

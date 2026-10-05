@@ -37,7 +37,11 @@ def _copy_mcpb_inputs(repo_root: Path, stage: Path) -> None:
     mcpb_src = repo_root / "mcpb"
     shutil.copy2(mcpb_src / "manifest.json", stage / "manifest.json")
     shutil.copy2(mcpb_src / "icon.png", stage / "icon.png")
-    shutil.copytree(mcpb_src / "server", stage / "server")
+    shutil.copytree(
+        mcpb_src / "server",
+        stage / "server",
+        ignore=shutil.ignore_patterns(*SRC_IGNORES),
+    )
 
 
 def _read_version(repo_root: Path) -> str:

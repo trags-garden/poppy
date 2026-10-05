@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from click.testing import CliRunner
 
 from poppy import build_mcpb as build_mcpb_mod
 
@@ -39,6 +41,60 @@ def test_build_mcpb_raises_when_cli_missing(tmp_path: Path) -> None:
     with mock.patch("poppy.build_mcpb.shutil.which", return_value=None):
         with pytest.raises(RuntimeError, match="`mcpb` CLI not found"):
             build_mcpb_mod.build_mcpb(repo_root=REPO_ROOT, output_dir=tmp_path)
+
+
+@pytest.mark.parametrize("present_file", [None, "pyproject.toml", "mcpb/manifest.json"])
+@pytest.mark.parametrize("mcpb_cli", [None, "/fake/bin/mcpb"])
+def test_build_mcpb_cmd_requires_source_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, present_file: str | None, mcpb_cli: str | None
+) -> None:
+    cli_mod = importlib.import_module("poppy.cli.main")
+    if present_file is not None:
+        path = tmp_path / present_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+    monkeypatch.setattr(cli_mod, "__file__", str(tmp_path / "src" / "poppy" / "cli" / "main.py"))
+
+    with mock.patch("poppy.build_mcpb.shutil.which", return_value=mcpb_cli) as which:
+        result = CliRunner().invoke(cli_mod.cli, ["build", "mcpb", "--output-dir", str(tmp_path / "dist")])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert result.output.splitlines() == [
+        "Error: poppy build mcpb only works from a source checkout. Use `poppy setup claude-desktop` instead."
+    ]
+    assert "Traceback" not in result.output
+    assert "npm" not in result.output
+    which.assert_not_called()
+
+
+def test_mcpb_manifest_runs_without_dev_dependencies() -> None:
+    manifest = json.loads((REPO_ROOT / "mcpb" / "manifest.json").read_text())
+    assert manifest["server"]["mcp_config"]["args"] == [
+        "--directory",
+        "${__dirname}",
+        "run",
+        "--no-dev",
+        "python",
+        "server/main.py",
+    ]
+
+
+def test_copy_mcpb_inputs_excludes_pycache(tmp_path: Path) -> None:
+    fake_repo = tmp_path / "repo"
+    mcpb_dir = fake_repo / "mcpb"
+    (mcpb_dir / "server" / "__pycache__").mkdir(parents=True)
+    (mcpb_dir / "server" / "__pycache__" / "x.pyc").write_bytes(b"stale bytecode")
+    (mcpb_dir / "server" / "main.py").write_text("print('hello')\n")
+    (mcpb_dir / "manifest.json").write_text("{}")
+    (mcpb_dir / "icon.png").write_bytes(b"icon")
+    stage = tmp_path / "stage"
+    stage.mkdir()
+
+    build_mcpb_mod._copy_mcpb_inputs(fake_repo, stage)
+
+    assert (stage / "server" / "main.py").read_text() == "print('hello')\n"
+    assert not list(stage.rglob("__pycache__"))
 
 
 @pytest.mark.skipif(shutil.which("mcpb") is None, reason="`mcpb` CLI not installed")

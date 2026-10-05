@@ -23,6 +23,7 @@
         "--directory",
         "${__dirname}",
         "run",
+        "--no-dev",
         "python",
         "server/main.py"
       ],
