@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -253,6 +254,12 @@ def test_plugin_init_is_valid_python(tmp_path: Path) -> None:
     install_for_hermes(hermes_home=tmp_path)
     init_src = (tmp_path / "plugins" / "poppy" / "__init__.py").read_text()
     ast.parse(init_src)  # raises SyntaxError on failure
+
+
+def test_plugin_init_is_the_packaged_file_byte_for_byte(tmp_path: Path) -> None:
+    install_for_hermes(hermes_home=tmp_path)
+    packaged = resources.files("poppy.setup").joinpath("hermes_plugin.py.txt").read_bytes()
+    assert (tmp_path / "plugins" / "poppy" / "__init__.py").read_bytes() == packaged
 
 
 def test_plugin_init_references_memory_provider_abc(tmp_path: Path) -> None:
