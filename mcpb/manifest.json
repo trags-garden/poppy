@@ -7,7 +7,7 @@
   "description": "Developer memory CLI. Remember what matters across sessions.",
   "long_description": "Poppy is a local developer memory store. Agents call remember/recall via MCP to retrieve non-obvious decisions, preferences, and lessons across coding sessions. Storage lives at ~/.poppy/. The first run downloads ~160MB of ONNX model weights for hybrid retrieval.",
   "author": {
-    "name": "Haris Pasic",
+    "name": "Trags",
     "email": "feedback@trags.ai",
     "url": "https://trags.ai/poppy"
   },

@@ -68,8 +68,24 @@ def test_build_mcpb_cmd_requires_source_checkout(
     which.assert_not_called()
 
 
+def test_build_mcpb_cmd_accepts_source_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The checkout guard must let this repository through to the build."""
+    cli_mod = importlib.import_module("poppy.cli.main")
+    monkeypatch.setattr(cli_mod, "__file__", str(REPO_ROOT / "src" / "poppy" / "cli" / "main.py"))
+    bundle = tmp_path / "poppy.mcpb"
+    bundle.write_bytes(b"x" * 2048)
+
+    with mock.patch("poppy.build_mcpb.build_mcpb", return_value=bundle) as build:
+        result = CliRunner().invoke(cli_mod.cli, ["build", "mcpb", "--output-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert f"  built: {bundle}" in result.output.splitlines()
+    build.assert_called_once_with(repo_root=REPO_ROOT, output_dir=tmp_path)
+
+
 def test_mcpb_manifest_runs_without_dev_dependencies() -> None:
     manifest = json.loads((REPO_ROOT / "mcpb" / "manifest.json").read_text())
+    assert manifest["author"]["name"] == "Trags"
     assert manifest["server"]["mcp_config"]["args"] == [
         "--directory",
         "${__dirname}",
