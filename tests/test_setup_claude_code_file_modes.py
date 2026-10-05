@@ -627,19 +627,23 @@ def test_token_bearing_files_are_created_outside_the_config_folder(tmp_path, mon
     if symlink:
         path.symlink_to(target)
     published = []
-    original_replace = os.replace
 
-    def check_replace(src, dst):
-        src = Path(src)
-        if b"-token" in src.read_bytes():
-            assert src.parent != Path(dst).parent, f"{src} was made in the folder it is published to"
-            assert src.parent.parent == Path(dst).parent
-            assert stat.S_IMODE(src.parent.stat().st_mode) & 0o077 == 0
-            assert stat.S_IMODE(src.stat().st_mode) == 0o600
-            published.append(Path(dst).name)
-        return original_replace(src, dst)
+    def checked(publish):
+        def check_publish(src, dst):
+            src = Path(src)
+            if b"-token" in src.read_bytes():
+                assert src.parent != Path(dst).parent, f"{src} was made in the folder it is published to"
+                assert src.parent.parent == Path(dst).parent
+                assert stat.S_IMODE(src.parent.stat().st_mode) & 0o077 == 0
+                assert stat.S_IMODE(src.stat().st_mode) == 0o600
+                published.append(Path(dst).name)
+            return publish(src, dst)
 
-    monkeypatch.setattr(claude_code_module.os, "replace", check_replace)
+        return check_publish
+
+    # A free name is published with a hard link, a reused one with a rename.
+    monkeypatch.setattr(claude_code_module.os, "replace", checked(os.replace))
+    monkeypatch.setattr(claude_code_module.os, "link", checked(os.link))
     for token in ("first-token", "second-token"):
         claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token=token)
 
@@ -828,17 +832,133 @@ def test_token_file_never_carries_the_folder_acl_while_being_written(tmp_path, m
         check=True,
     )
     seen = []
-    original_replace = os.replace
 
-    def check_replace(src, dst):
-        if b"test-token" in Path(src).read_bytes():
-            seen.append((_acl_entries(Path(src)), _acl_entries(Path(src).parent)))
-        return original_replace(src, dst)
+    def checked(publish):
+        def check_publish(src, dst):
+            if b"test-token" in Path(src).read_bytes():
+                seen.append((_acl_entries(Path(src)), _acl_entries(Path(src).parent)))
+            return publish(src, dst)
 
-    monkeypatch.setattr(claude_code_module.os, "replace", check_replace)
+        return check_publish
+
+    monkeypatch.setattr(claude_code_module.os, "replace", checked(os.replace))
+    monkeypatch.setattr(claude_code_module.os, "link", checked(os.link))
     claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
 
     assert seen == [([], [])]
     assert _acl_entries(path) == []
     assert claude_code_module._has_acl(path.parent) is True
     assert claude_code_module._has_acl(path) is False
+
+
+def _plant_symlink_when_published(monkeypatch, dest: Path, victim: Path) -> None:
+    """Swap a symlink in at ``dest`` in the moment after setup checked it, just before it is published."""
+
+    def racing(publish):
+        def plant_then_publish(src, dst):
+            if Path(dst) == dest and not dest.is_symlink():
+                dest.unlink(missing_ok=True)
+                dest.symlink_to(victim)
+            return publish(src, dst)
+
+        return plant_then_publish
+
+    monkeypatch.setattr(claude_code_module.os, "replace", racing(os.replace))
+    monkeypatch.setattr(claude_code_module.os, "link", racing(os.link))
+
+
+@pytest.mark.parametrize("token", [True, False], ids=["token", "token-free"])
+def test_backup_refuses_a_symlink_raced_in_at_a_free_slot(tmp_path, monkeypatch, token):
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token") if token else "{}")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    slot = source.with_name(source.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    _plant_symlink_when_published(monkeypatch, slot, victim)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="appeared there"):
+        claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    # The link Poppy did not create is still there, and nothing was left behind.
+    assert slot.is_symlink()
+    assert victim.read_text() == "unrelated content"
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([source.name, slot.name, victim.name])
+
+
+def test_reused_slot_replaces_a_raced_symlink_without_writing_through_it(tmp_path, monkeypatch):
+    """Reusing the last slot overwrites it on purpose, by rename, so a link swapped in is replaced, not followed."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+    slots = _fill_backup_slots(source)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    _plant_symlink_when_published(monkeypatch, slots[-1], victim)
+
+    assert claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX) == slots[-1]
+
+    assert victim.read_text() == "unrelated content"
+    assert not slots[-1].is_symlink()
+    assert "test-token" in slots[-1].read_text()
+    assert stat.S_IMODE(slots[-1].stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("existing", [True, False], ids=["existing-config", "new-config"])
+def test_config_publish_never_writes_through_a_raced_symlink(tmp_path, monkeypatch, existing):
+    """An existing config is replaced by rename (a link swapped in is replaced, its target untouched);
+    a config that did not exist yet is not allowed to replace whatever appeared."""
+    config = tmp_path / "mcp.json"
+    if existing:
+        config.write_text("{}\n")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    _plant_symlink_when_published(monkeypatch, config, victim)
+
+    if existing:
+        claude_code_module._write_text(config, _token_config("test-token"), target=config)
+        assert not config.is_symlink()
+        assert "test-token" in config.read_text()
+    else:
+        with pytest.raises(claude_code_module.CorruptConfigError, match="appeared there"):
+            claude_code_module._write_text(config, _token_config("test-token"), target=config)
+        assert config.is_symlink()
+    assert victim.read_text() == "unrelated content"
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([config.name, victim.name])
+
+
+@pytest.mark.parametrize("raced", [False, True], ids=["already-there", "raced-in"])
+def test_pre_write_copy_refuses_a_symlink_at_its_name(tmp_path, monkeypatch, raced):
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json"
+    target.write_text(_token_config("old-token"))
+    path.symlink_to(target)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    copy = path.with_name(path.name + claude_code_module.PREVIOUS_CONTENT_BACKUP_SUFFIX)
+    if raced:
+        _plant_symlink_when_published(monkeypatch, copy, victim)
+    else:
+        copy.symlink_to(victim)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="symlink|appeared there"):
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    assert copy.is_symlink()
+    assert victim.read_text() == "unrelated content"
+    assert "new-token" not in target.read_text()
+    assert not [p for p in path.parent.iterdir() if "poppy-stage" in p.name or p.name.startswith(".mcp.json.poppy")]
+
+
+def test_publish_falls_back_to_a_rename_without_hard_links(tmp_path, monkeypatch):
+    """FAT and exFAT have no hard links; a free slot is then published by rename after a second check."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+
+    def no_hard_links(src, dst):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(claude_code_module.os, "link", no_hard_links)
+
+    backup = claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert "test-token" in backup.read_text()
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([source.name, backup.name])

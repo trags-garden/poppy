@@ -447,8 +447,8 @@ def _private_new_file(final: Path):
     file inherits nothing and is private from its first moment. Someone who
     opened the folder itself early gains nothing: looking up or opening a file
     inside it is checked against the permissions in force at that time. The
-    caller writes, then renames the file over ``final``; the folder is on the
-    same filesystem, so the rename is atomic. The folder and anything left in
+    caller writes, then moves the file onto ``final`` with ``_publish``; the
+    folder is on the same filesystem, so the move is atomic. The folder and anything left in
     it are removed on exit.
     """
     staging = Path(tempfile.mkdtemp(dir=final.parent, prefix=f".{final.name}.poppy-stage-"))
@@ -617,17 +617,18 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
     if _check_write_target(path, target) != path:
         _write_in_place(path, content, target=target, contains_token=contains_token)
         return
-    previous_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    existed = path.exists()
+    previous_mode = stat.S_IMODE(path.stat().st_mode) if existed else 0o600
     mode = 0o600 if contains_token else previous_mode
-    # Atomic write: render to a temp file on the same filesystem, then
-    # os.replace onto the target so a crash mid-write can't leave a
-    # half-written config. The token goes into a file no other user has ever
-    # been able to open; see _private_new_file.
+    # Atomic write: render to a temp file on the same filesystem, then move it
+    # onto the target so a crash mid-write can't leave a half-written config.
+    # The token goes into a file no other user has ever been able to open; see
+    # _private_new_file.
     if contains_token:
         with _private_new_file(path) as (fd, tmp):
             with os.fdopen(fd, "w") as fh:
                 fh.write(content)
-            os.replace(tmp, path)
+            _publish(tmp, path, replace=existed)
         if previous_mode != mode:
             _report_tightened(path)
         return
@@ -646,9 +647,44 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
             raise
         with os.fdopen(fd, "w") as fh:
             fh.write(content)
-        os.replace(tmp, path)
+        _publish(tmp, path, replace=existed)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _publish(tmp: Path, dest: Path, *, replace: bool) -> None:
+    """Move a finished temp file onto ``dest``, never writing through a link there.
+
+    ``replace`` is for a name that held a regular file Poppy means to
+    overwrite: the config itself, or a backup slot being reused. It is
+    replaced by rename, which swaps the name and never follows it, so if a
+    symlink is swapped in at that name in the moment after the caller checked
+    it, the link itself is replaced and the file it points to is untouched.
+
+    A name that was free when the caller checked it must still be free: the
+    file is hard-linked into place, which fails if anything, a symlink
+    included, has appeared there since, and setup refuses rather than remove
+    something it did not create. A volume without hard links (FAT, exFAT)
+    falls back to a rename after checking again, which narrows that window
+    without closing it.
+    """
+    if not replace:
+        try:
+            os.link(tmp, dest)
+        except FileExistsError:
+            appeared = True
+        except OSError:
+            appeared = dest.exists() or dest.is_symlink()
+        else:
+            tmp.unlink(missing_ok=True)
+            return
+        if appeared:
+            raise CorruptConfigError(
+                f"Refusing to write {dest}: something appeared there while `poppy setup` was writing it, "
+                "and setup does not replace a file or link it did not create. Check it, then re-run "
+                "`poppy setup`."
+            )
+    os.replace(tmp, dest)
 
 
 def _write_in_place(link: Path, content: str, *, target: Path, contains_token: bool = False) -> None:
@@ -713,18 +749,26 @@ def _write_in_place(link: Path, content: str, *, target: Path, contains_token: b
 def _save_previous_content(link: Path, resolved: Path) -> None:
     """Atomically copy ``resolved``'s current bytes to ``.poppy-prev.bak`` beside ``link``."""
     backup = link.with_name(link.name + PREVIOUS_CONTENT_BACKUP_SUFFIX)
+    # As with the rotating slots, Poppy only writes a regular file here, so a
+    # symlink was put there by someone else and is refused rather than replaced.
+    if backup.is_symlink():
+        raise CorruptConfigError(
+            f"Refusing to write through symlink at {link}: {backup} is a symlink. Remove it, then re-run "
+            "`poppy setup`. Nothing was changed."
+        )
     try:
+        existed = backup.exists()
         data = resolved.read_bytes()
         if _contains_daemon_token(data.decode(errors="replace")):
             with _private_new_file(backup) as (fd, tmp):
                 _write_and_sync(fd, data)
-                os.replace(tmp, backup)
+                _publish(tmp, backup, replace=existed)
             return
         # mkstemp creates a unique 0600 file, so a planted name cannot redirect the copy.
         fd, tmp = tempfile.mkstemp(dir=link.parent, prefix=f".{backup.name}.")
         try:
             _write_and_sync(fd, data)
-            os.replace(tmp, backup)
+            _publish(Path(tmp), backup, replace=existed)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
@@ -884,15 +928,17 @@ def _backup_once(path: Path, suffix: str) -> Path | None:
         raise CorruptConfigError(
             f"Refusing to back up {path}: the backup slot {backup} is a symlink. Remove it, then re-run `poppy setup`."
         )
-    # Copy into a fresh temp file and rename it over the slot last: a reused
+    # Copy into a fresh temp file and move it onto the slot last: a reused
     # slot keeps its old copy until every check that can refuse has passed,
-    # and the rename replaces the slot's name rather than writing through it,
-    # so neither a symlink nor a hard link at the slot can redirect the copy.
+    # and the move replaces the slot's name rather than writing through it, so
+    # neither a symlink nor a hard link at the slot can redirect the copy. A
+    # free slot must still be free then; see _publish.
+    reuse = backup.exists()
     if contains_token:
         with _private_new_file(backup) as (fd, tmp):
             with os.fdopen(fd, "wb") as out:
                 out.write(data)
-            os.replace(tmp, backup)
+            _publish(tmp, backup, replace=reuse)
         return backup
     # Lock the temp file to 0600 BEFORE writing any bytes, applying the final
     # mode only afterwards: the bytes may still be credentials of another kind,
@@ -911,7 +957,7 @@ def _backup_once(path: Path, suffix: str) -> Path | None:
                 # own mode. Leaving it at 0600 is the safe outcome, so it is not
                 # worth failing a setup over.
                 pass
-        os.replace(tmp, backup)
+        _publish(tmp, backup, replace=reuse)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

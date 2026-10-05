@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file is removed before the token is written, and setup refuses if it cannot
   remove one. A volume that cannot hold access control lists (FAT, exFAT) no
   longer stops setup.
+- A file or symlink that appears at a free backup slot, at the copy taken
+  before a symlinked config is rewritten, or at a config that did not exist
+  yet, while setup is writing it, is no longer replaced: setup refuses and
+  names it. A symlink already at that copy's name is refused too. Existing
+  configs and a reused backup slot are still replaced by rename, which never
+  writes through a link.
 - A symlinked config is still rewritten in place, so another user's program
   that already had it open can still read it. When the file was readable by
   others before, setup now says so instead of only reporting it as owner-only.
