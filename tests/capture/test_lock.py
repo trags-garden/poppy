@@ -7,8 +7,16 @@ import fcntl
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
-from poppy.capture.lock import LEGACY_LOCK_TTL_S, _legacy_lock_path, _lock_path, is_held, single_flight
+from poppy.capture.lock import (
+    CONTENDED_RETRY_S,
+    LEGACY_LOCK_TTL_S,
+    _legacy_lock_path,
+    _lock_path,
+    is_held,
+    single_flight,
+)
 
 
 def test_grants_then_releases(tmp_path: Path) -> None:
@@ -119,3 +127,35 @@ def test_crashed_holder_releases_the_lock(tmp_path: Path) -> None:
     os.close(fd)  # the holder dies without unlocking or deleting anything
     with single_flight(tmp_path, "s1") as acquired:
         assert acquired is True
+
+
+def _probe(tmp_path: Path, monkeypatch, *, release_after: int | None) -> tuple[list[float], int]:
+    """Hold the lock the way ``is_held`` probes it, dropping it on a given retry."""
+    tmp_path.mkdir(exist_ok=True)
+    fd = os.open(str(_lock_path(tmp_path, "s1")), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) == release_after:
+            fcntl.flock(fd, fcntl.LOCK_UN)  # the probe finishes
+
+    monkeypatch.setattr("poppy.capture.lock.time", SimpleNamespace(time=time.time, sleep=sleep))
+    return slept, fd
+
+
+def test_a_doctor_probe_does_not_make_a_capture_skip(tmp_path: Path, monkeypatch) -> None:
+    slept, fd = _probe(tmp_path, monkeypatch, release_after=1)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is True
+    os.close(fd)
+    assert len(slept) == 1
+
+
+def test_a_lock_held_past_the_retry_window_still_skips(tmp_path: Path, monkeypatch) -> None:
+    slept, fd = _probe(tmp_path, monkeypatch, release_after=None)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is False
+    os.close(fd)
+    assert slept and sum(slept) <= CONTENDED_RETRY_S + 1e-9
