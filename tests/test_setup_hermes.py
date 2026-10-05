@@ -356,6 +356,24 @@ def test_plugin_unknown_tool_returns_error_without_running_poppy(plugin) -> None
     assert calls == []
 
 
+def _manifest_hooks(manifest: str) -> list[str]:
+    """Entries of the top-level ``hooks:`` list in a plugin.yaml body."""
+    hooks, in_hooks = [], False
+    for line in manifest.splitlines():
+        if not line.startswith((" ", "-")):
+            in_hooks = line.startswith("hooks:")
+        elif in_hooks and line.strip().startswith("- "):
+            hooks.append(line.strip()[2:].strip())
+    return hooks
+
+
+def test_plugin_manifest_hooks_are_implemented_by_the_provider(plugin, tmp_path: Path) -> None:
+    module, _ = plugin
+    manifest = (tmp_path / "plugins" / "poppy" / "plugin.yaml").read_text()
+    for hook in _manifest_hooks(manifest):
+        assert hook in vars(module.PoppyMemoryProvider), hook
+
+
 def _plugin_subcommands(source: str) -> list[str]:
     """The first argument of every ``_run_poppy`` call in the plugin: either an
     inline list or a local variable assigned a list in the same function."""

@@ -4,7 +4,7 @@ Hermes (Nous Research, github.com/NousResearch/hermes-agent) discovers
 third-party memory providers under ``$HERMES_HOME/plugins/<name>/`` (default
 ``~/.hermes/plugins/<name>/``). Each plugin is a directory with:
 
-  plugin.yaml   — metadata (name, version, description, hooks)
+  plugin.yaml   — metadata (name, version, description, dependencies)
   __init__.py   — implements MemoryProvider ABC + ``register(ctx)``
   README.md     — user-facing docs (optional)
 
@@ -56,9 +56,6 @@ external_dependencies:
   - name: poppy
     install: "pipx install poppy-memory"
     check: "poppy --help"
-hooks:
-  - on_pre_compress
-  - on_session_end
 """
 
 
