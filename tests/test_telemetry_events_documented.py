@@ -215,7 +215,8 @@ def test_readme_memory_write_sources_cover_known_sources() -> None:
         assert f"`{value}`" in properties, f"memory_write row does not list {value!r}: {properties!r}"
 
     # The UI and importers never send the event themselves, so their names can
-    # only reach it as a hand-set `--source`; the row must say so.
+    # only reach it through the MCP server's `--source` setting or the
+    # connecting client's own name; the row must say so.
     configured_only = next((clause for clause in properties.split(";") if "`--source`" in clause), "")
     for value in sorted(IMPORT_SOURCE_TYPES | {"ui"}):
         assert f"`{value}`" in configured_only, (

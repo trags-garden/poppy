@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remember` and the MCP `remember` and `consolidate` tools) and the ones that
   do not (automatic capture, imports, and memories edited or superseded in
   `poppy ui`), and says the `ui` and importer `source` values appear only
-  through a configured `--source`.
+  when the MCP server's `--source` setting or the connecting client's own
+  name is one of them.
 
 ## [0.3.2] - 2026-10-05
 
