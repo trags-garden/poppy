@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -368,11 +369,22 @@ def call_openai_compat(
     response headers. Wait for the entire request in a daemon thread so even an
     operation starting just before the deadline cannot extend the caller's
     budget. The worker never touches capture state or health; a late result is
-    discarded, and it closes its client when the pending operation returns.
+    discarded. At the deadline every connection the worker opened is shut down,
+    which wakes a read blocked in the kernel (closing the client from this
+    thread would not), so the worker and its socket do not outlive the call.
     """
     deadline = time.monotonic() + timeout_s
     url, loopback = _endpoint(base_url)
     result: Future[str] = Future()
+    streams: list = []
+    expired: list[bool] = []
+
+    def trace(event: str, info: dict) -> None:
+        if not event.endswith(("connect_tcp.complete", "start_tls.complete")):
+            return
+        streams.append(info["return_value"])
+        if expired:  # connected after the caller gave up
+            _shut_down(info["return_value"])
 
     def request() -> None:
         try:
@@ -386,6 +398,7 @@ def call_openai_compat(
                     max_tokens=max_tokens,
                     timeout_s=timeout_s,
                     deadline=deadline,
+                    trace=trace,
                 )
             )
         except BaseException as exc:
@@ -395,8 +408,19 @@ def call_openai_compat(
     worker.start()
     worker.join(timeout=max(0.0, deadline - time.monotonic()))
     if not result.done():
+        expired.append(True)
+        for stream in list(streams):
+            _shut_down(stream)
         raise OpenAICompatError("timed out reading the response")
     return result.result()
+
+
+def _shut_down(stream) -> None:
+    """Shut down a request's socket so a read blocked on it returns at once."""
+    try:
+        stream.get_extra_info("socket").shutdown(socket.SHUT_RDWR)
+    except (AttributeError, OSError):
+        pass  # already closed, or replaced by its TLS wrapper
 
 
 def _request_openai_compat(
@@ -409,6 +433,7 @@ def _request_openai_compat(
     max_tokens: int,
     timeout_s: float,
     deadline: float,
+    trace: Callable[[str, dict], None],
 ) -> str:
     try:
         with _http_client(timeout_s=timeout_s, trust_env=not loopback) as client:
@@ -424,6 +449,7 @@ def _request_openai_compat(
                     "temperature": 0.2,
                     "max_tokens": max_tokens,
                 },
+                extensions={"trace": trace},
             ) as resp:
                 if time.monotonic() >= deadline:
                     raise OpenAICompatError("timed out reading the response")
@@ -546,7 +572,7 @@ def call_llm(
     capture pass runs one extraction plus a verdict per candidate while holding
     the per-session lock, and that budget is sized on one timeout per call; a
     fallback free to spend a second full timeout after a slow host CLI would
-    let the lock go stale under a worker that is still running.
+    hold up every later capture for the session that much longer.
     """
     deadline = time.monotonic() + host_timeout_s
     cli = detect_host_cli(transcript_path)

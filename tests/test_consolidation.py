@@ -1,4 +1,6 @@
 import json
+import select
+import socket
 import subprocess
 import sys
 import threading
@@ -306,6 +308,47 @@ def test_slow_reads_within_socket_timeout_still_stop_at_the_deadline(monkeypatch
     finally:
         assert closed.wait(2)
     assert len(reads) == 2 and all(read < budget for read in reads)
+
+
+def test_a_timed_out_request_closes_its_connection_and_thread():
+    """An endpoint sending endless 1xx responses cannot keep a request alive."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    closed_at = []
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            while True:
+                if select.select([conn], [], [], 0.05)[0]:
+                    try:
+                        if conn.recv(65536):
+                            continue  # the request itself
+                    except OSError:
+                        pass
+                    break
+                try:
+                    conn.sendall(b"HTTP/1.1 103 Early Hints\r\n\r\n")
+                except OSError:
+                    break
+        closed_at.append(time.monotonic())
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    before = set(threading.enumerate())
+    try:
+        with pytest.raises(OpenAICompatError, match="timed out reading the response"):
+            call_openai_compat(
+                "extract", model="m", base_url=f"http://127.0.0.1:{port}/v1", api_key="test-key", timeout_s=0.3
+            )
+        deadline = time.monotonic()
+        server.join(2)
+        assert closed_at and closed_at[0] - deadline < 1
+        for worker in set(threading.enumerate()) - before:
+            worker.join(2)
+            assert not worker.is_alive()
+    finally:
+        listener.close()
 
 
 @pytest.mark.parametrize(

@@ -51,9 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by the operating system and is released as soon as a capture finishes or its
   process exits. A capture started by an older version is still respected
   while you upgrade. `poppy doctor` reports captures in flight and no longer
-  warns about stale locks. HTTP fallback calls now also stop at a total deadline, and
-  a response that arrives just as the deadline passes is no longer reported as
-  a timeout.
+  warns about stale locks. HTTP fallback calls now also stop at a total
+  deadline and close their connection when they time out, and a response that
+  arrives just as the deadline passes is no longer reported as a timeout.
 - An oversized `--ttl` or `--since` duration is now reported as an invalid value
   instead of a traceback.
 - `poppy setup hermes-agent` no longer hangs when Hermes' `config.yaml` has a
