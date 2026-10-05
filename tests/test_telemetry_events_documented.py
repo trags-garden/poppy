@@ -139,60 +139,53 @@ def test_readme_events_match_documented_events() -> None:
 
 # The README promises its memory_write row lists every path that sends it.
 # memory_write is sent only from write_flow.remember, so the sending paths are
-# the modules that call that function. Each maps to the README phrases naming
-# it. Surfaces that store memories without it are named as exclusions, so a
-# surface that starts sending it fails here until the README says so.
+# the modules that call it, directly or through the MCP handlers that wrap it.
+# Each maps to the README phrases naming it. Surfaces that store memories
+# without it are named as exclusions, so a module that starts calling any of
+# these functions fails here until the README says so. The behaviour of each
+# documented path is pinned next to its own tests (test_mcp_server.py,
+# test_ui_lifecycle.py, test_write_flow.py).
 MEMORY_WRITE_CALLERS = {
     "cli/main.py": ["`poppy remember`"],
     "mcp_server/server.py": ["MCP `remember`", "`consolidate`"],
 }
-# capture/, integrations/ and ui/ store memories without calling write_flow.remember.
-MEMORY_WRITE_EXCLUDED = ("automatic capture", "imports", "`poppy ui`")
+# capture/, integrations/ and ui/ store memories without calling any sending function.
+MEMORY_WRITE_EXCLUDED = ("automatic capture", "imports", "edited or superseded in `poppy ui`")
+SENDING_FUNCTIONS = frozenset({"remember", "_emit_memory_write", "handle_remember", "handle_consolidate"})
 
 
-def _is_capture_call(node: ast.AST) -> bool:
-    if not isinstance(node, ast.Call):
-        return False
-    name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
-    return name in {"capture", "capture_once"}
+def _memory_write_name_files() -> set[str]:
+    """Files that spell the event name anywhere: a call argument, keyword, or constant."""
+    return {
+        path.relative_to(SOURCE_ROOT).as_posix()
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path)))
+        if isinstance(node, ast.Constant) and node.value == "memory_write"
+    }
 
 
-def _memory_write_capture_sites() -> set[tuple[str, str]]:
-    """(file, enclosing function) for every capture call that names memory_write."""
-    sites: set[tuple[str, str]] = set()
-    for path in sorted(SOURCE_ROOT.rglob("*.py")):
-        for func in ast.walk(ast.parse(path.read_text(), filename=str(path))):
-            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(func):
-                if _is_capture_call(node) and any(
-                    isinstance(arg, ast.Constant) and arg.value == "memory_write" for arg in node.args
-                ):
-                    sites.add((path.relative_to(SOURCE_ROOT).as_posix(), func.name))
-    return sites
+def _sending_callers() -> set[str]:
+    """Files (relative to src/poppy) that call a sending function.
 
-
-def _write_flow_remember_callers() -> set[str]:
-    """Files (relative to src/poppy) that use write_flow.remember or its emit helper."""
-    targets = {"remember", "_emit_memory_write"}
+    Matches on the called name, so module aliases (``wf.remember``), dotted
+    paths (``poppy.write_flow.remember``) and ``from ... import remember as r``
+    are all caught, and an import that is never called is not.
+    """
     callers: set[str] = set()
     for path in sorted(SOURCE_ROOT.rglob("*.py")):
         rel = path.relative_to(SOURCE_ROOT).as_posix()
         if rel == "write_flow.py":
             continue
-        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
-            imports_target = (
-                isinstance(node, ast.ImportFrom)
-                and node.module in {"poppy.write_flow", "write_flow"}
-                and any(alias.name in targets for alias in node.names)
-            )
-            uses_attribute = (
-                isinstance(node, ast.Attribute)
-                and node.attr in targets
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "write_flow"
-            )
-            if imports_target or uses_attribute:
+        tree = ast.parse(path.read_text(), filename=str(path))
+        names = set(SENDING_FUNCTIONS)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                names.update(alias.asname for alias in node.names if alias.name in SENDING_FUNCTIONS and alias.asname)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
+            if called in names:
                 callers.add(rel)
     return callers
 
@@ -213,7 +206,7 @@ def test_readme_memory_write_sources_cover_known_sources() -> None:
     """Known clients are covered by the "known client" wording; every other
     value telemetry can report must be spelled out in the row."""
     from poppy.models import MEMORY_TYPES
-    from poppy.sources import _ALIASES, _SETUP_ONLY_SOURCES, KNOWN_SOURCES
+    from poppy.sources import _ALIASES, _SETUP_ONLY_SOURCES, IMPORT_SOURCE_TYPES, KNOWN_SOURCES
 
     properties = _readme_memory_write_cells(README_PATH.read_text())[1]
     assert "a known client" in properties
@@ -221,9 +214,18 @@ def test_readme_memory_write_sources_cover_known_sources() -> None:
     for value in sorted(non_client_sources | MEMORY_TYPES):
         assert f"`{value}`" in properties, f"memory_write row does not list {value!r}: {properties!r}"
 
+    # The UI and importers never send the event themselves, so their names can
+    # only reach it as a hand-set `--source`; the row must say so.
+    configured_only = next((clause for clause in properties.split(";") if "`--source`" in clause), "")
+    for value in sorted(IMPORT_SOURCE_TYPES | {"ui"}):
+        assert f"`{value}`" in configured_only, (
+            f"memory_write row must say {value!r} only appears through a configured `--source`: {properties!r}"
+        )
+
 
 def test_memory_write_is_sent_only_by_write_flow_remember() -> None:
-    assert _memory_write_capture_sites() == {("write_flow.py", "_emit_memory_write")}
+    # The event name may appear only in its emit helper and the canonical set.
+    assert _memory_write_name_files() == {"write_flow.py", "telemetry.py"}
     tree = ast.parse((SOURCE_ROOT / "write_flow.py").read_text())
     emitting_functions = {
         func.name
@@ -238,7 +240,7 @@ def test_memory_write_is_sent_only_by_write_flow_remember() -> None:
 
 
 def test_readme_memory_write_row_names_exactly_the_sending_paths() -> None:
-    callers = _write_flow_remember_callers()
+    callers = _sending_callers()
     assert callers == set(MEMORY_WRITE_CALLERS), (
         f"memory_write callers changed: unexpected={sorted(callers - set(MEMORY_WRITE_CALLERS))!r}, "
         f"missing={sorted(set(MEMORY_WRITE_CALLERS) - callers)!r}. "

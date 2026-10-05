@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README telemetry table no longer says automatic capture sends
   `memory_write`. The row now lists the paths that do send it (`poppy
   remember` and the MCP `remember` and `consolidate` tools) and the ones that
-  do not (automatic capture, imports, and edits in `poppy ui`).
+  do not (automatic capture, imports, and memories edited or superseded in
+  `poppy ui`), and says the `ui` and importer `source` values appear only
+  through a configured `--source`.
 
 ## [0.3.2] - 2026-10-05
 
