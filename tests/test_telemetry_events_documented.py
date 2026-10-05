@@ -197,10 +197,29 @@ def _write_flow_remember_callers() -> set[str]:
     return callers
 
 
-def _readme_memory_write_when(readme: str) -> str:
+def _readme_memory_write_cells(readme: str) -> tuple[str, str]:
+    """(When, Properties) cells of the README memory_write row."""
     row = next((line for line in readme.splitlines() if line.startswith("| `memory_write` |")), None)
     assert row is not None, "README telemetry table has no memory_write row."
-    return row.strip().strip("|").split("|")[1].strip()
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    return cells[1], cells[2]
+
+
+def _readme_memory_write_when(readme: str) -> str:
+    return _readme_memory_write_cells(readme)[0]
+
+
+def test_readme_memory_write_sources_cover_known_sources() -> None:
+    """Known clients are covered by the "known client" wording; every other
+    value telemetry can report must be spelled out in the row."""
+    from poppy.models import MEMORY_TYPES
+    from poppy.sources import _ALIASES, _SETUP_ONLY_SOURCES, KNOWN_SOURCES
+
+    properties = _readme_memory_write_cells(README_PATH.read_text())[1]
+    assert "a known client" in properties
+    non_client_sources = (KNOWN_SOURCES - set(_ALIASES) - _SETUP_ONLY_SOURCES) | {"other"}
+    for value in sorted(non_client_sources | MEMORY_TYPES):
+        assert f"`{value}`" in properties, f"memory_write row does not list {value!r}: {properties!r}"
 
 
 def test_memory_write_is_sent_only_by_write_flow_remember() -> None:
