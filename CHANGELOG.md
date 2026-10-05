@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Expected sync, setup, telemetry, daemon, and consolidation failures now use
+  the CLI's clean error handler instead of escaping as Python tracebacks.
+- Sync reports invalid JSON responses cleanly. An unreadable write response
+  leaves the row pending for retry and warns that the write may have completed.
+- `poppy setup trags` reports malformed setup and authorization replies as
+  errors instead of Python tracebacks.
+
 ## [0.3.2] - 2026-10-05
 
 ### Added

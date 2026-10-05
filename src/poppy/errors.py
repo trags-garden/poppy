@@ -6,7 +6,11 @@ whose retrieval dependencies are broken.
 """
 
 
-class ModelUnavailableError(RuntimeError):
+class PoppyError(Exception):
+    """An expected, user-facing failure. The CLI prints its message on one line and exits 1."""
+
+
+class ModelUnavailableError(RuntimeError, PoppyError):
     """Retrieval models couldn't be loaded (e.g. offline with a cold model cache).
 
     Carries an actionable message; the CLI entrypoint renders it cleanly instead
@@ -14,7 +18,7 @@ class ModelUnavailableError(RuntimeError):
     """
 
 
-class EncryptionError(RuntimeError):
+class EncryptionError(RuntimeError, PoppyError):
     """Local-store encryption could not be set up, opened, or migrated.
 
     Defined here (not in ``poppy.encryption``) so ``poppy.keychain`` can make its
@@ -36,6 +40,7 @@ class KeychainUnavailable(EncryptionError):
     """
 
 
+# Inherits EncryptionError only so main() caught it; PoppyError removes that need.
 class StorePermissionError(EncryptionError):
     """The store could not be opened because of a permission / read-only / I/O error.
 

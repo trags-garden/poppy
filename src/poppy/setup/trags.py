@@ -57,6 +57,17 @@ def _decrypt_api_key(private_key: rsa.RSAPrivateKey, api_key_encrypted: str) -> 
     return private_key.decrypt(ciphertext, _OAEP).decode("utf-8")
 
 
+def _response_object(response: httpx.Response, phase: str) -> dict:
+    message = f"Malformed Trags setup {phase} response (HTTP {response.status_code})."
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise click.ClickException(message) from exc
+    if not isinstance(body, dict):
+        raise click.ClickException(message)
+    return body
+
+
 def run_device_code_flow(api_url_override: str | None = None) -> None:
     """Walk the device-code flow end-to-end. Prints progress to stdout."""
     poppy_dir = get_poppy_dir()
@@ -80,7 +91,15 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
     if start.status_code != 201:
         raise click.ClickException(f"Failed to start setup (HTTP {start.status_code}): {start.text[:200]}")
 
-    body = start.json()
+    body = _response_object(start, "start")
+    if "code" not in body or "setup_url" not in body:
+        raise click.ClickException("Malformed Trags setup start response (HTTP 201): missing code or setup_url.")
+    if "poll_interval_seconds" in body and (
+        not isinstance(body["poll_interval_seconds"], (int, float)) or isinstance(body["poll_interval_seconds"], bool)
+    ):
+        raise click.ClickException(
+            "Malformed Trags setup start response (HTTP 201): poll_interval_seconds must be a number."
+        )
     code = body["code"]
     setup_url = body["setup_url"]
     poll_interval = float(body.get("poll_interval_seconds") or _DEFAULT_POLL_INTERVAL_S)
@@ -115,7 +134,7 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
             continue  # Transient network blip; keep polling.
 
         if poll.status_code == 200:
-            api_key_encrypted = poll.json().get("api_key_encrypted")
+            api_key_encrypted = _response_object(poll, "poll").get("api_key_encrypted")
             if not api_key_encrypted:
                 raise click.ClickException("Server returned an empty API key.")
             try:

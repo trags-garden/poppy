@@ -17,8 +17,10 @@ from dataclasses import dataclass
 
 import httpx
 
+from poppy.errors import PoppyError
 
-class TragsError(Exception):
+
+class TragsError(PoppyError):
     """Base for any non-2xx response from Trags.
 
     Auth and conflict errors subclass this so a single ``except TragsError``
@@ -26,6 +28,10 @@ class TragsError(Exception):
     callers that must react differently — abort on a revoked key, skip a
     conflicting row — still catch the specific subclass first.
     """
+
+
+class TragsResponseError(TragsError):
+    """A successful HTTP response had an unparseable JSON body."""
 
 
 class TragsAuthError(TragsError):
@@ -141,7 +147,7 @@ class TragsClient:
         """POST /api/memories. Returns (row, created) — True if HTTP 201."""
         resp = self._send("POST", f"{self.base_url}/api/memories", json=memory)
         self._raise_for_status(resp)
-        return resp.json(), resp.status_code == 201
+        return self._response_json(resp, outcome_unknown=True), resp.status_code == 201
 
     def get(self, memory_id: str) -> dict | None:
         """GET /api/memories/{id}. Returns None on 404."""
@@ -149,7 +155,7 @@ class TragsClient:
         if resp.status_code == 404:
             return None
         self._raise_for_status(resp)
-        return resp.json()
+        return self._response_json(resp)
 
     def list_since(
         self,
@@ -166,7 +172,7 @@ class TragsClient:
             params["cursor"] = cursor
         resp = self._send("GET", f"{self.base_url}/api/memories", params=params)
         self._raise_for_status(resp)
-        body = resp.json()
+        body = self._response_json(resp)
         return Page(items=list(body.get("items") or []), next_cursor=body.get("next_cursor"))
 
     def iter_all_since(
@@ -208,7 +214,7 @@ class TragsClient:
         if resp.status_code == 409:
             raise TragsConflictError(resp.text)
         self._raise_for_status(resp)
-        return resp.json()
+        return self._response_json(resp, outcome_unknown=True)
 
     def delete(self, memory_id: str) -> bool:
         """DELETE /api/memories/{id}. Returns False on 404."""
@@ -239,6 +245,16 @@ class TragsClient:
                 f"Cannot reach Trags at {self.base_url}: {exc}",
                 outcome_unknown=not isinstance(exc, _NEVER_REACHED_SERVER),
             ) from exc
+
+    @staticmethod
+    def _response_json(resp: httpx.Response, *, outcome_unknown: bool = False):
+        try:
+            return resp.json()
+        except ValueError as exc:
+            message = f"Invalid JSON response from Trags (HTTP {resp.status_code})."
+            if outcome_unknown:
+                message += " The last request may still have completed. The next sync retries."
+            raise TragsResponseError(message) from exc
 
     @staticmethod
     def _raise_for_status(resp: httpx.Response) -> None:

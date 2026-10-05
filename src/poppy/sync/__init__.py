@@ -43,6 +43,7 @@ from poppy.sync.client import (
     TragsConflictError,
     TragsError,
     TragsQuotaError,
+    TragsResponseError,
     TragsTransportError,
 )
 from poppy.sync.serializer import (
@@ -496,6 +497,19 @@ def push(
                 watermark_locked = True
             quota_exc = exc
             consecutive_transport = 0  # a 402 is a response, not a transport fault
+            if kind == "live" and first_fail_iso is None:
+                first_fail_iso = iso
+            continue
+        except TragsResponseError as exc:
+            # Keep the row pending and surface the unusable reply after saving state.
+            errors += 1
+            if kind == "live":
+                watermark_locked = True
+            last_soft_error = str(exc)
+            transport_exc = exc
+            transport_failed = True
+            unknown_outcome = True
+            consecutive_transport = 0
             if kind == "live" and first_fail_iso is None:
                 first_fail_iso = iso
             continue

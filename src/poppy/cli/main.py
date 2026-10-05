@@ -3473,11 +3473,11 @@ def main() -> None:
     ``poppy.errors`` (which is import-cheap, no ML deps) so a deps-missing
     install still runs.
     """
-    from poppy.errors import EncryptionError, ModelUnavailableError
+    from poppy.errors import PoppyError
 
     try:
         cli()
-    except (ModelUnavailableError, EncryptionError) as exc:
+    except PoppyError as exc:
         # EncryptionError includes KeychainUnavailable and DependencyMissing, so
         # a keychain failure or a missing extra while opening an encrypted store
         # (recall/list/hooks) renders as one line instead of a raw traceback.
