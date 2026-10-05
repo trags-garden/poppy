@@ -487,3 +487,65 @@ def test_unreadable_backup_is_not_described_as_holding_a_token(tmp_path, monkeyp
     err = capsys.readouterr().err
     assert f"Could not check the older backup {unreadable}" in err
     assert "It holds a daemon token" not in err
+
+
+@pytest.mark.skipif(not _HAS_MACOS_ACLS, reason="macOS ACL tooling not available")
+def test_setup_removes_an_acl_from_an_older_private_backup(tmp_path, monkeypatch):
+    """Mode 0600 alone does not make a backup private while an ACL grants read."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text("{}\n")
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o600)
+    subprocess.run(["/bin/chmod", "+a", "everyone allow read", str(stale)], check=True)
+    assert _acl_entries(stale)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    assert _acl_entries(stale) == []
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o600
+    assert "stale-token" in stale.read_text()
+
+
+def _fill_backup_slots(source: Path) -> list[Path]:
+    slots = claude_code_module._rotating_backup_slots(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+    for index, slot in enumerate(slots):
+        slot.write_text(f'{{"copy": {index}}}')
+    return slots
+
+
+def test_refused_backup_keeps_the_reused_slot_intact(tmp_path, monkeypatch):
+    """A refusal must not cost the user the backup that was already there."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+    slots = _fill_backup_slots(source)
+    original = slots[-1].read_text()
+
+    def acl_failure(fd):
+        raise OSError("could not remove its access control list: simulated")
+
+    monkeypatch.setattr(claude_code_module, "_clear_acl", acl_failure)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="access control list"):
+        claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert slots[-1].read_text() == original
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([source.name, *(s.name for s in slots)])
+
+
+def test_backup_does_not_write_through_a_hard_link_at_the_reused_slot(tmp_path):
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+    slots = _fill_backup_slots(source)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    victim.chmod(0o644)
+    slots[-1].unlink()
+    os.link(victim, slots[-1])
+
+    claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert victim.read_text() == "unrelated content"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+    assert "test-token" in slots[-1].read_text()
+    assert stat.S_IMODE(slots[-1].stat().st_mode) == 0o600

@@ -643,17 +643,21 @@ def _tighten_existing_backups(path: Path) -> None:
     slots.append(path.with_name(path.name + PREVIOUS_CONTENT_BACKUP_SUFFIX))
     for slot in slots:
         content = None
+        mode = None
         try:
             if slot.is_symlink() or not slot.is_file():
                 continue
-            # Check the mode before reading: the common case is a slot that is
-            # already private, and that costs one stat instead of a full read.
-            if stat.S_IMODE(slot.stat().st_mode) == 0o600:
+            # Check the mode before reading: off macOS the common case is a slot
+            # that is already private, and that costs one stat instead of a full
+            # read. On macOS a 0600 slot can still carry an ACL, so it is read.
+            mode = stat.S_IMODE(slot.stat().st_mode)
+            if mode == 0o600 and sys.platform != "darwin":
                 continue
             content = slot.read_text(errors="replace")
             if not _contains_daemon_token(content):
                 continue
-            slot.chmod(0o600)
+            if mode != 0o600:
+                slot.chmod(0o600)
             fd = os.open(slot, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             try:
                 _clear_acl(fd)
@@ -675,7 +679,8 @@ def _tighten_existing_backups(path: Path) -> None:
                 err=True,
             )
             continue
-        _report_tightened(slot, reason="this earlier backup holds a daemon token")
+        if mode != 0o600:
+            _report_tightened(slot, reason="this earlier backup holds a daemon token")
 
 
 def _backup_once(path: Path, suffix: str) -> Path | None:
@@ -699,40 +704,40 @@ def _backup_once(path: Path, suffix: str) -> Path | None:
     contains_token = _contains_daemon_token(data.decode(errors="replace"))
     if contains_token:
         mode = 0o600
-    # Open the slot (fresh or reused) and lock the fd to 0600 BEFORE writing any
-    # bytes, applying the final mode only afterwards: a reused slot can still
-    # carry a wider mode from an earlier rotation, and the bytes being copied
-    # may be credentials, so the write itself must never happen at a mode other
-    # users can read. O_NOFOLLOW refuses a symlink planted at the slot rather
-    # than following it onto whatever file it names.
-    try:
-        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    except OSError as exc:
-        if not backup.is_symlink():
-            raise
+    # Poppy only ever writes regular files at a slot, so a symlink there was
+    # planted by someone else and is refused rather than replaced.
+    if backup.is_symlink():
         raise CorruptConfigError(
             f"Refusing to back up {path}: the backup slot {backup} is a symlink. Remove it, then re-run `poppy setup`."
-        ) from exc
+        )
+    # Copy into a fresh temp file and lock it to 0600 BEFORE writing any bytes,
+    # applying the final mode only afterwards: the bytes being copied may be
+    # credentials, so the write itself must never happen at a mode other users
+    # can read. Renaming it over the slot last means a reused slot keeps its
+    # old copy until every check that can refuse has passed, and the rename
+    # replaces the slot's name rather than writing through it, so neither a
+    # symlink nor a hard link at the slot can redirect the copy.
+    fh = tempfile.NamedTemporaryFile(dir=backup.parent, prefix=f".{backup.name}.", delete=False)
+    tmp = Path(fh.name)
     try:
-        if contains_token:
-            _restrict_to_owner(fd, backup)
-        else:
-            _set_mode(fd, 0o600, backup)
-        os.write(fd, data)
-        try:
-            os.fchmod(fd, mode)
-        except OSError:
-            # This second call only widens the backup back to the source's own
-            # mode. Leaving it at 0600 is the safe outcome, so it is not worth
-            # failing a setup over.
-            pass
+        with fh:
+            if contains_token:
+                _restrict_to_owner(fh.fileno(), backup)
+            else:
+                _set_mode(fh.fileno(), 0o600, backup)
+            fh.write(data)
+            fh.flush()
+            try:
+                os.fchmod(fh.fileno(), mode)
+            except OSError:
+                # This second call only widens the backup back to the source's
+                # own mode. Leaving it at 0600 is the safe outcome, so it is not
+                # worth failing a setup over.
+                pass
+        os.replace(tmp, backup)
     except BaseException:
-        # Do not leave a half-made slot behind: it would occupy a rotation
-        # position without holding a recoverable copy.
-        backup.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
-    finally:
-        os.close(fd)
     return backup
 
 
