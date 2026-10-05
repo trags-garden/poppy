@@ -12,6 +12,7 @@ from importlib import resources
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from poppy.cli.main import cli
 from poppy.setup.hermes import (
@@ -367,6 +368,11 @@ def _manifest_hooks(manifest: str) -> list[str]:
     return hooks
 
 
+def test_manifest_hooks_parser_reads_the_hooks_list() -> None:
+    manifest = "name: poppy\nhooks:\n  - on_session_end\n  - sync_turn\nprovides:\n  - memory\n"
+    assert _manifest_hooks(manifest) == ["on_session_end", "sync_turn"]
+
+
 def test_plugin_manifest_hooks_are_implemented_by_the_provider(plugin, tmp_path: Path) -> None:
     module, _ = plugin
     manifest = (tmp_path / "plugins" / "poppy" / "plugin.yaml").read_text()
@@ -404,3 +410,16 @@ def test_plugin_only_runs_registered_poppy_subcommands(tmp_path: Path) -> None:
     subcommands = _plugin_subcommands(source)
     assert {"recall", "remember", "forget", "stats"} <= set(subcommands)
     assert set(subcommands) <= set(cli.commands)
+
+
+def test_setup_command_promises_only_what_the_plugin_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import poppy.cli.main as cli_main
+    import poppy.setup.hermes as hermes_setup
+
+    real_install = hermes_setup.install_for_hermes
+    monkeypatch.setattr(hermes_setup, "install_for_hermes", lambda: real_install(hermes_home=tmp_path))
+    monkeypatch.setattr(cli_main, "_record_agent_setup", lambda client: None)
+    result = CliRunner().invoke(cli, ["setup", "hermes-agent"])
+    assert result.exit_code == 0, result.output
+    assert "recall relevant memories before each turn" in result.output
+    assert "consolidate" not in result.output
