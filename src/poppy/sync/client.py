@@ -31,7 +31,33 @@ class TragsError(PoppyError):
 
 
 class TragsResponseError(TragsError):
-    """A successful HTTP response had an unparseable JSON body."""
+    """A successful HTTP response had an unparseable JSON body.
+
+    Carries what the run had already done, as ``TragsTransportError`` does, so
+    the one line the user reads still says how many rows went out first.
+    """
+
+    def __init__(self, message: str, *, outcome_unknown: bool = False) -> None:
+        super().__init__(message)
+        self.outcome_unknown = outcome_unknown
+        # Filled in by the sync layer as it unwinds (see ``_note_transport_progress``).
+        self.applied_pulled = 0
+        self.sent_pushed = 0
+        self.simulated = False
+
+    def __str__(self) -> str:
+        parts = [super().__str__()]
+        did = []
+        if self.applied_pulled:
+            did.append(f"applied {self.applied_pulled} pulled change{'' if self.applied_pulled == 1 else 's'}")
+        if self.sent_pushed:
+            did.append(f"sent {self.sent_pushed} row{'' if self.sent_pushed == 1 else 's'}")
+        if did:
+            lead = "This run would have" if self.simulated else "This run"
+            parts.append(f"{lead} {' and '.join(did)} before that reply.")
+        if self.outcome_unknown:
+            parts.append("The last request may still have completed. The next sync retries.")
+        return " ".join(parts)
 
 
 class TragsAuthError(TragsError):
@@ -251,10 +277,9 @@ class TragsClient:
         try:
             return resp.json()
         except ValueError as exc:
-            message = f"Invalid JSON response from Trags (HTTP {resp.status_code})."
-            if outcome_unknown:
-                message += " The last request may still have completed. The next sync retries."
-            raise TragsResponseError(message) from exc
+            raise TragsResponseError(
+                f"Invalid JSON response from Trags (HTTP {resp.status_code}).", outcome_unknown=outcome_unknown
+            ) from exc
 
     @staticmethod
     def _raise_for_status(resp: httpx.Response) -> None:

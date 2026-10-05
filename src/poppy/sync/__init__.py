@@ -139,7 +139,7 @@ def _note_transport_progress(
     WOULD do so the CLI can show it, and those numbers are not evidence that
     anything happened - the caller has to know which kind it is holding.
     """
-    if isinstance(exc, TragsTransportError):
+    if isinstance(exc, (TragsTransportError, TragsResponseError)):
         exc.applied_pulled += pulled
         exc.sent_pushed += pushed
         exc.outcome_unknown = exc.outcome_unknown or unknown
@@ -502,6 +502,8 @@ def push(
             continue
         except TragsResponseError as exc:
             # Keep the row pending and surface the unusable reply after saving state.
+            # A host that answers every request with a non-JSON page is as useless as
+            # a dead one, so this counts toward the circuit breaker.
             errors += 1
             if kind == "live":
                 watermark_locked = True
@@ -509,9 +511,11 @@ def push(
             transport_exc = exc
             transport_failed = True
             unknown_outcome = True
-            consecutive_transport = 0
+            consecutive_transport += 1
             if kind == "live" and first_fail_iso is None:
                 first_fail_iso = iso
+            if consecutive_transport >= MAX_CONSECUTIVE_TRANSPORT_FAILURES:
+                break
             continue
         except TragsError as exc:
             # `TragsConflictError` included: it subclasses `TragsError`, and a 409
@@ -990,6 +994,11 @@ def pull(
         errors += 1
         watermark_locked = True
         auth_exc = exc
+    except TragsResponseError:
+        # A 2xx page we cannot read. Abort the whole sync before anything is applied
+        # or persisted, so no push runs and the caller (CLI or auto worker) treats it
+        # as a failed run and retries.
+        raise
     except TragsTransportError as exc:
         # The host gave no usable answer, so this is not a row the server
         # refused. Apply what we gathered, freeze the watermark, and re-raise
@@ -1122,7 +1131,7 @@ def sync(
             tombstone_preview=pull_res.tombstone_preview,
             known_ids_preview=pull_res.known_ids,
         )
-    except TragsTransportError as exc:
+    except (TragsTransportError, TragsResponseError) as exc:
         # The pull that just ran applied rows to the local store and the push
         # then found the host gone. Carry the pull's count onto the error so the
         # offline line describes the whole run, not just its failed half: a

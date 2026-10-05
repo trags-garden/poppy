@@ -40,7 +40,6 @@ class KeychainUnavailable(EncryptionError):
     """
 
 
-# Inherits EncryptionError only so main() caught it; PoppyError removes that need.
 class StorePermissionError(EncryptionError):
     """The store could not be opened because of a permission / read-only / I/O error.
 

@@ -30,6 +30,7 @@ from poppy.config import load_config, save_config
 from poppy.runtime import get_poppy_dir
 
 _DEFAULT_POLL_INTERVAL_S = 2.0
+_MAX_POLL_INTERVAL_S = 60.0
 _DEFAULT_TIMEOUT_S = 5 * 60
 # OAEP-SHA256 padding for a 2048-bit key can wrap up to 190 bytes — far more
 # than a usr_* key. The Trags CLI authorization endpoint returns ciphertext
@@ -57,8 +58,8 @@ def _decrypt_api_key(private_key: rsa.RSAPrivateKey, api_key_encrypted: str) -> 
     return private_key.decrypt(ciphertext, _OAEP).decode("utf-8")
 
 
-def _response_object(response: httpx.Response, phase: str) -> dict:
-    message = f"Malformed Trags setup {phase} response (HTTP {response.status_code})."
+def _response_object(response: httpx.Response, phase: str, hint: str = "") -> dict:
+    message = f"Malformed Trags setup {phase} response (HTTP {response.status_code}).{hint}"
     try:
         body = response.json()
     except ValueError as exc:
@@ -94,15 +95,22 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
     body = _response_object(start, "start")
     if "code" not in body or "setup_url" not in body:
         raise click.ClickException("Malformed Trags setup start response (HTTP 201): missing code or setup_url.")
-    if "poll_interval_seconds" in body and (
-        not isinstance(body["poll_interval_seconds"], (int, float)) or isinstance(body["poll_interval_seconds"], bool)
+    poll_interval = body.get("poll_interval_seconds")
+    if poll_interval is None or (poll_interval == 0 and not isinstance(poll_interval, bool)):
+        poll_interval = _DEFAULT_POLL_INTERVAL_S
+    # NaN fails the range check too, and JSON's 1e309 parses as infinity.
+    if (
+        isinstance(poll_interval, bool)
+        or not isinstance(poll_interval, (int, float))
+        or not 0 < poll_interval <= _MAX_POLL_INTERVAL_S
     ):
         raise click.ClickException(
-            "Malformed Trags setup start response (HTTP 201): poll_interval_seconds must be a number."
+            "Malformed Trags setup start response (HTTP 201): poll_interval_seconds must be a number"
+            f" above 0 and at most {_MAX_POLL_INTERVAL_S:g}."
         )
     code = body["code"]
     setup_url = body["setup_url"]
-    poll_interval = float(body.get("poll_interval_seconds") or _DEFAULT_POLL_INTERVAL_S)
+    poll_interval = float(poll_interval)
 
     click.echo("\nOpening your browser to authorize this machine.")
     click.echo(f"  URL:  {setup_url}")
@@ -134,7 +142,10 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
             continue  # Transient network blip; keep polling.
 
         if poll.status_code == 200:
-            api_key_encrypted = _response_object(poll, "poll").get("api_key_encrypted")
+            # The server consumed the code when it answered 200, so polling again cannot help.
+            api_key_encrypted = _response_object(poll, "poll", " Run `poppy setup trags` again.").get(
+                "api_key_encrypted"
+            )
             if not api_key_encrypted:
                 raise click.ClickException("Server returned an empty API key.")
             try:
