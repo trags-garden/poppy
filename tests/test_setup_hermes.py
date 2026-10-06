@@ -7,6 +7,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import threading
 import types
 from importlib import resources
 from pathlib import Path
@@ -365,6 +366,29 @@ def test_plugin_passes_dash_prefixed_memory_after_separator(plugin) -> None:
     content = "- use uv for installs"
 
     provider.handle_tool_call("poppy_remember", {"content": content})
+
+    assert calls == [["remember", "--type", "fact", "--", content]]
+
+
+def test_plugin_prefetch_passes_dash_prefixed_query_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    query = "- use uv for installs"
+
+    provider.prefetch(query)
+
+    assert calls == [["recall", "--limit", "5", "--", query]]
+
+
+def test_plugin_mirrored_write_passes_dash_prefixed_content_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    content = "- use uv for installs"
+
+    provider.on_memory_write("add", "memory", content)
+    for thread in threading.enumerate():
+        if thread.name == "poppy-memwrite":
+            thread.join(timeout=5)
 
     assert calls == [["remember", "--type", "fact", "--", content]]
 
