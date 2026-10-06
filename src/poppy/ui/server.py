@@ -23,8 +23,7 @@ from poppy.engine.interface import RetrievalEngine
 from poppy.models import Filters, Memory
 from poppy.paths import ensure_poppy_dir
 from poppy.runtime import get_engine, get_fast_engine, get_poppy_dir
-
-from .tombstones import TTL_DAYS, Tombstone, TombstoneStore
+from poppy.tombstones import TTL_DAYS, Tombstone, TombstoneStore
 
 STATIC_DIR = Path(__file__).parent / "static"
 

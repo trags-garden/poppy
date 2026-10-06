@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from poppy.models import Memory, Source
-from poppy.ui.tombstones import Tombstone
+from poppy.tombstones import Tombstone
 
 
 def _iso(dt: datetime | None) -> str | None:
