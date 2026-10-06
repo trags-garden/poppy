@@ -12,6 +12,9 @@ from poppy.engine.seed import SeedEngine
 from poppy.models import Memory, Source
 from poppy.ui.tombstones import TombstoneStore
 
+# The dashboard sends every POST as JSON; the server refuses any other type.
+JSON_HEADERS = {"Content-Type": "application/json"}
+
 
 def _ingest(engine: SeedEngine, mid: str, content: str, expires_at=None) -> Memory:
     n = datetime.now(timezone.utc)
@@ -245,6 +248,24 @@ def test_supersede_endpoint(app_client: TestClient, tmp_path: Path) -> None:
     assert "old1" in {i["id"] for i in tombs}
 
 
+def test_ui_edit_and_supersede_send_no_memory_write(
+    app_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The README says memories edited or superseded in `poppy ui` do not send memory_write."""
+    events: list = []
+    monkeypatch.setattr(
+        "poppy.telemetry.capture",
+        lambda poppy_dir, event, properties=None: events.append(event),
+    )
+    db = SeedEngine(db_path=tmp_path / "memories.db")
+    _ingest(db, "tele1", "use all-MiniLM")
+
+    assert app_client.patch("/api/memories/tele1", json={"content": "use MiniLM-L6"}).status_code == 200
+    resp = app_client.post("/api/memories/tele1/supersede", json={"content": "use bge-large"})
+    assert resp.status_code == 200
+    assert "memory_write" not in events
+
+
 def test_supersede_unknown_id_404s(app_client: TestClient) -> None:
     resp = app_client.post(
         "/api/memories/ghost/supersede",
@@ -300,7 +321,7 @@ def test_delete_and_restore_trigger_autosync(
     assert app_client.delete("/api/memories/d1").status_code == 200
     assert len(calls) == 1  # delete queued a sync
 
-    assert app_client.post("/api/memories/d1/restore").status_code == 200
+    assert app_client.post("/api/memories/d1/restore", headers=JSON_HEADERS).status_code == 200
     assert len(calls) == 2  # restore queued a sync
 
 
@@ -394,7 +415,7 @@ def test_ui_restore_keeps_ttl_and_bumps_updated_at(
     original = _ingest(db, "r1", "ttl fact", expires_at=ttl)
 
     deleted = app_client.delete("/api/memories/r1").json()
-    restored = app_client.post("/api/memories/r1/restore").json()
+    restored = app_client.post("/api/memories/r1/restore", headers=JSON_HEADERS).json()
 
     assert restored["expires_at"] == ttl.isoformat()
     assert restored["updated_at"] > deleted["tombstoned_at"]
@@ -505,12 +526,12 @@ def test_ui_restore_of_an_elapsed_ttl_returns_410(
         )
     )
 
-    resp = app_client.post("/api/memories/e1/restore")
+    resp = app_client.post("/api/memories/e1/restore", headers=JSON_HEADERS)
 
     assert resp.status_code == 410
     assert "TTL elapsed" in resp.json()["detail"]
     assert store.get("e1") is not None, "the restore attempt destroyed the last copy"
-    assert app_client.post("/api/memories/e1/restore").status_code == 410  # still there to find
+    assert app_client.post("/api/memories/e1/restore", headers=JSON_HEADERS).status_code == 410  # still there to find
 
 
 def test_tombstone_migration_backfills_a_token_for_existing_rows(tmp_path: Path) -> None:
@@ -620,7 +641,7 @@ def test_ui_restore_reports_success_when_it_raced(
         lambda *a, **kw: write_flow.RestoreResult(found=True, memory=original, raced=True),
     )
 
-    resp = app_client.post("/api/memories/raced1/restore")
+    resp = app_client.post("/api/memories/raced1/restore", headers=JSON_HEADERS)
 
     assert resp.status_code == 200
     assert resp.json()["id"] == "raced1"

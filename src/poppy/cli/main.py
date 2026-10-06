@@ -2056,6 +2056,10 @@ def build_mcpb_cmd(output_dir: Path):
     from poppy.build_mcpb import build_mcpb
 
     repo_root = Path(__file__).resolve().parents[3]
+    if not (repo_root / "pyproject.toml").is_file() or not (repo_root / "mcpb" / "manifest.json").is_file():
+        raise click.ClickException(
+            "poppy build mcpb only works from a source checkout. Use `poppy setup claude-desktop` instead."
+        )
     try:
         produced = build_mcpb(repo_root=repo_root, output_dir=output_dir)
     except RuntimeError as exc:

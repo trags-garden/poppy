@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach Poppy through the plugin's tools and mirrored `MEMORY.md` / `USER.md`
   writes.
 
+### Fixed
+
+- `poppy build mcpb` outside a source checkout now says it needs one and points
+  to `poppy setup claude-desktop`, instead of crashing or suggesting npm tooling.
+- Claude Desktop bundles no longer install development dependencies on startup.
+- Claude Desktop bundles now exclude cached Python bytecode from the server shim.
+- Claude Desktop bundles now list Trags as the author.
+- The dashboard's restore and supersede actions now refuse requests that are
+  not sent as `application/json` (HTTP 415), so a page on another site can no
+  longer trigger them from your browser without a CORS preflight. The
+  dashboard itself already sends JSON and is unaffected.
+- The README telemetry table no longer says automatic capture sends
+  `memory_write`. The row now lists the paths that do send it (`poppy
+  remember` and the MCP `remember` and `consolidate` tools) and the ones that
+  do not (automatic capture, imports, and memories edited or superseded in
+  `poppy ui`), and says the `ui` and importer `source` values appear only
+  when the MCP server's `--source` setting or the connecting client's own
+  name is one of them.
+
 ## [0.3.2] - 2026-10-05
 
 ### Added

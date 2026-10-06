@@ -264,6 +264,22 @@ async def test_handle_remember_emits_memory_write(fast_server, monkeypatch):
     assert ("memory_write", {"memory_type": "fact", "has_project": True, "source": "cursor"}) in events
 
 
+@pytest.mark.asyncio
+async def test_handle_consolidate_emits_memory_write_per_memory(fast_server, monkeypatch):
+    """The README names MCP consolidate as a memory_write path: one event per stored memory."""
+    events: list = []
+    monkeypatch.setattr(
+        "poppy.telemetry.capture",
+        lambda poppy_dir, event, properties=None: events.append((event, properties or {})),
+    )
+    await fast_server.handle_consolidate(session_summary="s", facts=["a", "b"], source="cursor")
+    assert [(e, p["memory_type"]) for e, p in events if e == "memory_write"] == [
+        ("memory_write", "summary"),
+        ("memory_write", "fact"),
+        ("memory_write", "fact"),
+    ]
+
+
 # ---------- MCP write-path provenance (source app) ----------
 
 
