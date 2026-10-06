@@ -2176,7 +2176,7 @@ def _sync_client():
 
 
 def _sync_tombstones():
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     return TombstoneStore(_get_poppy_dir() / "memories.db")
 

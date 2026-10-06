@@ -63,7 +63,7 @@ from poppy.sync.state import (
     mutate_remote,
     stamp_error,
 )
-from poppy.ui.tombstones import Tombstone, TombstoneStore
+from poppy.tombstones import Tombstone, TombstoneStore
 
 __all__ = [
     "PushResult",
