@@ -873,10 +873,16 @@ def _migrate_trags_key_to_keychain(config: PoppyConfig) -> None:
 
 def save_config(config: PoppyConfig) -> None:
     ensure_poppy_dir(config.poppy_dir)
+    config_path = config.poppy_dir / CONFIG_FILENAME
+    db_path = config.poppy_dir / "memories.db"
+    old_url = PoppyConfig().trags_api_url
+    if db_path.exists() and config_path.exists():
+        old_url = json.loads(config_path.read_text()).get("trags_api_url", old_url)
+    old_url = old_url.rstrip("/")
+    remove_remote = old_url != config.trags_api_url.rstrip("/") or config.trags_api_key == ""
     data: dict = {}
     for entry in _REGISTRY:
         entry.save(config, data)
-    config_path = config.poppy_dir / CONFIG_FILENAME
     payload = json.dumps(data, indent=2)
     # Atomic, never-world-readable write: tempfile.mkstemp creates a fresh file
     # with 0600 honored (it is guaranteed-new, unlike os.open(O_CREAT, 0600)
@@ -899,6 +905,14 @@ def save_config(config: PoppyConfig) -> None:
         except OSError:
             pass
         raise
+    if remove_remote and db_path.exists():
+        from poppy.tombstones import TombstoneStore
+
+        tombstones = TombstoneStore(db_path)
+        try:
+            tombstones.remove_remote_memories(old_url)
+        finally:
+            tombstones._conn.close()
 
 
 def load_config(poppy_dir: Path | None = None) -> PoppyConfig:

@@ -65,11 +65,16 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     too.
     """
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(ui_tombstones)").fetchall()}
-    for name in ("superseded_by", "memory_expires_at", "token"):
+    for name, definition in (
+        ("superseded_by", "TEXT"),
+        ("memory_expires_at", "TEXT"),
+        ("token", "TEXT"),
+        ("rejected_remotes", "TEXT NOT NULL DEFAULT '{}'"),
+    ):
         if name in cols:
             continue
         try:
-            conn.execute(f"ALTER TABLE ui_tombstones ADD COLUMN {name} TEXT")
+            conn.execute(f"ALTER TABLE ui_tombstones ADD COLUMN {name} {definition}")
         except Exception as exc:
             # The check and the ALTER are not atomic across processes: the UI,
             # the CLI and the autosync worker can open the store at the same
@@ -101,6 +106,7 @@ class Tombstone:
     # conditional delete cannot remove a replacement written in the same tick.
     token: str | None = None
     sent_remotes: set[str] = field(default_factory=set)
+    rejected_remotes: set[str] = field(default_factory=set)
 
     @property
     def expires_at(self) -> datetime:
@@ -282,6 +288,13 @@ class TombstoneStore:
                 [(mid, remote_url.rstrip("/")) for mid in memory_ids],
             )
 
+    def remove_remote_memories(self, remote_url: str) -> None:
+        """Forget which IDs a removed sync server holds."""
+        # A push already running against this URL may add rows back after this
+        # cleanup. The next URL change or a manual cleanup clears them again.
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM sync_remote_memories WHERE remote_url = ?", (remote_url.rstrip("/"),))
+
     def mark_sent(self, tombstones: list[Tombstone], remote_url: str) -> None:
         """Acknowledge a batch without clearing any concurrent replacements."""
         if not tombstones:
@@ -292,6 +305,19 @@ class TombstoneStore:
                 "UPDATE ui_tombstones SET sent_remotes = json_set(sent_remotes, ?, 1) WHERE id = ? AND token = ?",
                 [(path, ts.memory.id, ts.token) for ts in tombstones],
             )
+
+    def mark_rejected(self, tombstones: list[Tombstone], remote_url: str) -> int:
+        """Record permanent refusals for these deletions; count only new marks."""
+        if not tombstones:
+            return 0
+        path = "$." + json.dumps(remote_url.rstrip("/"))
+        with self._lock, self._conn:
+            cursor = self._conn.executemany(
+                """UPDATE ui_tombstones SET rejected_remotes = json_set(rejected_remotes, ?, 1)
+                WHERE id = ? AND token = ? AND json_extract(rejected_remotes, ?) IS NULL""",
+                [(path, ts.memory.id, ts.token, path) for ts in tombstones],
+            )
+            return cursor.rowcount
 
     def repush_stamp(self) -> str | None:
         """When the UTC rewrite moved a push candidate here, or None if it never did.
@@ -366,7 +392,8 @@ class TombstoneStore:
         ``keep_unknown`` defaults to false. When true, IDs with no row in
         ``sync_remote_memories`` are kept regardless of age. With both options
         true, only IDs known to a remote and acknowledged by every remote that
-        knows them can be purged. When no remote key is resolvable, the dashboard
+        knows them can be purged. A permanent payload rejection also settles a
+        deletion for that remote. When no remote key is resolvable, the dashboard
         leaves ``keep_unknown`` false so unknown IDs age out after seven days;
         known but unsent deletions are still kept by ``require_sent``.
 
@@ -389,7 +416,10 @@ class TombstoneStore:
                         SELECT 1 FROM sync_remote_memories known
                         WHERE known.id = ui_tombstones.id AND NOT EXISTS (
                             SELECT 1 FROM json_each(ui_tombstones.sent_remotes) sent
-                            WHERE sent.key = known.remote_url)))
+                            WHERE sent.key = known.remote_url)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM json_each(ui_tombstones.rejected_remotes) rejected
+                            WHERE rejected.key = known.remote_url)))
                     AND (? = 0 OR EXISTS (
                         SELECT 1 FROM sync_remote_memories known
                         WHERE known.id = ui_tombstones.id))""",
@@ -425,4 +455,5 @@ class TombstoneStore:
             superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
             token=row["token"] if "token" in keys else None,
             sent_remotes=set(json.loads(row["sent_remotes"])),
+            rejected_remotes=set(json.loads(row["rejected_remotes"])),
         )

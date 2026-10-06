@@ -617,7 +617,7 @@ def test_tombstone_migration_guard_covers_the_sqlcipher_driver(tmp_path: Path) -
 
     losing = _Conn("duplicate column name: memory_expires_at")
     _migrate_columns(losing)  # must not raise
-    assert losing.altered == 3  # swallowed every duplicate
+    assert losing.altered == 4  # swallowed every duplicate, including rejected_remotes
 
     broken = _Conn("no such table: ui_tombstones")
     with pytest.raises(Exception, match="no such table"):

@@ -29,6 +29,10 @@ class TragsError(PoppyError):
     conflicting row — still catch the specific subclass first.
     """
 
+    def __init__(self, *args: object, status_code: int | None = None) -> None:
+        super().__init__(*args)
+        self.status_code = status_code
+
 
 class TragsResponseError(TragsError):
     """A successful HTTP response had an unparseable JSON body.
@@ -238,7 +242,7 @@ class TragsClient:
             json=memory,
         )
         if resp.status_code == 409:
-            raise TragsConflictError(resp.text)
+            raise TragsConflictError(resp.text, status_code=resp.status_code)
         self._raise_for_status(resp)
         return self._response_json(resp, outcome_unknown=True)
 
@@ -286,12 +290,12 @@ class TragsClient:
         if 200 <= resp.status_code < 300:
             return
         if resp.status_code == 401:
-            raise TragsAuthError(resp.text or "401 Unauthorized")
+            raise TragsAuthError(resp.text or "401 Unauthorized", status_code=resp.status_code)
         if resp.status_code == 402:
             message = _quota_message(resp)
             if message is not None:
-                raise TragsQuotaError(message)
-        raise TragsError(f"{resp.status_code} {resp.text[:500]}")
+                raise TragsQuotaError(message, status_code=resp.status_code)
+        raise TragsError(f"{resp.status_code} {resp.text[:500]}", status_code=resp.status_code)
 
 
 def _quota_message(resp: httpx.Response) -> str | None:

@@ -330,3 +330,154 @@ def test_non_settable_keys_reject_config_set(key):
     reachable through `config set`."""
     with pytest.raises(ValueError):
         PoppyConfig().set(key, "x")
+
+
+@pytest.fixture
+def configured_remote_trash(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from poppy.models import Memory, Source
+    from poppy.tombstones import TombstoneStore
+
+    config = PoppyConfig(poppy_dir=tmp_path, trags_api_url="https://a.test")
+    save_config(config)
+    tombstones = TombstoneStore(tmp_path / "memories.db")
+    deleted_at = datetime.now(timezone.utc)
+    memory = Memory(
+        id="X",
+        content="forgotten text",
+        memory_type="fact",
+        source=Source(type="test", session_id=None, timestamp=deleted_at),
+        project=None,
+        related_to=[],
+        created_at=deleted_at,
+        updated_at=deleted_at,
+        confidence=1.0,
+    )
+    tombstones.add(memory, tombstoned_at=deleted_at)
+    tombstones.note_remote_memories({memory.id}, config.trags_api_url)
+    after_window = deleted_at + timedelta(days=8)
+
+    class AfterWindow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return after_window
+
+    def purge():
+        monkeypatch.setattr("poppy.tombstones.datetime", AfterWindow)
+        return tombstones.purge_expired(pushed_through=after_window.isoformat(), require_sent=True)
+
+    return config, tombstones, memory, purge
+
+
+def test_changing_remote_removes_old_known_ids_and_allows_trash_purge(configured_remote_trash):
+    config, tombstones, memory, purge = configured_remote_trash
+    config.trags_api_url = "https://b.test/"
+    save_config(config)
+    assert tombstones.known_ids("https://a.test/") == set()
+    assert purge() == 1
+    assert tombstones.get(memory.id) is None
+
+
+@pytest.mark.parametrize(
+    "old_url,new_url",
+    [
+        ("https://a.test", "https://a.test"),
+        ("https://a.test/", "https://a.test"),
+        ("https://a.test", "https://a.test/"),
+    ],
+)
+def test_same_normalized_remote_keeps_known_ids(configured_remote_trash, old_url, new_url):
+    config, tombstones, memory, purge = configured_remote_trash
+    config.trags_api_url = old_url
+    save_config(config)
+    config.trags_api_url = new_url
+    save_config(config)
+    assert tombstones.known_ids(new_url) == {memory.id}
+    assert purge() == 0
+    assert tombstones.get(memory.id) is not None
+
+
+def test_changing_remote_keeps_pending_deletion_for_current_remote(configured_remote_trash):
+    config, tombstones, memory, purge = configured_remote_trash
+    tombstones.note_remote_memories({memory.id}, "https://b.test")
+    config.trags_api_url = "https://b.test"
+    save_config(config)
+    assert tombstones.known_ids("https://a.test") == set()
+    assert tombstones.known_ids(config.trags_api_url) == {memory.id}
+    assert purge() == 0
+    assert tombstones.get(memory.id) is not None
+
+
+def test_explicit_key_removal_clears_current_remote_rows(configured_remote_trash, monkeypatch):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+
+    config, tombstones, memory, purge = configured_remote_trash
+    config.trags_api_key = "usr_test"
+    save_config(config)
+    monkeypatch.setenv("POPPY_DIR", str(config.poppy_dir))
+    result = CliRunner().invoke(cli, ["config", "set", "trags-api-key", ""])
+    assert result.exit_code == 0, result.output
+    assert tombstones.known_ids(config.trags_api_url) == set()
+    assert purge() == 1
+    assert tombstones.get(memory.id) is None
+
+
+@pytest.mark.parametrize("change", ["reauthenticate", "autosync-off", "unreadable-key"])
+def test_temporary_sync_changes_keep_remote_rows(configured_remote_trash, monkeypatch, change):
+    from poppy import keychain
+
+    config, tombstones, memory, purge = configured_remote_trash
+    if change == "reauthenticate":
+        config.trags_api_key = "usr_new_key"
+    elif change == "autosync-off":
+        config.auto_sync = "off"
+    else:
+
+        def unreadable(*args):
+            raise RuntimeError("keychain unavailable")
+
+        monkeypatch.setattr(keychain, "get_secret", unreadable)
+    save_config(config)
+    assert tombstones.known_ids(config.trags_api_url) == {memory.id}
+    assert purge() == 0
+
+
+def test_config_set_url_cleans_old_remote_rows(configured_remote_trash, monkeypatch):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+
+    config, tombstones, memory, purge = configured_remote_trash
+    monkeypatch.setenv("POPPY_DIR", str(config.poppy_dir))
+    result = CliRunner().invoke(cli, ["config", "set", "trags-api-url", "https://b.test"])
+    assert result.exit_code == 0, result.output
+    assert tombstones.known_ids("https://a.test") == set()
+    assert purge() == 1
+
+
+def test_setup_url_change_cleans_old_remote_rows(configured_remote_trash, monkeypatch):
+    import httpx
+
+    from poppy.setup import trags
+
+    config, tombstones, memory, purge = configured_remote_trash
+    monkeypatch.setenv("POPPY_DIR", str(config.poppy_dir))
+    monkeypatch.setattr(trags, "_generate_device_keypair", lambda: (None, "public-key"))
+    monkeypatch.setattr(trags, "_decrypt_api_key", lambda *_: "usr_new_key")
+    monkeypatch.setattr(trags.webbrowser, "open", lambda *_: True)
+    monkeypatch.setattr(trags.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_a, **_kw: httpx.Response(
+            201, json={"code": "TEST", "setup_url": "https://b.test/authorize", "poll_interval_seconds": 1}
+        ),
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_a, **_kw: httpx.Response(200, json={"api_key_encrypted": "encrypted"}))
+    trags.run_device_code_flow(api_url_override="https://b.test/")
+    assert load_config(config.poppy_dir).trags_api_url == "https://b.test"
+    assert tombstones.known_ids("https://a.test") == set()
+    assert purge() == 1

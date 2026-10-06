@@ -2789,7 +2789,7 @@ def test_first_live_success_never_sends_a_declined_tombstone(tmp_path, live_offs
     client = _FakeClient(echo=True)
 
     first = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
-    assert (first.sent_live, first.sent_tombstones, first.skipped) == (1, 0, 1)
+    assert (first.sent_live, first.sent_tombstones, first.skipped) == (1, 0, 0)
     assert "secret" not in client.rows_by_id
     remote = load(tmp_path).remotes[client.base_url]
     assert remote.last_pushed_at == live_at.isoformat()
@@ -4026,3 +4026,212 @@ def test_push_invalid_json_says_how_many_rows_were_sent(tmp_path):
         "Invalid JSON response from Trags (HTTP 201). This run sent 1 row before that reply. "
         "The last request may still have completed. The next sync retries."
     )
+
+
+@pytest.fixture
+def trash_clock(monkeypatch):
+    def advance(when):
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return when
+
+        monkeypatch.setattr("poppy.tombstones.datetime", Clock)
+
+    return advance
+
+
+@pytest.mark.parametrize("status", [401, 402, 408, 409, 422, 429, 500, 503])
+def test_client_keeps_http_status_on_upsert_errors(status):
+    import httpx
+
+    from poppy.sync.client import TragsClient
+
+    client = TragsClient(base_url="https://trags.test", api_key="test")
+    client._client.close()
+    client._client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(status, text="refused")))
+    with client, pytest.raises(TragsError) as raised:
+        client.upsert({"id": "X"})
+    assert raised.value.status_code == status
+    assert isinstance(raised.value, TragsAuthError) == (status == 401)
+
+
+def test_rejected_deletion_stops_retrying_and_ages_out(tmp_path, trash_clock):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(upsert_error=TragsError("invalid deletion", status_code=422))
+    tombstones.note_remote_memories({"X"}, client.base_url)
+    tombstones.add(_memory("X", updated=_NOW), tombstoned_at=_NOW)
+    first = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert (first.rejected, first.errors, first.skipped, first.sent_tombstones) == (1, 1, 0, 0)
+    assert "push" in load(tmp_path).remotes[client.base_url].errors
+
+    reopened = TombstoneStore(tmp_path / "memories.db")
+    assert reopened.get("X").rejected_remotes == {client.base_url}
+    second = push(engine=engine, tombstones=reopened, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert (second.rejected, second.errors, second.skipped) == (0, 0, 0)
+    assert client.upsert_attempts == 1
+    assert load(tmp_path).remotes[client.base_url].errors == {}
+
+    trash_clock(_NOW + timedelta(days=6))
+    assert reopened.purge_expired(pushed_through=(_NOW + timedelta(days=6)).isoformat(), require_sent=True) == 0
+    trash_clock(_NOW + timedelta(days=8))
+    assert reopened.purge_expired(pushed_through=(_NOW + timedelta(days=8)).isoformat(), require_sent=True) == 1
+    assert reopened.get("X") is None
+
+
+def test_rejection_does_not_settle_another_remote(tmp_path, trash_clock):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(upsert_error=TragsError("invalid deletion", status_code=422))
+    other_url = "https://other.test"
+    for url in (client.base_url, other_url):
+        tombstones.note_remote_memories({"X"}, url)
+    ts = tombstones.add(_memory("X", updated=_NOW), tombstoned_at=_NOW)
+    push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    trash_clock(_NOW + timedelta(days=8))
+    bound = (_NOW + timedelta(days=8)).isoformat()
+    assert tombstones.purge_expired(pushed_through=bound, require_sent=True) == 0
+    assert tombstones.get("X") is not None
+    other = _FakeClient(base_url=other_url)
+    result = push(engine=engine, tombstones=tombstones, client=other, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.sent_tombstones == 1
+    assert tombstones.get("X").token == ts.token
+    assert tombstones.purge_expired(pushed_through=bound, require_sent=True) == 1
+
+
+def test_restore_then_forget_resets_rejection(tmp_path, forget_memory):
+    from poppy.write_flow import restore
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("X", updated=_NOW))
+    client = _FakeClient(upsert_error=TragsError("invalid deletion", status_code=422))
+    tombstones.note_remote_memories({"X"}, client.base_url)
+    original = forget_memory(engine, tombstones, tmp_path, "X").tombstone
+    push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert tombstones.get("X").rejected_remotes == {client.base_url}
+    assert restore(engine, tmp_path, "X", tombstones=tombstones).found
+    fresh = forget_memory(engine, tombstones, tmp_path, "X").tombstone
+    assert fresh.token != original.token
+    assert fresh.rejected_remotes == set()
+    assert tombstones.mark_rejected([original], client.base_url) == 0
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.rejected == 1
+    assert client.upsert_attempts == 2
+
+
+@pytest.mark.parametrize("status", [402, 408, 409, 429, 500, 503, None])
+def test_other_deletion_errors_still_retry(tmp_path, status):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(upsert_error=TragsError("422 in the body is not the HTTP status", status_code=status))
+    tombstones.note_remote_memories({"X"}, client.base_url)
+    tombstones.add(_memory("X", updated=_NOW))
+    for _ in range(2):
+        result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+        assert (result.errors, result.rejected) == (1, 0)
+        assert tombstones.get("X").rejected_remotes == set()
+    assert client.upsert_attempts == 2
+
+
+def test_live_422_still_retries(tmp_path):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("X", updated=_NOW))
+    client = _FakeClient(upsert_error=TragsError("invalid live row", status_code=422))
+    for _ in range(2):
+        result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+        assert (result.errors, result.rejected) == (1, 0)
+    assert client.upsert_attempts == 2
+    assert load(tmp_path).remotes[client.base_url].last_pushed_at is None
+
+
+@pytest.mark.parametrize("purge_before_push", [False, True])
+def test_clean_push_clears_rejection_error_but_keeps_newer_generation(tmp_path, trash_clock, purge_before_push):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(upsert_error=TragsError("invalid deletion", status_code=422))
+    tombstones.note_remote_memories({"X"}, client.base_url)
+    tombstones.add(_memory("X", updated=_NOW), tombstoned_at=_NOW)
+    push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    message = load(tmp_path).remotes[client.base_url].errors["push"]
+    if purge_before_push:
+        trash_clock(_NOW + timedelta(days=8))
+        assert tombstones.purge_expired(pushed_through=(_NOW + timedelta(days=8)).isoformat(), require_sent=True) == 1
+
+    class ConcurrentFailureClient(_FakeClient):
+        def ping(self):
+            record_error(tmp_path, self.base_url, message, source="push")
+
+    second = push(
+        engine=engine, tombstones=tombstones, client=ConcurrentFailureClient(), state=load(tmp_path), poppy_dir=tmp_path
+    )
+    assert (second.errors, second.rejected) == (0, 0)
+    assert load(tmp_path).remotes[client.base_url].errors == {"push": message}
+    push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert load(tmp_path).remotes[client.base_url].errors == {}
+
+
+def test_rejected_mark_counts_once_and_ignores_replacement(tmp_path):
+    _, tombstones = _engine_and_tombstones(tmp_path)
+    original = tombstones.add(_memory("X", updated=_NOW), tombstoned_at=_NOW)
+    assert tombstones.mark_rejected([original], "https://trags.test/") == 1
+    assert tombstones.mark_rejected([original], "https://trags.test") == 0
+    replacement = tombstones.add(original.memory, tombstoned_at=_NOW)
+    assert replacement.rejected_remotes == set()
+    assert tombstones.mark_rejected([original], "https://trags.test") == 0
+    assert tombstones.get("X").rejected_remotes == set()
+
+
+def test_rejected_column_migrates_existing_trash(tmp_path):
+    _, tombstones = _engine_and_tombstones(tmp_path)
+    original = tombstones.add(_memory("X", updated=_NOW))
+    tombstones.mark_sent([original], "https://first.test")
+    with tombstones._conn:
+        tombstones._conn.execute("ALTER TABLE ui_tombstones DROP COLUMN rejected_remotes")
+    reopened = TombstoneStore(tmp_path / "memories.db")
+    migrated = reopened.get("X")
+    assert migrated.token == original.token
+    assert migrated.sent_remotes == {"https://first.test"}
+    assert migrated.rejected_remotes == set()
+    assert reopened.mark_rejected([migrated], "https://second.test") == 1
+
+
+def test_documented_tradeoff_deletion_uploads_local_edit_for_remote_trash_restore(tmp_path, forget_memory):
+    """Documented trade-off: cross-device Trash restore rebuilds from the remote body, including local edits."""
+    from dataclasses import replace
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    original = _memory("X", updated=_NOW)
+    client = _FakeClient(rows=[memory_to_wire(original)])
+    assert (
+        pull(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path).applied_live
+        == 1
+    )
+    edited = replace(
+        engine.get("X"), content=original.content + " added locally", updated_at=_NOW + timedelta(seconds=1)
+    )
+    engine.ingest(edited)
+    forget_memory(engine, tombstones, tmp_path, "X")
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert (result.sent_live, result.sent_tombstones) == (0, 1)
+    assert is_tombstone(client.upserts[0])
+    assert client.upserts[0]["content"] == edited.content
+
+
+def test_cli_push_clears_first_rejection_error_on_next_push(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(upsert_error=TragsError("invalid deletion", status_code=422))
+    tombstones.note_remote_memories({"X"}, client.base_url)
+    tombstones.add(_memory("X", updated=_NOW))
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr("poppy.cli.main._get_engine", lambda: engine)
+    monkeypatch.setattr("poppy.cli.main._sync_tombstones", lambda: tombstones)
+    monkeypatch.setattr("poppy.cli.main._sync_client", lambda: (client, client.base_url))
+    runner = CliRunner()
+    first = runner.invoke(cli, ["sync", "push"])
+    second = runner.invoke(cli, ["sync", "push"])
+    assert first.exit_code != 0
+    assert "1 rejected, 1 errors" in first.output
+    assert second.exit_code == 0, second.output
+    assert "0 rejected, 0 errors" in second.output
+    assert client.upsert_attempts == 1

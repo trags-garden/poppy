@@ -88,6 +88,7 @@ class PushResult:
     sent_tombstones: int
     skipped: int
     errors: int
+    rejected: int = 0
 
 
 @dataclass
@@ -315,6 +316,8 @@ def push(
     sent_tombstones = 0
     accepted_ids: set[str] = set()
     accepted_tombstones: list[Tombstone] = []
+    rejected_tombstones: list[Tombstone] = []
+    rejected = 0
     # Sends this push will have to make AGAIN next time: rows whose stamp can never
     # carry the watermark, so nothing on disk will record them as done. Deducted
     # from the cumulative pushed total below.
@@ -390,8 +393,7 @@ def push(
         if ts is None:
             continue
         iso = utc_iso(ts.tombstoned_at)
-        if ts.memory.id not in known_ids or remote_url in ts.sent_remotes:
-            skipped += 1
+        if ts.memory.id not in known_ids or remote_url in ts.sent_remotes or remote_url in ts.rejected_remotes:
             continue
         candidates.append((iso, "tomb", ts))
 
@@ -460,7 +462,6 @@ def push(
                 last_soft_error = f"local read failed: {exc}"
                 continue
             if current is None or current.token != payload.token:
-                skipped += 1
                 continue
 
         try:
@@ -521,6 +522,8 @@ def push(
             # `TragsConflictError` included: it subclasses `TragsError`, and a 409
             # is a server response like any other per-row refusal.
             errors += 1
+            if kind == "tomb" and exc.status_code == 422:
+                rejected_tombstones.append(payload)
             if kind == "live":
                 watermark_locked = True
             last_soft_error = str(exc)
@@ -643,6 +646,7 @@ def push(
         # cause retries, but can never strand a deletion of an accepted ID.
         tombstones.note_remote_memories(accepted_ids, client.base_url)
         tombstones.mark_sent(accepted_tombstones, client.base_url)
+        rejected = tombstones.mark_rejected(rejected_tombstones, client.base_url)
 
         def _persist(r: RemoteState) -> None:
             # Runs on a FRESH read under the state lock, so counter deltas
@@ -683,7 +687,10 @@ def push(
             elif errors > 0:
                 # A partial/failed push keeps its own slot so `sync status` still
                 # shows a push failure. Only a clean push clears the push slot.
-                stamp_error(r, "push", last_soft_error or f"push failed: {errors} error(s)")
+                message = last_soft_error or f"push failed: {errors} error(s)"
+                if errors == len(rejected_tombstones):
+                    message = f"deletion rejected (422): {message}"
+                stamp_error(r, "push", message)
             elif requests_made > 0:
                 # A clean push that ACTUALLY sent something clears its push slot,
                 # the auth slot and the probe slot (a successful authenticated
@@ -715,7 +722,13 @@ def push(
                 # above). Otherwise a user who fixed a revoked key, or whose 5xx
                 # has passed, could never clear the banner with `poppy sync push`
                 # while there was nothing new to send.
-                for kind in ("auth", "probe"):
+                # Rejected deletions have no upload left to retry. A healthy
+                # idle push can clear their earlier error, including after purge.
+                # The message marks an aggregate failure, never per-ID state.
+                kinds = ["auth", "probe"]
+                if remote.errors.get("push", "").startswith("deletion rejected (422): "):
+                    kinds.append("push")
+                for kind in kinds:
                     if kind in gens_at_start and r.error_gens.get(kind) == gens_at_start[kind]:
                         r.errors.pop(kind, None)
                         r.error_gens.pop(kind, None)
@@ -743,6 +756,7 @@ def push(
         sent_tombstones=sent_tombstones,
         skipped=skipped,
         errors=errors,
+        rejected=rejected,
     )
 
 
