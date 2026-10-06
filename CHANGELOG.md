@@ -45,6 +45,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `poppy setup trags` reports malformed setup and authorization replies as
   errors instead of Python tracebacks, and refuses a poll interval that is not
   a number above 0 and at most 60 seconds.
+- `poppy setup --daemon` now keeps the daemon token private in more cases.
+  New configs are written through an unpredictable temporary file, and a
+  backup slot that is a symlink is refused, so a planted symlink can no longer
+  redirect either write onto another file. A config owned by another user is
+  refused even when its mode is already 0600. On macOS, every new file that
+  receives the token (the config, its backups, the copy taken before a
+  symlinked config is rewritten) is created in a private folder that holds no
+  access control list, so it never inherits one that would let another user
+  open it before the token is written. An access control list on an existing
+  file is removed before the token is written, and setup refuses if it cannot
+  remove one. A volume that cannot hold access control lists (FAT, exFAT) no
+  longer stops setup.
+- A file or symlink that appears at a free backup slot, at the copy taken
+  before a symlinked config is rewritten, or at a config that did not exist
+  yet, while setup is writing it, is no longer replaced: setup refuses and
+  names it. A symlink already at that copy's name is refused too. Existing
+  configs and a reused backup slot are still replaced by rename, which never
+  writes through a link.
+- A symlinked config is still rewritten in place, so another user's program
+  that already had it open can still read it. When the file was readable by
+  others before, setup now says so instead of only reporting it as owner-only.
+  The same goes for older backups whose permissions setup narrows.
+- A backup Poppy cannot read is no longer described as holding a daemon token;
+  the warning now says it could not be checked, and only mentions other users
+  when its permissions or an access control list let them in.
 
 ## [0.3.2] - 2026-10-05
 

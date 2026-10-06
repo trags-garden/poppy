@@ -3,6 +3,8 @@
 import json
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import click
@@ -359,3 +361,604 @@ def test_cli_turns_a_permission_failure_into_a_plain_error(monkeypatch):
         cli_main._install_or_abort(client="cursor")
 
     assert "permissions could not be set" in str(excinfo.value)
+
+
+_RUNNING_AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+_HAS_MACOS_ACLS = sys.platform == "darwin" and Path("/bin/chmod").exists() and Path("/bin/ls").exists()
+
+
+def test_regular_config_write_does_not_follow_a_planted_temp_symlink(tmp_path):
+    """A symlink at the old predictable temp name must not redirect the write."""
+    config = tmp_path / "mcp.json"
+    config.write_text("{}\n")
+    victim = tmp_path / "unrelated.txt"
+    victim.write_text("unrelated content")
+    planted = tmp_path / f"{config.name}.poppy-tmp-{os.getpid()}"
+    planted.symlink_to(victim)
+
+    claude_code_module._write_text(config, _token_config("test-token"), target=config)
+
+    assert victim.read_text() == "unrelated content"
+    assert planted.is_symlink()
+    assert not config.is_symlink()
+    assert "test-token" in config.read_text()
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("reused", [False, True], ids=["first-free-slot", "reused-last-slot"])
+def test_backup_refuses_a_symlink_planted_at_its_slot(tmp_path, reused):
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+    victim = tmp_path / "victim.txt"
+    slots = claude_code_module._rotating_backup_slots(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+    if reused:
+        # Every slot is taken, so the last one is reused.
+        victim.write_text("unrelated content")
+        for slot in slots[:-1]:
+            slot.write_text("{}")
+        slots[-1].symlink_to(victim)
+    else:
+        # A dangling link does not count as an existing slot, so it is picked.
+        slots[0].symlink_to(victim)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="is a symlink"):
+        claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    if reused:
+        assert victim.read_text() == "unrelated content"
+        assert slots[-1].is_symlink()
+    else:
+        assert not victim.exists()
+        assert slots[0].is_symlink()
+
+
+def test_token_write_refused_for_a_private_config_owned_by_another_user(tmp_path, monkeypatch):
+    """Mode 0600 is private to its owner, which here is someone else."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json"
+    target.write_text('{"marker": "keep"}\n')
+    target.chmod(0o600)
+    path.symlink_to(target)
+    # Pretend to be a different user, so the file's real owner is "another" one.
+    monkeypatch.setattr(os, "geteuid", lambda: target.stat().st_uid + 1)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="owned by another user"):
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
+
+    assert "test-token" not in target.read_text()
+    assert "keep" in target.read_text()
+
+
+def _acl_entries(path: Path) -> list[str]:
+    listing = subprocess.run(["/bin/ls", "-led", str(path)], capture_output=True, text=True, check=True)
+    return [line for line in listing.stdout.splitlines()[1:] if line.strip()]
+
+
+@pytest.mark.skipif(not _HAS_MACOS_ACLS, reason="macOS ACL tooling not available")
+@pytest.mark.parametrize("symlink", [False, True], ids=["regular", "symlink"])
+def test_token_write_removes_an_acl_that_grants_other_users_read(tmp_path, monkeypatch, symlink):
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    if symlink:
+        target = tmp_path / "dotfile.json"
+        target.write_text('{"marker": "keep"}\n')
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read", str(target)], check=True)
+        path.symlink_to(target)
+    else:
+        # A folder ACL that every new file inherits, including Poppy's temp file.
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read,file_inherit", str(path.parent)], check=True)
+        target = path
+    probe = path.parent / "probe"
+    probe.write_text("")
+    assert symlink or _acl_entries(probe), "the folder ACL should be inherited"
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
+
+    assert "test-token" in target.read_text()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert _acl_entries(target) == []
+
+
+def test_token_write_refused_when_the_acl_cannot_be_removed(tmp_path, monkeypatch):
+    """Without the tool, Poppy cannot vouch for owner-only, so it does not write."""
+    config = tmp_path / "mcp.json"
+    config.write_text("{}\n")
+    monkeypatch.setattr(claude_code_module.sys, "platform", "darwin")
+    monkeypatch.setattr(claude_code_module, "_MACOS_CHMOD", str(tmp_path / "missing-chmod"))
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="access control list"):
+        claude_code_module._write_text(config, _token_config("test-token"), target=config)
+
+    assert config.read_text() == "{}\n"
+    assert list(tmp_path.glob("*.poppy-tmp-*")) == []
+
+
+@pytest.mark.skipif(_RUNNING_AS_ROOT, reason="root can read any file")
+def test_unreadable_backup_is_not_described_as_holding_a_token(tmp_path, monkeypatch, capsys):
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text("{}\n")
+    unreadable = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    unreadable.write_text('{"mcpServers": {}}')
+    unreadable.chmod(0o200)
+    try:
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+    finally:
+        unreadable.chmod(0o600)
+
+    err = capsys.readouterr().err
+    assert f"Could not check the older backup {unreadable}" in err
+    assert "It holds a daemon token" not in err
+
+
+@pytest.mark.skipif(not _HAS_MACOS_ACLS, reason="macOS ACL tooling not available")
+def test_setup_removes_an_acl_from_an_older_private_backup(tmp_path, monkeypatch):
+    """Mode 0600 alone does not make a backup private while an ACL grants read."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text("{}\n")
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o600)
+    subprocess.run(["/bin/chmod", "+a", "everyone allow read", str(stale)], check=True)
+    assert _acl_entries(stale)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    assert _acl_entries(stale) == []
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o600
+    assert "stale-token" in stale.read_text()
+
+
+def _fill_backup_slots(source: Path) -> list[Path]:
+    slots = claude_code_module._rotating_backup_slots(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+    for index, slot in enumerate(slots):
+        slot.write_text(f'{{"copy": {index}}}')
+    return slots
+
+
+def test_refused_backup_keeps_the_reused_slot_intact(tmp_path, monkeypatch):
+    """A refusal must not cost the user the backup that was already there."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+    slots = _fill_backup_slots(source)
+    original = slots[-1].read_text()
+
+    def acl_failure(fd):
+        raise OSError("could not remove its access control list: simulated")
+
+    monkeypatch.setattr(claude_code_module, "_clear_acl", acl_failure)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="access control list"):
+        claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert slots[-1].read_text() == original
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([source.name, *(s.name for s in slots)])
+
+
+def test_backup_does_not_write_through_a_hard_link_at_the_reused_slot(tmp_path):
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+    slots = _fill_backup_slots(source)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    victim.chmod(0o644)
+    slots[-1].unlink()
+    os.link(victim, slots[-1])
+
+    claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert victim.read_text() == "unrelated content"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+    assert "test-token" in slots[-1].read_text()
+    assert stat.S_IMODE(slots[-1].stat().st_mode) == 0o600
+
+
+def _open_reader_path(fd: int) -> str | None:
+    """The path an open descriptor refers to, so a second reader can be opened on it."""
+    if sys.platform == "darwin":
+        import fcntl
+
+        return fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).rstrip(b"\0").decode()
+    if os.path.isdir("/proc/self/fd"):
+        return os.readlink(f"/proc/self/fd/{fd}")
+    return None
+
+
+_CAN_REOPEN_DESCRIPTORS = sys.platform == "darwin" or os.path.isdir("/proc/self/fd")
+
+
+@pytest.mark.skipif(not _CAN_REOPEN_DESCRIPTORS, reason="cannot map a descriptor to its path here")
+@pytest.mark.parametrize("symlink", [False, True], ids=["regular", "symlink"])
+def test_token_never_reaches_a_file_opened_before_its_acl_was_removed(tmp_path, monkeypatch, symlink):
+    """Model the reader who wins the race: it opens whatever is about to lose its ACL.
+
+    Removing an ACL stops new opens but does not revoke a descriptor already
+    open, so every file handed to ``_clear_acl`` is opened here first and kept
+    open. A folder descriptor is not kept: looking up or opening a file inside
+    a folder is checked against the permissions in force at that time, not
+    when the folder was opened. Only the symlinked config itself is exempt,
+    since it is rewritten in place and its earlier exposure is reported.
+    """
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json" if symlink else path
+    target.write_text('{"marker": "keep"}\n')
+    if symlink:
+        path.symlink_to(target)
+    held = []
+    real_clear = claude_code_module._clear_acl
+
+    def open_before_clear(fd):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            opened_at = _open_reader_path(fd)
+            held.append((opened_at, os.open(opened_at, os.O_RDONLY)))
+        return real_clear(fd)
+
+    monkeypatch.setattr(claude_code_module, "_clear_acl", open_before_clear)
+    # Two runs: the second also copies the first token into every backup kind.
+    for token in ("first-token", "second-token"):
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token=token)
+
+    try:
+        for opened_at, reader in held:
+            if symlink and os.fstat(reader).st_ino == target.stat().st_ino:
+                continue
+            leaked = os.read(reader, 1 << 16)
+            assert b"first-token" not in leaked, opened_at
+            assert b"second-token" not in leaked, opened_at
+    finally:
+        for _, reader in held:
+            os.close(reader)
+    assert "second-token" in target.read_text()
+    # Every backup kind received a token, and no staging folder is left behind.
+    assert "first-token" in path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX + "-1").read_text()
+    if symlink:
+        assert "first-token" in path.with_name(path.name + ".poppy-prev.bak").read_text()
+    assert not [p for p in path.parent.iterdir() if "poppy-stage" in p.name]
+
+
+@pytest.mark.parametrize("symlink", [False, True], ids=["regular", "symlink"])
+def test_token_bearing_files_are_created_outside_the_config_folder(tmp_path, monkeypatch, symlink):
+    """Every new file that receives the token is made in a private folder, then renamed in.
+
+    A file made directly in the config's folder would inherit that folder's
+    ACL (macOS) and could be opened by another user before it is narrowed.
+    """
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json" if symlink else path
+    target.write_text('{"marker": "keep"}\n')
+    if symlink:
+        path.symlink_to(target)
+    published = []
+
+    def checked(publish):
+        def check_publish(src, dst):
+            src = Path(src)
+            if b"-token" in src.read_bytes():
+                assert src.parent != Path(dst).parent, f"{src} was made in the folder it is published to"
+                assert src.parent.parent == Path(dst).parent
+                assert stat.S_IMODE(src.parent.stat().st_mode) & 0o077 == 0
+                assert stat.S_IMODE(src.stat().st_mode) == 0o600
+                published.append(Path(dst).name)
+            return publish(src, dst)
+
+        return check_publish
+
+    # A free name is published with a hard link, a reused one with a rename.
+    monkeypatch.setattr(claude_code_module.os, "replace", checked(os.replace))
+    monkeypatch.setattr(claude_code_module.os, "link", checked(os.link))
+    for token in ("first-token", "second-token"):
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token=token)
+
+    expected = {path.name + claude_code_module.CONFIG_BACKUP_SUFFIX + "-1"}
+    expected.add(path.name + ".poppy-prev.bak" if symlink else path.name)
+    assert expected <= set(published)
+
+
+def _fake_chmod(tmp_path: Path, stderr: str, status: int) -> str:
+    script = tmp_path / "fake-chmod"
+    script.write_text(f"#!/bin/sh\necho '{stderr}' >&2\nexit {status}\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a shell script as the chmod tool")
+@pytest.mark.parametrize("acl_seen", [False, True], ids=["volume-without-acls", "acl-present"])
+def test_acl_removal_failure_only_refuses_when_an_acl_is_there(tmp_path, monkeypatch, capsys, acl_seen):
+    """`chmod -N` fails on FAT/exFAT, which cannot hold an ACL at all; that is no reason to stop."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text("{}\n")
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o644)
+    monkeypatch.setattr(claude_code_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        claude_code_module,
+        "_MACOS_CHMOD",
+        _fake_chmod(tmp_path, "chmod: Failed to clear ACL on file: Operation not supported", 1),
+    )
+    monkeypatch.setattr(claude_code_module, "_has_acl", lambda target: acl_seen, raising=False)
+
+    if acl_seen:
+        with pytest.raises(claude_code_module.CorruptConfigError, match="Operation not supported"):
+            claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+        assert "new-token" not in path.read_text()
+        return
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+    assert "new-token" in path.read_text()
+    err = capsys.readouterr().err
+    assert f"Tightened permissions on {stale}" in err
+    assert "Could not narrow" not in err
+    assert "can read" not in err
+
+
+@pytest.mark.skipif(not _CAN_REOPEN_DESCRIPTORS, reason="cannot map a descriptor to its path here")
+def test_acl_failure_message_names_the_reason(tmp_path, monkeypatch):
+    """A failure raised as a bare message must still read as that message, never "(None)"."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json"
+    target.write_text(_token_config("old-token"))
+    target.chmod(0o600)
+    path.symlink_to(target)
+    real_clear = claude_code_module._clear_acl
+
+    def acl_failure(fd):
+        # Fail only while saving the pre-write copy of the symlinked config.
+        if ".poppy-prev.bak" in _open_reader_path(fd):
+            raise OSError("could not remove its access control list: simulated")
+        return real_clear(fd)
+
+    monkeypatch.setattr(claude_code_module, "_clear_acl", acl_failure)
+
+    with pytest.raises(claude_code_module.CorruptConfigError) as excinfo:
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    assert "(None)" not in str(excinfo.value)
+    assert "simulated" in str(excinfo.value)
+    assert "new-token" not in target.read_text()
+
+
+def test_acl_failure_leaves_an_in_place_target_untouched(tmp_path, monkeypatch):
+    """The mode is only narrowed once the ACL is gone, and the error names the real failure."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json"
+    target.write_text('{"marker": "keep"}\n')
+    target.chmod(0o644)
+    path.symlink_to(target)
+    inode = target.stat().st_ino
+    real_clear = claude_code_module._clear_acl
+
+    def acl_failure(fd):
+        if os.fstat(fd).st_ino == inode:
+            raise OSError("could not remove its access control list: simulated")
+        return real_clear(fd)
+
+    monkeypatch.setattr(claude_code_module, "_clear_acl", acl_failure)
+
+    with pytest.raises(claude_code_module.CorruptConfigError) as excinfo:
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert target.read_text() == '{"marker": "keep"}\n'
+    assert "access control list" in str(excinfo.value)
+    assert "could not be narrowed" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("acl_seen", [False, True], ids=["no-acl", "acl"])
+def test_unreadable_private_backup_warns_only_when_an_acl_lets_others_in(tmp_path, monkeypatch, capsys, acl_seen):
+    """A 0600 backup Poppy cannot read (say, root's from an old sudo run) is private unless an ACL says otherwise."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text("{}\n")
+    unreadable = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    unreadable.write_text('{"mcpServers": {}}')
+    unreadable.chmod(0o600)
+    original_read_text = Path.read_text
+
+    def refuse_read(self, *args, **kwargs):
+        if self == unreadable:
+            raise PermissionError(13, "Permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", refuse_read)
+    monkeypatch.setattr(claude_code_module.sys, "platform", "darwin")
+    monkeypatch.setattr(claude_code_module, "_has_acl", lambda target: acl_seen, raising=False)
+    monkeypatch.setattr(claude_code_module, "_clear_acl", lambda fd: False)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    err = capsys.readouterr().err
+    assert (f"Could not check the older backup {unreadable}" in err) == acl_seen
+    assert ("other users on this machine may be able to read it" in err) == acl_seen
+
+
+def test_in_place_token_write_says_what_cannot_be_taken_back(tmp_path, monkeypatch, capsys):
+    """A symlinked config keeps its identity, so a reader another user already holds keeps working."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json"
+    target.write_text('{"marker": "keep"}\n')
+    target.chmod(0o644)
+    path.symlink_to(target)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
+    err = capsys.readouterr().err
+    assert f"Tightened permissions on {target} to owner-only (0600)" in err
+    assert "already had it open can still read the token" in err
+
+    # Already private with no ACL: nothing to report, nothing to caveat.
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
+    assert capsys.readouterr().err == ""
+
+
+def test_in_place_acl_removal_on_a_private_file_is_reported(tmp_path, monkeypatch, capsys):
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json"
+    target.write_text('{"marker": "keep"}\n')
+    target.chmod(0o600)
+    path.symlink_to(target)
+    inode = target.stat().st_ino
+    monkeypatch.setattr(claude_code_module, "_clear_acl", lambda fd: os.fstat(fd).st_ino == inode)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
+
+    err = capsys.readouterr().err
+    assert f"Removed an access control list from {target}" in err
+    assert "already had it open can still read the token" in err
+    assert "Tightened permissions" not in err
+
+
+def test_tightened_backup_is_not_described_as_private_all_along(tmp_path, monkeypatch, capsys):
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    path.write_text("{}\n")
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o644)
+    hidden = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX + "-1")
+    hidden.write_text(_token_config("stale-token"))
+    hidden.chmod(0o700)
+
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    lines = capsys.readouterr().err.splitlines()
+    [stale_line] = [line for line in lines if f"{stale} " in line]
+    [hidden_line] = [line for line in lines if f"{hidden} " in line]
+    assert "that token may already have been read" in stale_line
+    # Mode 0700 never let anyone else read it, so there is nothing to caveat.
+    assert "may already have been read" not in hidden_line
+
+
+@pytest.mark.skipif(not _HAS_MACOS_ACLS, reason="macOS ACL tooling not available")
+def test_token_file_never_carries_the_folder_acl_while_being_written(tmp_path, monkeypatch):
+    """Real ACLs: the folder hands read access to every new file and folder made in it."""
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    subprocess.run(
+        ["/bin/chmod", "+a", "everyone allow read,list,search,file_inherit,directory_inherit", str(path.parent)],
+        check=True,
+    )
+    seen = []
+
+    def checked(publish):
+        def check_publish(src, dst):
+            if b"test-token" in Path(src).read_bytes():
+                seen.append((_acl_entries(Path(src)), _acl_entries(Path(src).parent)))
+            return publish(src, dst)
+
+        return check_publish
+
+    monkeypatch.setattr(claude_code_module.os, "replace", checked(os.replace))
+    monkeypatch.setattr(claude_code_module.os, "link", checked(os.link))
+    claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
+
+    assert seen == [([], [])]
+    assert _acl_entries(path) == []
+    assert claude_code_module._has_acl(path.parent) is True
+    assert claude_code_module._has_acl(path) is False
+
+
+def _plant_symlink_when_published(monkeypatch, dest: Path, victim: Path) -> None:
+    """Swap a symlink in at ``dest`` in the moment after setup checked it, just before it is published."""
+
+    def racing(publish):
+        def plant_then_publish(src, dst):
+            if Path(dst) == dest and not dest.is_symlink():
+                dest.unlink(missing_ok=True)
+                dest.symlink_to(victim)
+            return publish(src, dst)
+
+        return plant_then_publish
+
+    monkeypatch.setattr(claude_code_module.os, "replace", racing(os.replace))
+    monkeypatch.setattr(claude_code_module.os, "link", racing(os.link))
+
+
+@pytest.mark.parametrize("token", [True, False], ids=["token", "token-free"])
+def test_backup_refuses_a_symlink_raced_in_at_a_free_slot(tmp_path, monkeypatch, token):
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token") if token else "{}")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    slot = source.with_name(source.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    _plant_symlink_when_published(monkeypatch, slot, victim)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="appeared there"):
+        claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    # The link Poppy did not create is still there, and nothing was left behind.
+    assert slot.is_symlink()
+    assert victim.read_text() == "unrelated content"
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([source.name, slot.name, victim.name])
+
+
+def test_reused_slot_replaces_a_raced_symlink_without_writing_through_it(tmp_path, monkeypatch):
+    """Reusing the last slot overwrites it on purpose, by rename, so a link swapped in is replaced, not followed."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+    slots = _fill_backup_slots(source)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    _plant_symlink_when_published(monkeypatch, slots[-1], victim)
+
+    assert claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX) == slots[-1]
+
+    assert victim.read_text() == "unrelated content"
+    assert not slots[-1].is_symlink()
+    assert "test-token" in slots[-1].read_text()
+    assert stat.S_IMODE(slots[-1].stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("existing", [True, False], ids=["existing-config", "new-config"])
+def test_config_publish_never_writes_through_a_raced_symlink(tmp_path, monkeypatch, existing):
+    """An existing config is replaced by rename (a link swapped in is replaced, its target untouched);
+    a config that did not exist yet is not allowed to replace whatever appeared."""
+    config = tmp_path / "mcp.json"
+    if existing:
+        config.write_text("{}\n")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    _plant_symlink_when_published(monkeypatch, config, victim)
+
+    if existing:
+        claude_code_module._write_text(config, _token_config("test-token"), target=config)
+        assert not config.is_symlink()
+        assert "test-token" in config.read_text()
+    else:
+        with pytest.raises(claude_code_module.CorruptConfigError, match="appeared there"):
+            claude_code_module._write_text(config, _token_config("test-token"), target=config)
+        assert config.is_symlink()
+    assert victim.read_text() == "unrelated content"
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([config.name, victim.name])
+
+
+@pytest.mark.parametrize("raced", [False, True], ids=["already-there", "raced-in"])
+def test_pre_write_copy_refuses_a_symlink_at_its_name(tmp_path, monkeypatch, raced):
+    path = _cursor_config_path(tmp_path, monkeypatch)
+    target = tmp_path / "dotfile.json"
+    target.write_text(_token_config("old-token"))
+    path.symlink_to(target)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated content")
+    copy = path.with_name(path.name + claude_code_module.PREVIOUS_CONTENT_BACKUP_SUFFIX)
+    if raced:
+        _plant_symlink_when_published(monkeypatch, copy, victim)
+    else:
+        copy.symlink_to(victim)
+
+    with pytest.raises(claude_code_module.CorruptConfigError, match="symlink|appeared there"):
+        claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token")
+
+    assert copy.is_symlink()
+    assert victim.read_text() == "unrelated content"
+    assert "new-token" not in target.read_text()
+    assert not [p for p in path.parent.iterdir() if "poppy-stage" in p.name or p.name.startswith(".mcp.json.poppy")]
+
+
+def test_publish_falls_back_to_a_rename_without_hard_links(tmp_path, monkeypatch):
+    """FAT and exFAT have no hard links; a free slot is then published by rename after a second check."""
+    source = tmp_path / "mcp.json"
+    source.write_text(_token_config("test-token"))
+
+    def no_hard_links(src, dst):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(claude_code_module.os, "link", no_hard_links)
+
+    backup = claude_code_module._backup_once(source, claude_code_module.CONFIG_BACKUP_SUFFIX)
+
+    assert "test-token" in backup.read_text()
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([source.name, backup.name])

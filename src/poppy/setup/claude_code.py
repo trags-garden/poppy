@@ -12,11 +12,16 @@ Poppy MVP wires:
   - Managed CLAUDE.md block (claude-code) — tool discovery for the agent
 """
 
+import contextlib
+import ctypes
+import errno
+import functools
 import json
 import locale
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from collections.abc import MutableMapping
@@ -382,14 +387,41 @@ def _set_mode(fd: int, mode: int, path: Path) -> None:
         ) from exc
 
 
-def _restrict_to_owner(fd: int, path: Path) -> None:
-    """Narrow an already-open file to owner-only, or refuse to write to it.
+def _restrict_to_owner(fd: int, path: Path) -> bool:
+    """Narrow an existing, already-open file to owner-only, or refuse to write to it.
 
     Called before the first byte of token-bearing content reaches the file, so
     a failure here means nothing sensitive has been written yet and the write
     can still be abandoned. Changing a file's mode requires owning it, which
     being merely able to write it (through a group, say) does not grant.
+
+    A file another user owns is refused even when it is already 0600: that
+    user can read it, and the token opens this user's daemon. The ACL goes
+    before the mode changes, so a refusal leaves the file exactly as it was.
+    Returns whether an ACL was removed.
     """
+    try:
+        owner = os.fstat(fd).st_uid
+    except OSError as exc:
+        raise CorruptConfigError(
+            f"Refusing to write the Poppy daemon token to {path}: its owner could not be checked "
+            f"({exc.strerror or exc}). Nothing was written."
+        ) from exc
+    if hasattr(os, "geteuid") and owner != os.geteuid():
+        raise CorruptConfigError(
+            f"Refusing to write the Poppy daemon token to {path}: it is owned by another user "
+            f"(uid {owner}), who could read the token. Take ownership of the file, or re-run "
+            "`poppy setup` without `--daemon`."
+        )
+    try:
+        removed_acl = _clear_acl(fd)
+    except OSError as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        raise CorruptConfigError(
+            f"Refusing to write the Poppy daemon token to {path}: {reason}. That list may let other "
+            "users read the file, so nothing was written. Remove it with `chmod -N`, or re-run "
+            "`poppy setup` without `--daemon`."
+        ) from exc
     try:
         os.fchmod(fd, 0o600)
     except (AttributeError, OSError) as exc:
@@ -399,15 +431,171 @@ def _restrict_to_owner(fd: int, path: Path) -> None:
             f"narrowed to owner-only ({reason}), so another user on this machine could read the "
             "token. Take ownership of the file, or re-run `poppy setup` without `--daemon`."
         ) from exc
+    return removed_acl
 
 
-def _report_tightened(path: Path, *, reason: str = "it now holds the daemon token") -> None:
+@contextlib.contextmanager
+def _private_new_file(final: Path):
+    """Yield ``(fd, path)`` for a new empty 0600 file no other user has ever been able to open.
+
+    For bytes that include the daemon token. A file created straight in the
+    target's folder picks up any ACL that folder passes on to new files
+    (macOS), and another user could open it in the moment before that ACL is
+    removed. Removing an ACL does not take back a descriptor already open, so
+    that user would then read the token as it is written.
+
+    So the file is made in a fresh folder beside ``final`` instead: mode 0700,
+    with any inherited ACL removed BEFORE anything is created in it, so the
+    file inherits nothing and is private from its first moment. Someone who
+    opened the folder itself early gains nothing: looking up or opening a file
+    inside it is checked against the permissions in force at that time. The
+    caller writes, then moves the file onto ``final`` with ``_publish``; the
+    folder is on the same filesystem, so the move is atomic. The folder and anything left in
+    it are removed on exit.
+    """
+    staging = Path(tempfile.mkdtemp(dir=final.parent, prefix=f".{final.name}.poppy-stage-"))
+    tmp = staging / final.name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        try:
+            if os.open in os.supports_dir_fd:
+                # Work through the folder's descriptor, so the file lands in the
+                # folder whose ACL was just removed even if its name is moved.
+                dir_fd = os.open(staging, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    _clear_acl(dir_fd)
+                    fd = os.open(tmp.name, flags, 0o600, dir_fd=dir_fd)
+                finally:
+                    os.close(dir_fd)
+            else:
+                # No folder descriptors (Windows), and no macOS ACL to clear.
+                fd = os.open(tmp, flags, 0o600)
+        except OSError as exc:
+            reason = getattr(exc, "strerror", None) or str(exc)
+            raise CorruptConfigError(
+                f"Refusing to write the Poppy daemon token to {final}: a private temporary file could not "
+                f"be made beside it ({reason}). Nothing was written."
+            ) from exc
+        try:
+            # The umask may have taken bits off the 0600 asked for above.
+            _set_mode(fd, 0o600, final)
+        except BaseException:
+            os.close(fd)
+            raise
+        yield fd, tmp
+    finally:
+        tmp.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            staging.rmdir()
+
+
+# Absolute path, so a different `chmod` earlier on PATH is never run.
+_MACOS_CHMOD = "/bin/chmod"
+# ACL_TYPE_EXTENDED in <sys/acl.h>: the kind of ACL macOS files carry.
+_ACL_TYPE_EXTENDED = 0x00000100
+
+
+@functools.cache
+def _macos_acl_api():
+    """The macOS C library's ACL readers, or ``None`` where they cannot be loaded."""
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        libc.acl_get_fd_np.restype = ctypes.c_void_p
+        libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        libc.acl_get_link_np.restype = ctypes.c_void_p
+        libc.acl_get_link_np.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+        libc.acl_free.argtypes = [ctypes.c_void_p]
+    except (OSError, AttributeError):
+        return None
+    return libc
+
+
+def _has_acl(target: int | Path) -> bool | None:
+    """Whether an open file (by descriptor) or a path carries a macOS ACL entry.
+
+    ``None`` means it could not be told. A volume that cannot hold ACLs (FAT,
+    exFAT) reports none. A path is checked without following a symlink there.
+    """
+    if sys.platform != "darwin":
+        return False
+    libc = _macos_acl_api()
+    if libc is None:
+        return None
+    if isinstance(target, int):
+        acl = libc.acl_get_fd_np(target, _ACL_TYPE_EXTENDED)
+    else:
+        acl = libc.acl_get_link_np(os.fsencode(target), _ACL_TYPE_EXTENDED)
+    if not acl:
+        return False if ctypes.get_errno() == errno.ENOENT else None
+    try:
+        entry = ctypes.c_void_p()
+        # 0 = ACL_FIRST_ENTRY; an empty list grants nothing.
+        return libc.acl_get_entry(acl, 0, ctypes.byref(entry)) == 0
+    finally:
+        libc.acl_free(acl)
+
+
+def _clear_acl(fd: int) -> bool:
+    """Remove any macOS access control list from an open file or folder.
+
+    On macOS an ACL entry (often inherited from the folder) can grant other
+    users read access that mode 0600 does not take away, so owner-only is only
+    true once the ACL is gone. The standard library cannot edit ACLs, so this
+    runs the system ``chmod -N`` on the open file itself, which keeps it on the
+    file already opened rather than whatever the name points to now. If that
+    cannot be done the error is raised, so callers refuse rather than claim
+    owner-only, unless the file is seen to carry no ACL anyway (a volume that
+    cannot hold ACLs makes ``chmod -N`` fail). Linux needs nothing here:
+    ``chmod`` narrows a POSIX ACL's mask, so mode 0600 already shuts out every
+    other user.
+
+    Returns whether an ACL was there to remove. This only stops new opens: a
+    descriptor another user already holds keeps working.
+    """
+    if sys.platform != "darwin":
+        return False
+    present = _has_acl(fd)
+    try:
+        result = subprocess.run(
+            [_MACOS_CHMOD, "-N", f"/dev/fd/{fd}"],
+            pass_fds=(fd,),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError(f"could not run {_MACOS_CHMOD} to remove its access control list: {exc}") from exc
+    if result.returncode != 0:
+        if present is False:
+            # Nothing to remove, as on a volume that cannot hold ACLs.
+            return False
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        raise OSError(f"could not remove its access control list: {detail}")
+    return bool(present)
+
+
+def _was_readable_by_others(mode: int, *, had_acl: bool) -> bool:
+    """Whether a file's earlier mode or ACL may have let another user open it for reading."""
+    return bool(mode & 0o044) or had_acl
+
+
+def _report_tightened(
+    path: Path, *, reason: str = "it now holds the daemon token", mode_changed: bool = True, caveat: str = ""
+) -> None:
     """Tell the user a file's permissions changed, on stderr.
 
     Stderr keeps this off the stdout stream that `poppy serve` reserves for the
-    MCP protocol, matching how the rest of Poppy reports side notes.
+    MCP protocol, matching how the rest of Poppy reports side notes. A file
+    that was readable by others before cannot be made private after the fact
+    for anyone who already had it open, so ``caveat`` says what is still open.
     """
-    click.echo(f"Tightened permissions on {path} to owner-only (0600) because {reason}.", err=True)
+    if mode_changed:
+        message = f"Tightened permissions on {path} to owner-only (0600) because {reason}."
+    else:
+        message = f"Removed an access control list from {path} because {reason}."
+    click.echo(f"{message} {caveat}".rstrip(), err=True)
 
 
 def _write_text(path: Path, content: str, *, target: Path) -> None:
@@ -431,34 +619,74 @@ def _write_text(path: Path, content: str, *, target: Path) -> None:
     if _check_write_target(path, target) != path:
         _write_in_place(path, content, target=target, contains_token=contains_token)
         return
-    previous_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    existed = path.exists()
+    previous_mode = stat.S_IMODE(path.stat().st_mode) if existed else 0o600
     mode = 0o600 if contains_token else previous_mode
-    # Atomic write: render to a temp file in the same directory, then os.replace
+    # Atomic write: render to a temp file on the same filesystem, then move it
     # onto the target so a crash mid-write can't leave a half-written config.
-    # Same-dir tmp keeps the rename on one filesystem (os.replace requirement).
-    tmp = path.with_name(f"{path.name}.poppy-tmp-{os.getpid()}")
+    # The token goes into a file no other user has ever been able to open; see
+    # _private_new_file.
+    if contains_token:
+        with _private_new_file(path) as (fd, tmp):
+            with os.fdopen(fd, "w") as fh:
+                fh.write(content)
+            _publish(tmp, path, replace=existed)
+        if previous_mode != mode:
+            _report_tightened(path)
+        return
+    # mkstemp creates a new 0600 file under an unpredictable name and refuses
+    # an existing one, so a symlink planted beside the config cannot redirect
+    # the write onto another file.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.poppy-tmp-")
+    tmp = Path(tmp_name)
     try:
-        # Create the temp file and chmod it to the final mode BEFORE writing any
-        # content, so a bearer token is never briefly readable at the umask
-        # default (e.g. 0644) while the write is in flight.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         try:
             # Name the config rather than the temp file: the temp name is an
             # implementation detail the user cannot act on.
-            if contains_token:
-                _restrict_to_owner(fd, path)
-            else:
-                _set_mode(fd, mode, path)
+            _set_mode(fd, mode, path)
         except BaseException:
             os.close(fd)
             raise
         with os.fdopen(fd, "w") as fh:
             fh.write(content)
-        os.replace(tmp, path)
-        if contains_token and previous_mode != mode:
-            _report_tightened(path)
+        _publish(tmp, path, replace=existed)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _publish(tmp: Path, dest: Path, *, replace: bool) -> None:
+    """Move a finished temp file onto ``dest``, never writing through a link there.
+
+    ``replace`` is for a name that held a regular file Poppy means to
+    overwrite: the config itself, or a backup slot being reused. It is
+    replaced by rename, which swaps the name and never follows it, so if a
+    symlink is swapped in at that name in the moment after the caller checked
+    it, the link itself is replaced and the file it points to is untouched.
+
+    A name that was free when the caller checked it must still be free: the
+    file is hard-linked into place, which fails if anything, a symlink
+    included, has appeared there since, and setup refuses rather than remove
+    something it did not create. A volume without hard links (FAT, exFAT)
+    falls back to a rename after checking again, which narrows that window
+    without closing it.
+    """
+    if not replace:
+        try:
+            os.link(tmp, dest)
+        except FileExistsError:
+            appeared = True
+        except OSError:
+            appeared = dest.exists() or dest.is_symlink()
+        else:
+            tmp.unlink(missing_ok=True)
+            return
+        if appeared:
+            raise CorruptConfigError(
+                f"Refusing to write {dest}: something appeared there while `poppy setup` was writing it, "
+                "and setup does not replace a file or link it did not create. Check it, then re-run "
+                "`poppy setup`."
+            )
+    os.replace(tmp, dest)
 
 
 def _write_in_place(link: Path, content: str, *, target: Path, contains_token: bool = False) -> None:
@@ -485,14 +713,15 @@ def _write_in_place(link: Path, content: str, *, target: Path, contains_token: b
             f"Refusing to write through symlink at {link}: {resolved} cannot be opened for writing "
             f"({exc.strerror}). Fix or remove the link, then re-run `poppy setup`."
         ) from exc
+    removed_acl = False
     try:
         previous_mode = stat.S_IMODE(os.fstat(fd).st_mode)
         tighten = contains_token and previous_mode != 0o600
-        if tighten:
-            # Narrow the existing inode before any token byte reaches it. A file
-            # already at 0600 is left alone, so a config someone else owns but
-            # keeps private does not fail the write for no gain.
-            _restrict_to_owner(fd, resolved)
+        if contains_token:
+            # Narrow the existing inode before any token byte reaches it. This
+            # also runs for a file already at 0600, since another owner or an
+            # ACL can still let someone else read it.
+            removed_acl = _restrict_to_owner(fd, resolved)
         data = content.encode(locale.getpreferredencoding(False))
         # Pad shorter content with trailing whitespace up to the old size, so
         # the file never reads as new content followed by a stale old tail.
@@ -504,33 +733,61 @@ def _write_in_place(link: Path, content: str, *, target: Path, contains_token: b
         os.fsync(fd)
     finally:
         os.close(fd)
-    if tighten:
+    if tighten or removed_acl:
         # Name the file that actually changed, not the link: a dotfiles tool may
-        # track the mode of its own copy and revert it.
-        _report_tightened(resolved)
+        # track the mode of its own copy and revert it. The file must keep its
+        # identity, so unlike a new file it cannot be made private from its
+        # first moment: a reader another user opened while it was readable
+        # keeps working, and the message says so rather than promise privacy.
+        caveat = ""
+        if _was_readable_by_others(previous_mode, had_acl=removed_acl):
+            caveat = (
+                "Other users may have been able to read this file before, and a program of theirs "
+                "that already had it open can still read the token now in it."
+            )
+        _report_tightened(resolved, mode_changed=tighten, caveat=caveat)
 
 
 def _save_previous_content(link: Path, resolved: Path) -> None:
     """Atomically copy ``resolved``'s current bytes to ``.poppy-prev.bak`` beside ``link``."""
     backup = link.with_name(link.name + PREVIOUS_CONTENT_BACKUP_SUFFIX)
+    # As with the rotating slots, Poppy only writes a regular file here, so a
+    # symlink was put there by someone else and is refused rather than replaced.
+    if backup.is_symlink():
+        raise CorruptConfigError(
+            f"Refusing to write through symlink at {link}: {backup} is a symlink. Remove it, then re-run "
+            "`poppy setup`. Nothing was changed."
+        )
     try:
+        existed = backup.exists()
         data = resolved.read_bytes()
+        if _contains_daemon_token(data.decode(errors="replace")):
+            with _private_new_file(backup) as (fd, tmp):
+                _write_and_sync(fd, data)
+                _publish(tmp, backup, replace=existed)
+            return
         # mkstemp creates a unique 0600 file, so a planted name cannot redirect the copy.
         fd, tmp = tempfile.mkstemp(dir=link.parent, prefix=f".{backup.name}.")
         try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, backup)
+            _write_and_sync(fd, data)
+            _publish(Path(tmp), backup, replace=existed)
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
     except OSError as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
         raise CorruptConfigError(
             f"Refusing to write through symlink at {link}: could not save its current content to {backup} "
-            f"({exc.strerror}). Nothing was changed."
+            f"({reason}). Nothing was changed."
         ) from exc
+
+
+def _write_and_sync(fd: int, data: bytes) -> None:
+    """Write ``data`` to ``fd``, flush it to disk, and close the descriptor."""
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 # ---------------------------------------------------------------------------
@@ -594,25 +851,56 @@ def _tighten_existing_backups(path: Path) -> None:
     slots = _rotating_backup_slots(path, CONFIG_BACKUP_SUFFIX)
     slots.append(path.with_name(path.name + PREVIOUS_CONTENT_BACKUP_SUFFIX))
     for slot in slots:
+        content = None
+        mode = None
+        removed_acl = False
         try:
             if slot.is_symlink() or not slot.is_file():
                 continue
             # Check the mode before reading: the common case is a slot that is
             # already private, and that costs one stat instead of a full read.
-            if stat.S_IMODE(slot.stat().st_mode) == 0o600:
+            # On macOS a 0600 slot can still carry an ACL, which is checked
+            # without reading the file.
+            mode = stat.S_IMODE(slot.stat().st_mode)
+            if mode == 0o600 and not _has_acl(slot):
                 continue
-            if not _contains_daemon_token(slot.read_text(errors="replace")):
+            content = slot.read_text(errors="replace")
+            if not _contains_daemon_token(content):
                 continue
-            slot.chmod(0o600)
+            if mode != 0o600:
+                slot.chmod(0o600)
+            fd = os.open(slot, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                removed_acl = _clear_acl(fd)
+            finally:
+                os.close(fd)
         except OSError as exc:
             reason = getattr(exc, "strerror", None) or str(exc)
+            if content is None:
+                # Never read, so whether it holds a token is unknown. Only warn
+                # that others may read it when its mode or an ACL says so.
+                message = f"Could not check the older backup {slot} for a daemon token ({reason})."
+                if mode is not None and _was_readable_by_others(mode, had_acl=bool(_has_acl(slot))):
+                    message += " If it holds one, other users on this machine may be able to read it."
+                click.echo(message, err=True)
+                continue
             click.echo(
                 f"Could not narrow permissions on the older backup {slot} ({reason}). "
-                "It holds a daemon token that other users on this machine can read.",
+                "It holds a daemon token that other users on this machine may be able to read.",
                 err=True,
             )
             continue
-        _report_tightened(slot, reason="this earlier backup holds a daemon token")
+        if mode != 0o600 or removed_acl:
+            caveat = ""
+            if _was_readable_by_others(mode, had_acl=removed_acl):
+                # Narrowing it now does not undo earlier exposure.
+                caveat = "Other users may have been able to read it before, so that token may already have been read."
+            _report_tightened(
+                slot,
+                reason="this earlier backup holds a daemon token",
+                mode_changed=mode != 0o600,
+                caveat=caveat,
+            )
 
 
 def _backup_once(path: Path, suffix: str) -> Path | None:
@@ -633,31 +921,48 @@ def _backup_once(path: Path, suffix: str) -> Path | None:
     # too, so that backup stays owner-only rather than inheriting the source's
     # wider mode. Repeated setups rotate through the slots, so this is the
     # normal path once a client has been set up with the daemon before.
-    if _contains_daemon_token(data.decode(errors="replace")):
+    contains_token = _contains_daemon_token(data.decode(errors="replace"))
+    if contains_token:
         mode = 0o600
-    # Open the slot (fresh or reused) and lock the fd to 0600 BEFORE writing any
-    # bytes, applying the final mode only afterwards: a reused slot can still
-    # carry a wider mode from an earlier rotation, and the bytes being copied
-    # may be credentials, so the write itself must never happen at a mode other
-    # users can read.
-    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Poppy only ever writes regular files at a slot, so a symlink there was
+    # planted by someone else and is refused rather than replaced.
+    if backup.is_symlink():
+        raise CorruptConfigError(
+            f"Refusing to back up {path}: the backup slot {backup} is a symlink. Remove it, then re-run `poppy setup`."
+        )
+    # Copy into a fresh temp file and move it onto the slot last: a reused
+    # slot keeps its old copy until every check that can refuse has passed,
+    # and the move replaces the slot's name rather than writing through it, so
+    # neither a symlink nor a hard link at the slot can redirect the copy. A
+    # free slot must still be free then; see _publish.
+    reuse = backup.exists()
+    if contains_token:
+        with _private_new_file(backup) as (fd, tmp):
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            _publish(tmp, backup, replace=reuse)
+        return backup
+    # Lock the temp file to 0600 BEFORE writing any bytes, applying the final
+    # mode only afterwards: the bytes may still be credentials of another kind,
+    # so the write itself must never happen at a mode other users can read.
+    fh = tempfile.NamedTemporaryFile(dir=backup.parent, prefix=f".{backup.name}.", delete=False)
+    tmp = Path(fh.name)
     try:
-        _set_mode(fd, 0o600, backup)
-        os.write(fd, data)
-        try:
-            os.fchmod(fd, mode)
-        except OSError:
-            # This second call only widens the backup back to the source's own
-            # mode. Leaving it at 0600 is the safe outcome, so it is not worth
-            # failing a setup over.
-            pass
+        with fh:
+            _set_mode(fh.fileno(), 0o600, backup)
+            fh.write(data)
+            fh.flush()
+            try:
+                os.fchmod(fh.fileno(), mode)
+            except OSError:
+                # This second call only widens the backup back to the source's
+                # own mode. Leaving it at 0600 is the safe outcome, so it is not
+                # worth failing a setup over.
+                pass
+        _publish(tmp, backup, replace=reuse)
     except BaseException:
-        # Do not leave a half-made slot behind: it would occupy a rotation
-        # position without holding a recoverable copy.
-        backup.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
-    finally:
-        os.close(fd)
     return backup
 
 
