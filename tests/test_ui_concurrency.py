@@ -138,7 +138,7 @@ def test_reader_survives_a_second_process_writing_the_store(app_client: TestClie
     # The UI's own write is what creates the fresh -wal/-shm pair that the stale
     # readers used to choke on, so delete before asserting on the reads.
     assert app_client.delete("/api/memories/m0").status_code == 200
-    assert app_client.post("/api/memories/m0/restore").status_code == 200
+    assert app_client.post("/api/memories/m0/restore", headers={"Content-Type": "application/json"}).status_code == 200
     assert app_client.get("/api/stats").status_code == 200
     assert app_client.get("/api/memories").status_code == 200
 
