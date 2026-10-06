@@ -254,12 +254,24 @@ def test_lifecycle_error_carries_service_failure_details(monkeypatch):
     assert len(str(raised.value).split("stderr: ", 1)[1]) == lifecycle.SERVICE_STDERR_TAIL
 
 
-def test_start_command_success_without_reachability_raises(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "platform,installed,expected_output_location",
+    [
+        ("linux", True, f"`journalctl --user -u {lifecycle.SYSTEMD_FILENAME} -n 50`"),
+        ("darwin", True, None),
+        ("linux", False, None),
+    ],
+)
+def test_start_timeout_points_to_active_backend_output(
+    tmp_path, monkeypatch, platform, installed, expected_output_location
+):
     units = tmp_path / "units"
     monkeypatch.setenv("POPPY_SYSTEMD_USER_DIR", str(units))
-    path = lifecycle.agent_path("linux")
-    path.parent.mkdir(parents=True)
-    path.write_text("unit")
+    monkeypatch.setenv("POPPY_LAUNCH_AGENTS_DIR", str(tmp_path / "agents"))
+    if installed:
+        path = lifecycle.agent_path(platform)
+        path.parent.mkdir(parents=True)
+        path.write_text("service definition")
     monkeypatch.setattr(
         lifecycle,
         "inspect_daemon",
@@ -270,11 +282,14 @@ def test_start_command_success_without_reachability_raises(tmp_path, monkeypatch
         "_run_service_command",
         lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
     )
-    monkeypatch.setattr(lifecycle, "lock_status", lambda _path: (False, None))
-    monkeypatch.setattr(lifecycle, "probe_status", lambda _path: (None, "offline"))
+    monkeypatch.setattr(lifecycle, "_spawn_detached", lambda *_args: None)
+    monkeypatch.setattr(lifecycle, "_wait_for_daemon", lambda *_args: False)
 
-    with pytest.raises(lifecycle.LifecycleError, match="daemon.log"):
-        lifecycle.start_daemon(tmp_path, platform="linux", timeout=0)
+    with pytest.raises(lifecycle.LifecycleError) as raised:
+        lifecycle.start_daemon(tmp_path, platform=platform, timeout=0)
+
+    output_location = expected_output_location or str(tmp_path / "logs" / "daemon.log")
+    assert str(raised.value) == f"Poppy daemon did not become reachable within 0 seconds. Check {output_location}."
 
 
 def test_wait_for_daemon_token_returns_the_settled_authenticated_token(tmp_path, monkeypatch):

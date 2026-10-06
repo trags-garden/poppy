@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Linux, daemon start timeouts now point to the systemd journal instead of
+  a log file that does not receive systemd output.
 - `poppy build mcpb` outside a source checkout now says it needs one and points
   to `poppy setup claude-desktop`, instead of crashing or suggesting npm tooling.
 - Claude Desktop bundles no longer install development dependencies on startup.

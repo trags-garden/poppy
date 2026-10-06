@@ -505,13 +505,16 @@ def start_daemon(
         _spawn_detached(command, poppy_dir / "logs" / "daemon.log")
         success = "Started Poppy daemon as a detached process."
     if not _wait_for_daemon(poppy_dir, timeout):
-        log_path = poppy_dir / "logs" / "daemon.log"
+        if installed and platform.startswith("linux"):
+            output_location = f"`journalctl --user -u {SYSTEMD_FILENAME} -n 50`"
+        else:
+            output_location = str(poppy_dir / "logs" / "daemon.log")
         raise LifecycleError(
             "start the Poppy daemon",
             command,
             result.returncode if result is not None else None,
             result.stderr if result is not None else "",
-            detail=f"Poppy daemon did not become reachable within {timeout:g} seconds. Check {log_path}.",
+            detail=f"Poppy daemon did not become reachable within {timeout:g} seconds. Check {output_location}.",
         )
     return success
 
