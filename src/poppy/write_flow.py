@@ -254,8 +254,9 @@ class RestoreResult:
     ``found`` is whether a tombstone existed at all (a 404 for the UI when not).
     ``memory`` is the live row afterwards — freshly restored, or the pre-existing
     one when the id was already live. ``expired`` marks the one case with no live
-    row: the memory's own TTL ran out while it sat in the tombstone table, so the
-    tombstone is cleared and nothing is re-ingested. ``raced`` means another
+    row: the memory's own TTL ran out while it sat in the tombstone table, so
+    nothing is re-ingested and the tombstone stays to age out of the 7-day
+    window on its own. ``raced`` means another
     writer resolved this tombstone while the row was being written: the restore
     still stands, but a tombstone left by that writer may sit beside it until the
     next sync or delete resolves the pair.
