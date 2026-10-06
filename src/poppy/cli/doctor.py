@@ -82,6 +82,13 @@ def _is_sendable_header_value(value: str) -> bool:
 
 
 def _client_daemon_problem(ctx: DoctorContext, client_id: str) -> tuple[str, str] | None:
+    # Per-client daemon health, memoised on (port, token). A registration is
+    # healthy only if its URL points at an EXACT loopback host (never a substring
+    # like ``127.0.0.1.evil.com``, which would ship the client's token off-box),
+    # that specific port answers, AND it accepts THAT
+    # client's own bearer (a global probe on the current token would mask a stale
+    # one). A malformed URL/port is data, never a crash. Returns None (healthy) or
+    # a ready ``(detail, hint)`` pair.
     from urllib.parse import urlsplit as _urlsplit
 
     from poppy.mcp_server.lifecycle import probe_status as _probe_status
@@ -170,6 +177,12 @@ def _client_daemon_problem(ctx: DoctorContext, client_id: str) -> tuple[str, str
     )
 
 
+# Guarantee scope: for a client with hooks/primer, a residual
+# footprint keeps warning about a missing MCP entry ("set up here but MCP entry
+# missing"). For an MCP-ONLY client (windsurf, gemini, vscode) the MCP entry is
+# the ONLY footprint, so a fully-removed entry is indistinguishable from "never
+# set up" and (absent a persisted client registry, which Poppy does not keep)
+# correctly cannot warn.
 def _any_present(*checks) -> bool:
     """Footprint = ANY Poppy component present, never "all". A multi-piece
     client (hooks + primer + MCP; plugin + config + guidance) is "set up" the
