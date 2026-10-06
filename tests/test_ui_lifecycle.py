@@ -245,6 +245,24 @@ def test_supersede_endpoint(app_client: TestClient, tmp_path: Path) -> None:
     assert "old1" in {i["id"] for i in tombs}
 
 
+def test_ui_edit_and_supersede_send_no_memory_write(
+    app_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The README says memories edited or superseded in `poppy ui` do not send memory_write."""
+    events: list = []
+    monkeypatch.setattr(
+        "poppy.telemetry.capture",
+        lambda poppy_dir, event, properties=None: events.append(event),
+    )
+    db = SeedEngine(db_path=tmp_path / "memories.db")
+    _ingest(db, "tele1", "use all-MiniLM")
+
+    assert app_client.patch("/api/memories/tele1", json={"content": "use MiniLM-L6"}).status_code == 200
+    resp = app_client.post("/api/memories/tele1/supersede", json={"content": "use bge-large"})
+    assert resp.status_code == 200
+    assert "memory_write" not in events
+
+
 def test_supersede_unknown_id_404s(app_client: TestClient) -> None:
     resp = app_client.post(
         "/api/memories/ghost/supersede",
