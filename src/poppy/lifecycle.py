@@ -295,7 +295,7 @@ def _supersede_memory(
     *,
     poppy_dir: Path,
 ) -> SupersedeResult:
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     old = engine.get(old_id)
     if old is None:

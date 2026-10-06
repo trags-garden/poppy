@@ -158,7 +158,7 @@ def _do_sync(poppy_dir: Path) -> dict:
     from poppy.sync import sync as do_sync
     from poppy.sync.client import TragsAuthError, auth_error_message
     from poppy.sync.state import clear_resolved_errors, get_remote, load, record_error
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     cfg = load_config(poppy_dir)
     api_key = resolve_trags_api_key(cfg)

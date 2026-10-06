@@ -20,7 +20,7 @@ from poppy.engine.seed import SeedEngine
 from poppy.models import Memory, Source
 from poppy.sync import pull, push
 from poppy.sync.client import TragsAuthError, TragsConflictError, TragsError, TragsQuotaError
-from poppy.sync.serializer import is_tombstone, memory_to_wire, tombstone_to_wire
+from poppy.sync.serializer import is_tombstone, memory_to_wire, tombstone_to_wire, wire_to_memory
 from poppy.sync.state import PUSH_WATERMARK_VERSION, RemoteState, SyncState, clear_error, load, record_error, save
 from poppy.ui.tombstones import TombstoneStore
 
@@ -356,6 +356,20 @@ def test_tombstone_wire_round_trips_expires_at(tmp_path):
     assert incoming.expires_at == ttl
     tombstones.add(incoming)
     assert tombstones.get("m1").memory.expires_at == ttl
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(0.0, 0.0), (None, 1.0), (pytest.param("missing", 1.0, id="missing"))],
+)
+def test_wire_to_memory_defaults_only_missing_or_null_confidence(value, expected):
+    row = memory_to_wire(_memory("m1", updated=_NOW))
+    if value == "missing":
+        row.pop("confidence")
+    else:
+        row["confidence"] = value
+
+    assert wire_to_memory(row).confidence == expected
 
 
 def test_restore_reaches_cloud_and_survives_the_next_pull(tmp_path, monkeypatch):

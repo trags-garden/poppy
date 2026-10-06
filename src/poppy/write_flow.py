@@ -29,7 +29,7 @@ from poppy.sources import KNOWN_SOURCES
 if TYPE_CHECKING:
     from poppy.capture.reconciler import Conflict
     from poppy.config import PoppyConfig
-    from poppy.ui.tombstones import Tombstone, TombstoneStore
+    from poppy.tombstones import Tombstone, TombstoneStore
 
 
 def make_memory_id() -> str:
@@ -215,7 +215,7 @@ def forget(
     ``tombstones`` lets a caller reuse an already-open store.
     """
     from poppy.db import write_gate
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     reader = reader if reader is not None else engine
     store = tombstones if tombstones is not None else TombstoneStore(poppy_dir / "memories.db")
@@ -303,7 +303,7 @@ def restore(
     Returns a :class:`RestoreResult`; ``found=False`` when no tombstone exists.
     """
     from poppy.db import write_gate
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     store = tombstones if tombstones is not None else TombstoneStore(poppy_dir / "memories.db")
 
