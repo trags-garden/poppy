@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Hermes plugin no longer drops memories and searches whose text starts with a dash.
 - `poppy build mcpb` outside a source checkout now says it needs one and points
   to `poppy setup claude-desktop`, instead of crashing or suggesting npm tooling.
 - Claude Desktop bundles no longer install development dependencies on startup.

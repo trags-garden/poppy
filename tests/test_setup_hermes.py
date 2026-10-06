@@ -329,7 +329,7 @@ def test_plugin_recall_tool_runs_poppy_recall(plugin) -> None:
     module, calls = plugin
     provider = module.PoppyMemoryProvider()
     provider.handle_tool_call("poppy_recall", {"query": "auth flow", "project": "web", "limit": 3})
-    assert calls == [["recall", "auth flow", "--json", "--project", "web", "--limit", "3"]]
+    assert calls == [["recall", "--json", "--project", "web", "--limit", "3", "--", "auth flow"]]
 
 
 def test_plugin_remember_tool_runs_poppy_remember(plugin) -> None:
@@ -338,7 +338,7 @@ def test_plugin_remember_tool_runs_poppy_remember(plugin) -> None:
     result = provider.handle_tool_call(
         "poppy_remember", {"content": "use uv", "memory_type": "decision", "project": "web"}
     )
-    assert calls == [["remember", "use uv", "--type", "decision", "--project", "web"]]
+    assert calls == [["remember", "--type", "decision", "--project", "web", "--", "use uv"]]
     assert json.loads(result) == {"result": "ok"}
 
 
@@ -346,7 +346,27 @@ def test_plugin_forget_tool_runs_poppy_forget(plugin) -> None:
     module, calls = plugin
     provider = module.PoppyMemoryProvider()
     provider.handle_tool_call("poppy_forget", {"memory_id": "abc123"})
-    assert calls == [["forget", "abc123", "--yes"]]
+    assert calls == [["forget", "--yes", "--", "abc123"]]
+
+
+def test_plugin_passes_dash_prefixed_recall_query_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    query = "- use uv for installs"
+
+    provider.handle_tool_call("poppy_recall", {"query": query})
+
+    assert calls == [["recall", "--json", "--limit", "10", "--", query]]
+
+
+def test_plugin_passes_dash_prefixed_memory_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    content = "- use uv for installs"
+
+    provider.handle_tool_call("poppy_remember", {"content": content})
+
+    assert calls == [["remember", "--type", "fact", "--", content]]
 
 
 def test_plugin_unknown_tool_returns_error_without_running_poppy(plugin) -> None:
