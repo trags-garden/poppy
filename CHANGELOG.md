@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy build mcpb` outside a source checkout now says it needs one and points
+  to `poppy setup claude-desktop`, instead of crashing or suggesting npm tooling.
+- Claude Desktop bundles no longer install development dependencies on startup.
+- Claude Desktop bundles now exclude cached Python bytecode from the server shim.
+- Claude Desktop bundles now list Trags as the author.
 - The dashboard's restore and supersede actions now refuse requests that are
   not sent as `application/json` (HTTP 415), so a page on another site can no
   longer trigger them from your browser without a CORS preflight. The
