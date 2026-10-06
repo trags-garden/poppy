@@ -11,6 +11,7 @@ Setup-config safety lives in test_setup_claude_code.py.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -150,6 +151,94 @@ def test_allow_remote_disables_host_check(tmp_path: Path, monkeypatch: pytest.Mo
     app = ui_server.create_app(poppy_dir=tmp_path, allowed_hosts=["*"])
     client = TestClient(app, base_url="http://anything.example.com")
     assert client.get("/api/facets").status_code == 200
+
+
+# --- POST endpoints require a JSON Content-Type ---
+#
+# A cross-site page can POST with no Content-Type, text/plain or a form type
+# without a CORS preflight; only a preflighted request can carry
+# application/json. Each rejected request must leave storage untouched.
+
+_SUPERSEDE_BODY = {"content": "replacement fact", "memory_type": "fact"}
+
+# Every Content-Type a cross-site page can send without a preflight, plus none.
+_NO_PREFLIGHT_HEADERS = [
+    {},
+    {"Content-Type": "text/plain"},
+    {"Content-Type": "application/x-www-form-urlencoded"},
+    {"Content-Type": "multipart/form-data; boundary=x"},
+]
+
+
+def _active_ids(client: TestClient) -> set[str]:
+    return {i["id"] for i in client.get("/api/memories").json()["items"]}
+
+
+def _trash_ids(client: TestClient) -> set[str]:
+    return {i["id"] for i in client.get("/api/memories?scope=tombstoned").json()["items"]}
+
+
+@pytest.mark.parametrize("headers", _NO_PREFLIGHT_HEADERS)
+def test_restore_rejects_non_json_content_type(app_client: TestClient, tmp_path: Path, headers: dict) -> None:
+    _ingest(SeedEngine(db_path=tmp_path / "memories.db"), "gone", "deleted fact")
+    assert app_client.delete("/api/memories/gone").status_code == 200
+
+    resp = app_client.post("/api/memories/gone/restore", headers=headers)
+    assert resp.status_code == 415
+    assert "gone" in _trash_ids(app_client)
+    assert "gone" not in _active_ids(app_client)
+
+
+@pytest.mark.parametrize("headers", _NO_PREFLIGHT_HEADERS)
+def test_supersede_rejects_non_json_content_type(app_client: TestClient, tmp_path: Path, headers: dict) -> None:
+    _ingest(SeedEngine(db_path=tmp_path / "memories.db"), "old", "original fact")
+
+    # Older FastAPI versions parse a body with no Content-Type as JSON, so a
+    # well-formed body is what a cross-site page would send; refuse it anyway.
+    resp = app_client.post("/api/memories/old/supersede", content=json.dumps(_SUPERSEDE_BODY), headers=headers)
+    if not headers:
+        assert "content-type" not in resp.request.headers
+    assert resp.status_code == 415
+    assert _active_ids(app_client) == {"old"}
+    assert _trash_ids(app_client) == set()
+
+
+def test_supersede_rejects_malformed_body_without_content_type(app_client: TestClient, tmp_path: Path) -> None:
+    _ingest(SeedEngine(db_path=tmp_path / "memories.db"), "old", "original fact")
+
+    # The Content-Type check must win over body decoding, whatever the body.
+    resp = app_client.post("/api/memories/old/supersede", content=b"{not json")
+    assert "content-type" not in resp.request.headers
+    assert resp.status_code == 415
+    assert resp.json() == {"detail": "Content-Type must be application/json"}
+    assert _active_ids(app_client) == {"old"}
+    assert _trash_ids(app_client) == set()
+
+
+def test_untrusted_host_post_rejected_by_host_check_first(app_client: TestClient) -> None:
+    resp = app_client.post("/api/memories/old/restore", headers={"host": "attacker.example.com"})
+    assert resp.status_code == 400
+
+
+def test_restore_accepts_json_content_type_without_body(app_client: TestClient, tmp_path: Path) -> None:
+    _ingest(SeedEngine(db_path=tmp_path / "memories.db"), "back", "restorable fact")
+    assert app_client.delete("/api/memories/back").status_code == 200
+
+    resp = app_client.post("/api/memories/back/restore", headers={"Content-Type": "application/json; charset=utf-8"})
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "back"
+    assert "back" in _active_ids(app_client)
+    assert "back" not in _trash_ids(app_client)
+
+
+def test_supersede_accepts_json_content_type(app_client: TestClient, tmp_path: Path) -> None:
+    _ingest(SeedEngine(db_path=tmp_path / "memories.db"), "old", "original fact")
+
+    resp = app_client.post("/api/memories/old/supersede", json=_SUPERSEDE_BODY)
+    assert resp.status_code == 200
+    assert resp.json()["supersedes"] == "old"
+    assert "old" in _trash_ids(app_client)
+    assert "old" not in _active_ids(app_client)
 
 
 # --- memory_type enum normalization at the MCP write boundary ---
