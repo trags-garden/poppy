@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The dashboard's restore and supersede actions now refuse requests that are
+  not sent as `application/json` (HTTP 415), so a page on another site can no
+  longer trigger them from your browser without a CORS preflight. The
+  dashboard itself already sends JSON and is unaffected.
 - The README telemetry table no longer says automatic capture sends
   `memory_write`. The row now lists the paths that do send it (`poppy
   remember` and the MCP `remember` and `consolidate` tools) and the ones that
