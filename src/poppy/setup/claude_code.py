@@ -31,6 +31,8 @@ import click
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
+from poppy.errors import PoppyError
+
 CLAUDE_MD_BEGIN = "<!-- POPPY:BEGIN -->"
 CLAUDE_MD_END = "<!-- POPPY:END -->"
 
@@ -243,7 +245,7 @@ def _client_settings_path(client: str, claude_dir: Path) -> Path:
     raise ValueError(f"Unknown client: {client}")
 
 
-class CorruptConfigError(Exception):
+class CorruptConfigError(PoppyError):
     """A client config file is unparseable or structurally invalid.
 
     Raised (in strict mode) instead of silently returning `{}`, so a write path

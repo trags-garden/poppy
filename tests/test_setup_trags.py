@@ -107,3 +107,107 @@ def test_connected_line_names_the_resolved_config_path(tmp_path, monkeypatch, ca
         assert "saved in" not in out
     assert "~/.poppy/config.json" not in out
     assert key not in out
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"not json", id="non-json"),
+        pytest.param(b"[]", id="non-object"),
+        pytest.param(b'{"setup_url": "https://example.test/cli"}', id="missing-code"),
+        pytest.param(b'{"code": "WXYZ"}', id="missing-setup-url"),
+        pytest.param(
+            b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": "bad"}',
+            id="invalid-interval",
+        ),
+        pytest.param(
+            b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": -1}',
+            id="negative-interval",
+        ),
+        pytest.param(
+            b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": NaN}',
+            id="nan-interval",
+        ),
+        pytest.param(
+            b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": Infinity}',
+            id="infinite-interval",
+        ),
+        pytest.param(
+            b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": 1e309}',
+            id="overflowing-interval",
+        ),
+        pytest.param(
+            b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": 3600}',
+            id="hour-interval",
+        ),
+        pytest.param(
+            b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": true}',
+            id="boolean-interval",
+        ),
+    ],
+)
+def test_device_flow_rejects_malformed_start(tmp_path, monkeypatch, content):
+    import click
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(httpx, "post", lambda *_args, **_kwargs: httpx.Response(201, content=content))
+
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("Malformed start response must stop before opening a browser or polling")
+
+    monkeypatch.setattr(setup_trags.webbrowser, "open", unexpected_call)
+    monkeypatch.setattr(httpx, "get", unexpected_call)
+    with pytest.raises(click.ClickException, match="Malformed Trags setup start response") as exc:
+        setup_trags.run_device_code_flow()
+
+    assert len(str(exc.value).splitlines()) == 1
+    assert not (tmp_path / "config.json").exists()
+
+
+@pytest.mark.parametrize("content", [pytest.param(b"not json", id="non-json"), pytest.param(b"[]", id="non-object")])
+def test_device_flow_rejects_malformed_poll(tmp_path, monkeypatch, content):
+    import click
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_args, **_kwargs: httpx.Response(201, json={"code": "WXYZ", "setup_url": "https://example.test/cli"}),
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(200, content=content))
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+
+    with pytest.raises(click.ClickException, match="Malformed Trags setup poll response") as exc:
+        setup_trags.run_device_code_flow()
+
+    assert str(exc.value).endswith("Run `poppy setup trags` again.")
+    assert len(str(exc.value).splitlines()) == 1
+    assert not (tmp_path / "config.json").exists()
+
+
+@pytest.mark.parametrize("interval", [pytest.param(b"null", id="null"), pytest.param(b"0", id="zero")])
+def test_device_flow_falls_back_to_default_poll_interval(tmp_path, monkeypatch, interval):
+    import click
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    content = b'{"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": ' + interval + b"}"
+    monkeypatch.setattr(httpx, "post", lambda *_args, **_kwargs: httpx.Response(201, content=content))
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(410))
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    sleeps = []
+    monkeypatch.setattr(setup_trags.time, "sleep", sleeps.append)
+
+    with pytest.raises(click.ClickException, match="Setup code expired"):
+        setup_trags.run_device_code_flow()
+
+    assert sleeps == [setup_trags._DEFAULT_POLL_INTERVAL_S]

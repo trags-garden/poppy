@@ -1929,8 +1929,8 @@ def setup_hermes_agent():
         click.echo(f"  {label}: {path}")
     click.echo(
         "\nPoppy is the active hermes memory provider. Run `hermes memory status` "
-        "to verify, then start a hermes session. It will call poppy_recall before "
-        "each turn and consolidate at session end."
+        "to verify, then start a hermes session. It will recall relevant memories "
+        "before each turn."
     )
     _record_agent_setup("hermes-agent")
 
@@ -2056,6 +2056,10 @@ def build_mcpb_cmd(output_dir: Path):
     from poppy.build_mcpb import build_mcpb
 
     repo_root = Path(__file__).resolve().parents[3]
+    if not (repo_root / "pyproject.toml").is_file() or not (repo_root / "mcpb" / "manifest.json").is_file():
+        raise click.ClickException(
+            "poppy build mcpb only works from a source checkout. Use `poppy setup claude-desktop` instead."
+        )
     try:
         produced = build_mcpb(repo_root=repo_root, output_dir=output_dir)
     except RuntimeError as exc:
@@ -3473,11 +3477,11 @@ def main() -> None:
     ``poppy.errors`` (which is import-cheap, no ML deps) so a deps-missing
     install still runs.
     """
-    from poppy.errors import EncryptionError, ModelUnavailableError
+    from poppy.errors import PoppyError
 
     try:
         cli()
-    except (ModelUnavailableError, EncryptionError) as exc:
+    except PoppyError as exc:
         # EncryptionError includes KeychainUnavailable and DependencyMissing, so
         # a keychain failure or a missing extra while opening an encrypted store
         # (recall/list/hooks) renders as one line instead of a raw traceback.

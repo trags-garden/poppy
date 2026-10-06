@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from poppy.errors import PoppyError
 from poppy.paths import ensure_poppy_dir, write_text_atomic
 
 # Public project API key — safe to embed (PostHog `phc_*` keys are write-only).
@@ -173,7 +174,7 @@ def is_unanswered(poppy_dir: Path) -> bool:
     return status(poppy_dir) == (False, _UNANSWERED_REASON)
 
 
-class TelemetryChoiceError(Exception):
+class TelemetryChoiceError(PoppyError):
     """The telemetry choice could not be recorded. Carries a one-line reason."""
 
 

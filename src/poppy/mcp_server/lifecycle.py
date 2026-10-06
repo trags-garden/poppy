@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from poppy.errors import PoppyError
 from poppy.mcp_server.auth import load_daemon_token
 from poppy.mcp_server.daemon import DAEMON_LOCK_FILENAME
 
@@ -28,7 +29,7 @@ DEFAULT_LIFECYCLE_TIMEOUT = 5.0
 SERVICE_STDERR_TAIL = 1000
 
 
-class LifecycleError(Exception):
+class LifecycleError(PoppyError):
     """A service action failed or did not reach its expected state."""
 
     def __init__(
