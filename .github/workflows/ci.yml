@@ -168,6 +168,15 @@ jobs:
       - name: Verify build metadata
         run: python -m twine check dist/*
 
+      - name: Verify wheel ships the hermes plugin
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          name = "poppy/setup/hermes_plugin.py.txt"
+          if name not in zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist():
+              sys.exit(f"::error::wheel is missing {name}")
+          PY
+
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:

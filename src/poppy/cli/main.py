@@ -1929,8 +1929,8 @@ def setup_hermes_agent():
         click.echo(f"  {label}: {path}")
     click.echo(
         "\nPoppy is the active hermes memory provider. Run `hermes memory status` "
-        "to verify, then start a hermes session. It will call poppy_recall before "
-        "each turn and consolidate at session end."
+        "to verify, then start a hermes session. It will recall relevant memories "
+        "before each turn."
     )
     _record_agent_setup("hermes-agent")
 
