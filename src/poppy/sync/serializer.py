@@ -100,6 +100,6 @@ def wire_to_memory(row: dict) -> Memory:
         related_to=list(row.get("related_to") or []),
         created_at=created,
         updated_at=updated,
-        confidence=float(row.get("confidence") or 1.0),
+        confidence=1.0 if row.get("confidence") is None else float(row["confidence"]),
         expires_at=_parse_iso(row.get("expires_at")),
     )
