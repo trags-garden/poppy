@@ -35,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `poppy ui`), and says the `ui` and importer `source` values appear only
   when the MCP server's `--source` setting or the connecting client's own
   name is one of them.
+- Expected sync, setup, telemetry, daemon, and consolidation failures now use
+  the CLI's clean error handler instead of escaping as Python tracebacks.
+- Sync reports invalid JSON responses cleanly. An unreadable write response
+  leaves the row pending for retry, says how many rows this run sent, and warns
+  that the write may have completed. Three unreadable replies in a row stop the
+  push, as three network failures do. An unreadable page while pulling stops the
+  sync before anything is pushed, exits non-zero, and auto-sync retries later.
+- `poppy setup trags` reports malformed setup and authorization replies as
+  errors instead of Python tracebacks, and refuses a poll interval that is not
+  a number above 0 and at most 60 seconds.
 
 ## [0.3.2] - 2026-10-05
 

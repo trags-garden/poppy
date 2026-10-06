@@ -45,6 +45,7 @@ from poppy.capture.transcript import detect_transcript_host
 from poppy.capture.watermark import get_watermark
 from poppy.capture.window import read_window
 from poppy.config import PoppyConfig, load_config, resolved_consolidate_settings
+from poppy.errors import PoppyError
 from poppy.models import Filters
 from poppy.project import project_from_cwd
 from poppy.runtime import get_engine, get_poppy_dir
@@ -257,7 +258,7 @@ CONNECT_TIMEOUT_S = 5.0
 MIN_ECHOED_KEY_LEN = 12
 
 
-class OpenAICompatError(Exception):
+class OpenAICompatError(PoppyError):
     """A fallback failure safe to display in worker logs and backend health."""
 
 

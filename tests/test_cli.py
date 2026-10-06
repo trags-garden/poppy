@@ -2882,3 +2882,66 @@ def test_config_set_invalid_value_does_not_touch_config_json(tmp_path):
     result = CliRunner().invoke(cli, ["config", "set", "recall-min-score", "nope"], env=env)
     assert result.exit_code == 2
     assert cfg_path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "error_class",
+    [
+        "poppy.errors.ModelUnavailableError",
+        "poppy.errors.EncryptionError",
+        "poppy.errors.StorePermissionError",
+        "poppy.sync.client.TragsError",
+        "poppy.setup.claude_code.CorruptConfigError",
+        "poppy.mcp_server.lifecycle.LifecycleError",
+        "poppy.telemetry.TelemetryChoiceError",
+        "poppy.consolidation.OpenAICompatError",
+    ],
+)
+def test_expected_error_inherits_poppy_error(error_class):
+    from importlib import import_module
+
+    from poppy.errors import PoppyError
+
+    module, name = error_class.rsplit(".", 1)
+    error_type = getattr(import_module(module), name)
+    assert issubclass(error_type, PoppyError)
+    if name in {"ModelUnavailableError", "EncryptionError"}:
+        assert issubclass(error_type, RuntimeError)
+
+
+@pytest.mark.parametrize("command", ["sync push", "setup cursor", "telemetry on"])
+def test_main_renders_expected_command_error_cleanly(monkeypatch, capsys, command):
+    import sys
+
+    from poppy.cli import main as main_mod
+    from poppy.setup.claude_code import CorruptConfigError
+    from poppy.sync.client import TragsError
+    from poppy.telemetry import TelemetryChoiceError
+
+    message = "Expected command failure."
+    error_type = {
+        "sync push": TragsError,
+        "setup cursor": CorruptConfigError,
+        "telemetry on": TelemetryChoiceError,
+    }[command]
+
+    def fail(*args, **kwargs):
+        raise error_type(message)
+
+    if command == "sync push":
+        monkeypatch.setattr(main_mod, "_sync_client", fail)
+    elif command == "setup cursor":
+        monkeypatch.setattr(main_mod, "_install_or_abort", fail)
+    else:
+        monkeypatch.setattr(main_mod.telemetry, "set_enabled", lambda *_args: None)
+        monkeypatch.setattr(main_mod.telemetry, "status", fail)
+    monkeypatch.setattr(sys, "argv", ["poppy", *command.split()])
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod.main()
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"poppy: {message}\n"
+    assert "Traceback" not in captured.err
