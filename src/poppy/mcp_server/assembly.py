@@ -55,10 +55,10 @@ def lookup_superseded(poppy_dir: Path, ids: list[str]) -> set[str]:
     """IDs among ``ids`` the tombstone sidecar records as superseded.
 
     Read-only and defensive: if the sidecar table has never been created (no
-    supersede or `poppy ui` has run) or the DB can't be opened, returns an
+    delete or supersede has run) or the DB can't be opened, returns an
     empty set so recall never fails on the marker lookup. Deliberately does not
-    create or migrate ``ui_tombstones`` — that stays owned by the UI/lifecycle
-    layer.
+    create or migrate ``ui_tombstones``; that stays owned by the tombstone
+    store.
     """
     if not ids:
         return set()
