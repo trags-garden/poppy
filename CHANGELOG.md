@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Sync pull no longer turns a stored confidence of 0.0 into 1.0.
-- A deletion the server refuses no longer retries on every sync and still leaves Trash after seven days.
-- Changing the sync server no longer keeps forgotten memories in Trash forever.
+- A deletion the sync server refuses no longer retries on every sync. It leaves
+  Trash after seven days, and the memory does not come back on a later sync.
+- Trash no longer waits on a sync server you have stopped using.
 - `poppy build mcpb` outside a source checkout now says it needs one and points
   to `poppy setup claude-desktop`, instead of crashing or suggesting npm tooling.
 - Claude Desktop bundles no longer install development dependencies on startup.

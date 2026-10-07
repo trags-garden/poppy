@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from poppy.config import PoppyConfig, save_config
 from poppy.engine.seed import SeedEngine
 from poppy.models import Memory, Source
 from poppy.ui.tombstones import TombstoneStore
@@ -137,6 +138,7 @@ def test_create_app_purges_acknowledged_known_deletion_with_remote_configured(
     memory = _ingest(engine, "acknowledged", "deleted fact acknowledged by the cloud")
     tombstones = TombstoneStore(tmp_path / "memories.db")
     remote_url = "https://trags.test"
+    save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url=remote_url))
     tombstones.note_remote_memories({memory.id}, remote_url)
     deletion = tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
     tombstones.mark_sent([deletion], remote_url)
@@ -149,6 +151,27 @@ def test_create_app_purges_acknowledged_known_deletion_with_remote_configured(
         response = client.get("/api/memories?scope=tombstoned")
     assert response.status_code == 200
     assert response.json()["items"] == []
+    assert tombstones.get(memory.id) is None
+
+
+def test_create_app_purges_deletion_acknowledged_by_the_configured_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from poppy.ui import server as ui_server
+
+    monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
+    save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url="https://current.test/"))
+    engine = SeedEngine(db_path=tmp_path / "memories.db")
+    memory = _ingest(engine, "switched", "deleted fact the old server never acknowledged")
+    tombstones = TombstoneStore(tmp_path / "memories.db")
+    for url in ("https://old.test", "https://current.test"):
+        tombstones.note_remote_memories({memory.id}, url)
+    deletion = tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
+    tombstones.mark_sent([deletion], "https://current.test")
+    engine.delete(memory.id)
+
+    monkeypatch.setattr(ui_server, "get_fast_engine", lambda _d: engine)
+    ui_server.create_app(poppy_dir=tmp_path)
     assert tombstones.get(memory.id) is None
 
 

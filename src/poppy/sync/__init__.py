@@ -522,7 +522,9 @@ def push(
             # `TragsConflictError` included: it subclasses `TragsError`, and a 409
             # is a server response like any other per-row refusal.
             errors += 1
-            if kind == "tomb" and exc.status_code == 422:
+            # A 400 or 422 refuses the deletion's payload itself: resending it
+            # cannot succeed. Live rows keep retrying on every status.
+            if kind == "tomb" and exc.status_code in (400, 422):
                 rejected_tombstones.append(payload)
             if kind == "live":
                 watermark_locked = True
@@ -689,7 +691,7 @@ def push(
                 # shows a push failure. Only a clean push clears the push slot.
                 message = last_soft_error or f"push failed: {errors} error(s)"
                 if errors == len(rejected_tombstones):
-                    message = f"deletion rejected (422): {message}"
+                    message = f"deletion rejected: {message}"
                 stamp_error(r, "push", message)
             elif requests_made > 0:
                 # A clean push that ACTUALLY sent something clears its push slot,
@@ -726,7 +728,7 @@ def push(
                 # idle push can clear their earlier error, including after purge.
                 # The message marks an aggregate failure, never per-ID state.
                 kinds = ["auth", "probe"]
-                if remote.errors.get("push", "").startswith("deletion rejected (422): "):
+                if remote.errors.get("push", "").startswith("deletion rejected: "):
                     kinds.append("push")
                 for kind in kinds:
                     if kind in gens_at_start and r.error_gens.get(kind) == gens_at_start[kind]:
@@ -919,6 +921,12 @@ def _apply_pulled_row(
     # mirroring the tombstone branch's updated_at comparison.
     local_tomb = tombstones.get(incoming.id)  # type: ignore[attr-defined]
     if local_tomb is not None and local_tomb.tombstoned_at >= incoming.updated_at:  # type: ignore[attr-defined]
+        return "stale"
+    # The same rule for a deletion this remote refused for good, after its Trash
+    # entry aged out: the server still holds the row live, and only an edit made
+    # after the deletion brings it back.
+    suppressed_at = tombstones.suppressed_deletion(incoming.id, remote_url)  # type: ignore[attr-defined]
+    if suppressed_at is not None and suppressed_at >= incoming.updated_at:  # type: ignore[attr-defined]
         return "stale"
     existing = engine.get(incoming.id)  # type: ignore[attr-defined]
     if existing is not None and existing.updated_at > incoming.updated_at:  # type: ignore[attr-defined]
@@ -1158,15 +1166,20 @@ def sync(
         # AFTER push, never before. A tombstone is the only thing that carries a
         # deletion to the cloud, so purging one that has not been sent leaves the
         # cloud row live and the next pull re-ingests the forgotten memory.
-        # Sent marks, not the live watermark, prove a deletion is done. Known
-        # IDs with an unsent deletion for any remote survive; unknown IDs have
-        # no pending work.
+        # Sent marks, not the live watermark, prove a deletion is done. IDs
+        # this remote holds with an unsent deletion survive; IDs it does not
+        # hold have no pending work here, and a server the user stopped using
+        # no longer holds Trash open.
         #
         # This runs here because the local web UI's startup was otherwise the
         # only caller, and a user who never opens the dashboard kept expired
         # records forever.
         try:
-            tombstones.purge_expired(pushed_through=datetime.now(timezone.utc).isoformat(), require_sent=True)
+            tombstones.purge_expired(
+                pushed_through=datetime.now(timezone.utc).isoformat(),
+                require_sent=True,
+                current_remote=client.base_url,
+            )
         except Exception as exc:
             # Housekeeping must never be what fails a sync; retried next cycle.
             # Logged rather than silent so a store that never ages out is
