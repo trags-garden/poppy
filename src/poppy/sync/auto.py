@@ -17,7 +17,9 @@ Design:
            - delete `pending` (any new write re-touches it).
            - sleep DEBOUNCE_S to coalesce bursts.
            - run `sync.sync()` (pull-then-push); log to sync-worker.log.
-      3. Release lock.
+      3. Release and close lock.
+      4. If the loop ended with no pending work, check once for a new flag;
+         re-acquire and drain with the remaining round budget if it is set.
 
 The trigger MUST NEVER raise — write paths swallow exceptions defensively.
 """
@@ -32,6 +34,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from poppy.paths import ensure_poppy_dir
 
@@ -158,7 +161,7 @@ def _do_sync(poppy_dir: Path) -> dict:
     from poppy.sync import sync as do_sync
     from poppy.sync.client import TragsAuthError, auth_error_message
     from poppy.sync.state import clear_resolved_errors, get_remote, load, record_error
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     cfg = load_config(poppy_dir)
     api_key = resolve_trags_api_key(cfg)
@@ -205,91 +208,111 @@ def _do_sync(poppy_dir: Path) -> dict:
     }
 
 
-def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
-    """Drain the pending flag, pushing on each round. Single-flight via flock."""
+_DrainStop = Literal["pending_absent", "auth_stop", "quota_stop", "generic_failure_rearmed", "budget_exhausted"]
+
+
+def _drain_pending(poppy_dir: Path, *, rounds: int, max_rounds: int) -> tuple[_DrainStop, int]:
+    """Report the stop reason and total rounds used; caller holds both writer locks."""
     from poppy.sync.client import TragsAuthError, TragsQuotaError
+
+    pending_path = poppy_dir / PENDING_FILENAME
+    stop_reason: _DrainStop = "pending_absent"
+    while rounds < max_rounds:
+        if not pending_path.exists():
+            return stop_reason, rounds
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            pass
+        # Coalesce: any writes during this sleep re-touch pending.
+        if DEBOUNCE_S > 0:
+            time.sleep(DEBOUNCE_S)
+        rounds += 1
+        stop_reason = "pending_absent"
+        try:
+            summary = _do_sync(poppy_dir)
+            if summary.get("errors"):
+                # Some rows failed (recorded by `push()`); don't claim a
+                # clean sync. The frozen watermark retries them later.
+                _log(poppy_dir, f"sync incomplete {json.dumps(summary)}")
+            else:
+                _log(poppy_dir, f"sync ok {json.dumps(summary)}")
+        except TragsQuotaError as exc:
+            stop_reason = "quota_stop"
+            # The account hit its memory cap. Live CREATES stay 402'd, but
+            # a `forget` (tombstone) or an edit-to-synced queued MID-CYCLE
+            # is NOT quota-gated and must still flush this run, otherwise
+            # the deletion waits for the next trigger and, after tombstone
+            # retention, is lost. Re-drain WHILE `pending` is set at the
+            # end of a pass: it was cleared at pass start and is only
+            # re-set by NEW external work, so a newly-queued tombstone
+            # earns another pass (drains it -> pending clears -> loop
+            # ends), while quota-blocked creates from a prior snapshot
+            # never set pending and so cannot spin. `max_rounds` remains a
+            # safety belt.
+            _log(poppy_dir, f"sync stopped: quota exceeded: {exc}")
+            if getattr(exc, "transport_retry", False):
+                # Quota is terminal for the worker, but a row (especially
+                # a tombstone/deletion) transport-failed this cycle and
+                # still needs a retry, re-arm so the drain below runs
+                # again and re-attempts it. Independent of the cap.
+                _touch_pending(poppy_dir)
+            if pending_path.exists():
+                continue
+            return stop_reason, rounds
+        except TragsAuthError as exc:
+            # A revoked/invalid key will not fix itself by retrying, so
+            # stop the worker and do NOT re-arm the pending flag,
+            # otherwise every write spins this loop up to max_rounds with
+            # backoff, invisibly. `_do_sync` recorded the error;
+            # `poppy sync status` surfaces it. A fresh `poppy setup trags`
+            # re-arms sync.
+            _log(poppy_dir, f"sync stopped: auth failed: {exc!r}")
+            return "auth_stop", rounds
+        except Exception as exc:
+            _log(poppy_dir, f"sync failed: {exc!r}")
+            # Re-arm so a later trigger retries. Backoff prevents tight loop.
+            _touch_pending(poppy_dir)
+            time.sleep(min(2 ** (rounds - 1), 30))
+            # A retry flag removed during backoff must not prompt a handoff.
+            stop_reason = "generic_failure_rearmed"
+    return "budget_exhausted", rounds
+
+
+def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
+    """Drain pending writes, checking for a handoff after releasing the flock."""
+    from poppy import writers
 
     ensure_poppy_dir(poppy_dir)
     pending_path = poppy_dir / PENDING_FILENAME
     lock_path = poppy_dir / LOCK_FILENAME
+    rounds = 0
 
-    lock_fd = open(lock_path, "w")
-    try:
+    while True:
+        lock_fd = open(lock_path, "w")
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            # Another worker is in flight; it will see our pending flag.
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Another worker owns the pending work.
+                return
+
+            # Register as a live writer so encryption cannot migrate under sync.
+            # Each acquired lock gets a fresh registration.
+            with writers.registered(poppy_dir, "sync"):
+                stop_reason, rounds = _drain_pending(poppy_dir, rounds=rounds, max_rounds=max_rounds)
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                lock_fd.close()
+            except Exception:
+                pass
+
+        # A write may have arrived after the last absence check while its worker
+        # still saw our lock held. Check only after releasing and closing it.
+        # Terminal stops and deliberately re-armed failures wait for a trigger.
+        if stop_reason != "pending_absent" or not pending_path.exists():
             return
-
-        # Register as a live writer so `poppy encrypt` refuses to migrate under a
-        # running sync (kernel releases the lock if this worker dies).
-        from poppy import writers
-
-        with writers.registered(poppy_dir, "sync"):
-            rounds = 0
-            while rounds < max_rounds:
-                if not pending_path.exists():
-                    break
-                try:
-                    pending_path.unlink()
-                except FileNotFoundError:
-                    pass
-                # Coalesce: any writes during this sleep re-touch pending.
-                if DEBOUNCE_S > 0:
-                    time.sleep(DEBOUNCE_S)
-                try:
-                    summary = _do_sync(poppy_dir)
-                    if summary.get("errors"):
-                        # Some rows failed (recorded by `push()`); don't claim a
-                        # clean sync. The frozen watermark retries them later.
-                        _log(poppy_dir, f"sync incomplete {json.dumps(summary)}")
-                    else:
-                        _log(poppy_dir, f"sync ok {json.dumps(summary)}")
-                except TragsQuotaError as exc:
-                    # The account hit its memory cap. Live CREATES stay 402'd, but
-                    # a `forget` (tombstone) or an edit-to-synced queued MID-CYCLE
-                    # is NOT quota-gated and must still flush this run — otherwise
-                    # the deletion waits for the next trigger and, after tombstone
-                    # retention, is lost. Re-drain WHILE `pending` is set at the
-                    # end of a pass: it was cleared at pass start and is only
-                    # re-set by NEW external work, so a newly-queued tombstone
-                    # earns another pass (drains it -> pending clears -> loop
-                    # ends), while quota-blocked creates from a prior snapshot
-                    # never set pending and so cannot spin. `max_rounds` remains a
-                    # safety belt.
-                    _log(poppy_dir, f"sync stopped: quota exceeded: {exc}")
-                    if getattr(exc, "transport_retry", False):
-                        # Quota is terminal for the worker, but a row (especially
-                        # a tombstone/deletion) transport-failed this cycle and
-                        # still needs a retry — re-arm so the drain below runs
-                        # again and re-attempts it. Independent of the cap.
-                        _touch_pending(poppy_dir)
-                    if pending_path.exists():
-                        rounds += 1
-                        continue
-                    break
-                except TragsAuthError as exc:
-                    # A revoked/invalid key will not fix itself by retrying, so
-                    # stop the worker and do NOT re-arm the pending flag —
-                    # otherwise every write spins this loop up to max_rounds with
-                    # backoff, invisibly. `_do_sync` recorded the error;
-                    # `poppy sync status` surfaces it. A fresh `poppy setup trags`
-                    # re-arms sync.
-                    _log(poppy_dir, f"sync stopped: auth failed: {exc!r}")
-                    break
-                except Exception as exc:
-                    _log(poppy_dir, f"sync failed: {exc!r}")
-                    # Re-arm so a later trigger retries. Backoff prevents tight loop.
-                    _touch_pending(poppy_dir)
-                    time.sleep(min(2**rounds, 30))
-                rounds += 1
-
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-    finally:
-        try:
-            lock_fd.close()
-        except Exception:
-            pass

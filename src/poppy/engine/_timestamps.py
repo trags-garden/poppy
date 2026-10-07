@@ -144,10 +144,10 @@ PUSH_SOURCE_TABLES = ("memories", "ui_tombstones")
 # Every (table, columns) pair holding an ISO-8601 instant as text, with the
 # primary key ``id`` in all of them. Tables and columns are checked for existence
 # before being touched: the same store is opened by clients of several versions,
-# and ``ui_tombstones`` in particular is created by the UI sidecar rather than by
+# and ``ui_tombstones`` in particular is created by the tombstone store rather than by
 # either engine, so it can legitimately be absent here.
 #
-# ``ui_tombstones`` is named as a literal because :mod:`poppy.ui.tombstones`
+# ``ui_tombstones`` is named as a literal because :mod:`poppy.tombstones`
 # imports the engine side, and the dependency may not run the other way.
 TIMESTAMP_COLUMNS: dict[str, tuple[str, ...]] = {
     "memories": ("source_timestamp", "created_at", "updated_at", "expires_at"),
