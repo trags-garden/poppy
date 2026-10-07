@@ -922,9 +922,10 @@ def _apply_pulled_row(
     local_tomb = tombstones.get(incoming.id)  # type: ignore[attr-defined]
     if local_tomb is not None and local_tomb.tombstoned_at >= incoming.updated_at:  # type: ignore[attr-defined]
         return "stale"
-    # The same rule for a deletion this remote refused for good, after its Trash
-    # entry aged out: the server still holds the row live, and only an edit made
-    # after the deletion brings it back.
+    # The same rule for a deletion this remote never acknowledged (it refused
+    # it, or the user had moved to another server) after its Trash entry aged
+    # out: the server still holds the row live, and only an edit made after the
+    # deletion brings it back.
     suppressed_at = tombstones.suppressed_deletion(incoming.id, remote_url)  # type: ignore[attr-defined]
     if suppressed_at is not None and suppressed_at >= incoming.updated_at:  # type: ignore[attr-defined]
         return "stale"

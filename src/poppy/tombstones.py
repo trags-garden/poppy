@@ -1,7 +1,7 @@
 """Trash and sync bookkeeping storage.
 
 Owns Trash (the seven-day soft delete table), the per-server record of known
-memory IDs, the sent marks for deletions, and the deletions a server refused.
+memory IDs, the sent marks for deletions, and the deletions a server never took.
 CLI, MCP, dashboard, write_flow, and sync all use this store.
 """
 
@@ -48,8 +48,9 @@ CREATE TABLE IF NOT EXISTS sync_remote_memories (
     PRIMARY KEY (id, remote_url)
 );
 
--- Deletions a remote refused for good, kept after their Trash entry ages out
--- so pull does not bring the memory back. Holds no memory text and never ages.
+-- Deletions a remote holding the memory never acknowledged (it refused them, or
+-- the user moved to another server), kept after their Trash entry ages out so
+-- pull does not bring the memory back. Holds no memory text and never ages.
 CREATE TABLE IF NOT EXISTS sync_suppressed_deletions (
     id TEXT NOT NULL,
     remote_url TEXT NOT NULL,
@@ -414,7 +415,7 @@ class TombstoneStore:
           can age out after seven days.
         * the local dashboard, on startup, uses the same acknowledgements for
           the configured remote. With sync configured, it also sets
-          ``keep_unknown`` to leave IDs that remote does not hold for sync's
+          ``keep_unknown`` to leave IDs no remote is known to hold for sync's
           pull to discover: a lost upload response can leave a remote copy
           with no local record of it.
 
@@ -426,15 +427,16 @@ class TombstoneStore:
         dashboard has no remote configured, every remote known to hold the
         memory has to acknowledge or refuse the deletion first.
 
-        ``keep_unknown`` defaults to false. When true, IDs the current remote
-        (or, without one, any remote) is not known to hold are kept regardless
-        of age. When no remote key is resolvable, the dashboard leaves
+        ``keep_unknown`` defaults to false. When true, IDs no remote is known
+        to hold are kept regardless of age. When no remote key is resolvable,
+        the dashboard leaves
         ``keep_unknown`` false so unknown IDs age out after seven days; known
         but unsent deletions are still kept by ``require_sent``.
 
-        A deletion a remote refused for good leaves a content-free suppression
-        record for that remote when it is purged, written in the same
-        transaction, so pull does not bring the memory back from that remote.
+        A purged deletion leaves a content-free suppression record for every
+        remote known to hold the memory that never acknowledged it (refused, or
+        a server no longer in use), written in the same transaction, so pull
+        does not bring the memory back from that remote.
 
         The argument is required, with no default. Passing ``None`` purges
         nothing, which is the safe answer for a caller that cannot tell which
@@ -461,7 +463,7 @@ class TombstoneStore:
                     WHERE rejected.key = known.remote_url)))
             AND (? = 0 OR EXISTS (
                 SELECT 1 FROM sync_remote_memories known
-                WHERE known.id = ui_tombstones.id AND (? IS NULL OR known.remote_url = ?)))"""
+                WHERE known.id = ui_tombstones.id))"""
         params = (
             cutoff,
             pushed_through,
@@ -469,14 +471,15 @@ class TombstoneStore:
             current_remote,
             current_remote,
             keep_unknown,
-            current_remote,
-            current_remote,
         )
         with self._lock, self._conn:
             self._conn.execute(
                 f"""INSERT OR REPLACE INTO sync_suppressed_deletions (id, remote_url, deleted_at)
-                SELECT ui_tombstones.id, refused.key, ui_tombstones.tombstoned_at
-                FROM ui_tombstones, json_each(ui_tombstones.rejected_remotes) refused WHERE {expired}""",
+                SELECT ui_tombstones.id, unsent.remote_url, ui_tombstones.tombstoned_at
+                FROM ui_tombstones JOIN sync_remote_memories unsent ON unsent.id = ui_tombstones.id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM json_each(ui_tombstones.sent_remotes) sent WHERE sent.key = unsent.remote_url)
+                AND {expired}""",
                 params,
             )
             return self._conn.execute(f"DELETE FROM ui_tombstones WHERE {expired}", params).rowcount

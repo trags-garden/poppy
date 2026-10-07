@@ -4347,3 +4347,38 @@ def test_local_write_ends_deletion_suppression(tmp_path, trash_clock):
     engine, tombstones, client = _refused_deletion_aged_out(tmp_path, trash_clock, 400)
     engine.ingest(_memory("X", updated=_NOW))
     assert tombstones.suppressed_deletion("X", client.base_url) is None
+
+
+@pytest.mark.parametrize("uploaded_to_new_server", [True, False])
+def test_returning_to_an_old_server_does_not_bring_back_a_purged_deletion(
+    tmp_path, trash_clock, forget_memory, uploaded_to_new_server
+):
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    old = _FakeClient(base_url="https://old.test", rows=[memory_to_wire(_memory("X", updated=_NOW))])
+    new = _FakeClient(base_url="https://new.test", echo=True)
+    sync(engine=engine, tombstones=tombstones, client=old, poppy_dir=tmp_path)
+    if uploaded_to_new_server:
+        sync(engine=engine, tombstones=tombstones, client=new, poppy_dir=tmp_path)
+    deleted_at = forget_memory(engine, tombstones, tmp_path, "X").tombstone.tombstoned_at
+    sync(engine=engine, tombstones=tombstones, client=new, poppy_dir=tmp_path)
+    assert tombstones.get("X").sent_remotes == ({new.base_url} if uploaded_to_new_server else set())
+
+    trash_clock(deleted_at + timedelta(days=8))
+    sync(engine=engine, tombstones=tombstones, client=new, poppy_dir=tmp_path)
+    assert tombstones.get("X") is None
+    assert tombstones.suppressed_deletion("X", old.base_url) == deleted_at
+    assert tombstones.suppressed_deletion("X", new.base_url) is None
+
+    # The old server's pull is inclusive at its watermark, so it serves X again.
+    back = pull(engine=engine, tombstones=tombstones, client=old, state=load(tmp_path), poppy_dir=tmp_path)
+    assert (back.applied_live, back.errors) == (0, 0)
+    assert engine.get("X") is None
+
+    edited = _FakeClient(
+        base_url=old.base_url, rows=[memory_to_wire(_memory("X", updated=deleted_at + timedelta(seconds=1)))]
+    )
+    newer = pull(engine=engine, tombstones=tombstones, client=edited, state=load(tmp_path), poppy_dir=tmp_path)
+    assert newer.applied_live == 1
+    assert engine.get("X") is not None
