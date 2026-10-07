@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy doctor` no longer crashes on a corrupt capture lock file.
+- A capture lock file synced from another machine no longer makes
+  `poppy doctor` send a console interrupt on Windows.
 - On Linux, daemon start timeouts now point to the systemd journal instead of
   a log file that does not receive systemd output.
 - Automatic sync no longer leaves a write waiting for the next trigger when it lands just as the previous sync finishes.
