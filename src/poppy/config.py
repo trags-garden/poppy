@@ -47,9 +47,10 @@ _TELEMETRY_OFF = {"off", "false", "0", "no"}
 # a new host would look like a server this install has never talked to.
 DEFAULT_TRAGS_API_URL = "https://api.trags.ai"
 LEGACY_TRAGS_API_URL = "https://trags.ai"
-# Owned by poppy.sync.state; read here directly so loading config, which every
-# command and hook does, never imports the sync package.
+# Owned by poppy.sync.state and the tombstone store; read here directly so
+# loading config, which every command and hook does, never imports sync.
 _SYNC_STATE_FILENAME = "sync_state.json"
+_MEMORY_DB_FILENAME = "memories.db"
 
 
 @dataclass
@@ -468,29 +469,59 @@ def _save_trags_api_key(config: "PoppyConfig", data: dict) -> None:
             data["trags_api_key"] = config.trags_api_key
 
 
-def _synced_with_legacy_api_url(poppy_dir: Path) -> bool:
-    """Whether this install has sync state recorded for the old API host.
+def _synced_with_legacy_api_url(poppy_dir: Path) -> bool | None:
+    """Whether this install has synced with the old API host.
 
-    Watermarks and recorded sync errors live in sync_state.json, keyed by URL,
-    and every sync that records which memories a server holds or which
-    deletions it acknowledged also writes that server's entry there, so this
-    one file answers for all of them. A file that exists but cannot be read
-    answers yes: staying on the old host is always safe, while a wrong no would
-    send everything again to a host the local bookkeeping has never seen.
+    True or False when the evidence could be read; None when sync_state.json
+    exists but cannot be read, so the answer is unknown.
+
+    Watermarks and recorded sync errors live in sync_state.json, keyed by URL.
+    Sync records which memories a server holds in the memory database first and
+    writes sync_state.json after, so a first sync whose state write failed
+    leaves only the database record. When the state file names neither host,
+    the database is checked too.
     """
     try:
         data = json.loads((poppy_dir / _SYNC_STATE_FILENAME).read_text())
     except FileNotFoundError:
-        return False
+        data = {}
     except (OSError, ValueError):
-        return True
+        return None
     remotes = data.get("remotes") if isinstance(data, dict) else ()
     if remotes is None:
-        return False
+        remotes = {}
     if not isinstance(remotes, dict):
-        return True
+        return None
     # Same normalization as sync's own state keys: no trailing slash.
-    return any(str(url).rstrip("/") == LEGACY_TRAGS_API_URL for url in remotes)
+    urls = {str(url).rstrip("/") for url in remotes}
+    if LEGACY_TRAGS_API_URL in urls:
+        return True
+    if DEFAULT_TRAGS_API_URL in urls:
+        return False
+    return _legacy_api_url_in_memory_db(poppy_dir)
+
+
+def _legacy_api_url_in_memory_db(poppy_dir: Path) -> bool:
+    """Whether the memory database records memories held by the old API host.
+
+    Read-only and best effort: a missing, encrypted, locked or older database
+    answers no, which leaves the install on the default host.
+    """
+    db_path = poppy_dir / _MEMORY_DB_FILENAME
+    if not db_path.exists():
+        return False
+    from poppy.db import read_only_probe  # noqa: PLC0415
+
+    with read_only_probe(db_path) as conn:
+        if conn is None:
+            return False
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sync_remote_memories WHERE remote_url = ? LIMIT 1", (LEGACY_TRAGS_API_URL,)
+            ).fetchone()
+        except Exception:
+            return False
+    return row is not None
 
 
 def _save_trags_api_url(config: "PoppyConfig", data: dict) -> None:
@@ -501,7 +532,9 @@ def _save_trags_api_url(config: "PoppyConfig", data: dict) -> None:
     switches such an install to the default has that choice written down.
     """
     url = config.trags_api_url
-    if url != DEFAULT_TRAGS_API_URL or _synced_with_legacy_api_url(config.poppy_dir):
+    # Unknown (an unreadable state file) counts as yes: writing the default
+    # down is harmless, losing the user's choice is not.
+    if url != DEFAULT_TRAGS_API_URL or _synced_with_legacy_api_url(config.poppy_dir) is not False:
         data["trags_api_url"] = url
 
 
@@ -932,16 +965,47 @@ def _pin_legacy_api_url(config: PoppyConfig, data: dict) -> None:
     and already synced under the old default would otherwise meet the new
     default as a brand-new server and send everything again. Writing the old
     host into config.json makes the choice explicit, so this runs once and an
-    explicit trags-api-url, old or new, is never touched. Never raises: if the
-    write fails, this process still uses the old host and the next load retries.
+    explicit trags-api-url, old or new, is never touched.
+
+    When the sync state cannot be read, this process uses the old host, which is
+    always safe, but nothing is written: the next load decides again. Never
+    raises: if the write fails, this process still uses the old host and the
+    next load retries.
     """
-    if "trags_api_url" in data or not _synced_with_legacy_api_url(config.poppy_dir):
+    if "trags_api_url" in data:
+        return
+    synced = _synced_with_legacy_api_url(config.poppy_dir)
+    if synced is False:
         return
     config.trags_api_url = LEGACY_TRAGS_API_URL
+    if synced is None:
+        return
     try:
-        save_config(config)
+        config.trags_api_url = _write_api_url_pin(config.poppy_dir)
     except Exception:
         pass
+
+
+def _write_api_url_pin(poppy_dir: Path) -> str:
+    """Add the old host to config.json as it is on disk now; return the URL in effect.
+
+    Not save_config: that writes this process's snapshot, and another process
+    may have saved settings since this load read the file (turned auto-sync
+    off, or chose a host). The file is re-read right before the write, only the
+    URL is added, and a URL that has appeared in the meantime wins.
+    """
+    path = poppy_dir / CONFIG_FILENAME
+    try:
+        on_disk = json.loads(path.read_text())
+    except FileNotFoundError:
+        on_disk = {}
+    if not isinstance(on_disk, dict):
+        raise ValueError(f"{path} does not hold a JSON object")
+    if "trags_api_url" in on_disk:
+        return on_disk["trags_api_url"]
+    on_disk["trags_api_url"] = LEGACY_TRAGS_API_URL
+    _write_config_payload(poppy_dir, json.dumps(on_disk, indent=2))
+    return LEGACY_TRAGS_API_URL
 
 
 def save_config(config: PoppyConfig) -> None:
@@ -949,15 +1013,18 @@ def save_config(config: PoppyConfig) -> None:
     data: dict = {}
     for entry in _REGISTRY:
         entry.save(config, data)
-    config_path = config.poppy_dir / CONFIG_FILENAME
-    payload = json.dumps(data, indent=2)
+    _write_config_payload(config.poppy_dir, json.dumps(data, indent=2))
+
+
+def _write_config_payload(poppy_dir: Path, payload: str) -> None:
+    config_path = poppy_dir / CONFIG_FILENAME
     # Atomic, never-world-readable write: tempfile.mkstemp creates a fresh file
     # with 0600 honored (it is guaranteed-new, unlike os.open(O_CREAT, 0600)
     # whose mode is ignored for an existing 0644 file), so the plaintext key
     # never lands in a world-readable inode. os.replace then renames it over the
     # target atomically, so a crash can't leave a half-written or loose-perm
     # config, and an existing 0644 config is replaced by the 0600 inode.
-    fd, tmp_name = tempfile.mkstemp(dir=str(config.poppy_dir), prefix=".config-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(poppy_dir), prefix=".config-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(payload)
