@@ -415,9 +415,9 @@ class TombstoneStore:
           can age out after seven days.
         * the local dashboard, on startup, uses the same acknowledgements for
           the configured remote. With sync configured, it also sets
-          ``keep_unknown`` to leave IDs no remote is known to hold for sync's
-          pull to discover: a lost upload response can leave a remote copy
-          with no local record of it.
+          ``keep_unknown`` to leave IDs that remote is not known to hold for
+          sync's pull to discover: a lost upload response can leave a remote
+          copy with no local record of it.
 
         ``current_remote`` is the sync server in use now. A deletion it has
         acknowledged, or refused for good, no longer waits on any other remote:
@@ -427,9 +427,11 @@ class TombstoneStore:
         dashboard has no remote configured, every remote known to hold the
         memory has to acknowledge or refuse the deletion first.
 
-        ``keep_unknown`` defaults to false. When true, IDs no remote is known
-        to hold are kept regardless of age. When no remote key is resolvable,
-        the dashboard leaves
+        ``keep_unknown`` defaults to false. When true, IDs the current remote
+        (or, without one, any remote) is not known to hold are kept regardless
+        of age, until a sync to that remote records what it holds. A deletion
+        known only to a server no longer in use therefore stays in Trash until
+        the next sync. When no remote key is resolvable, the dashboard leaves
         ``keep_unknown`` false so unknown IDs age out after seven days; known
         but unsent deletions are still kept by ``require_sent``.
 
@@ -463,7 +465,7 @@ class TombstoneStore:
                     WHERE rejected.key = known.remote_url)))
             AND (? = 0 OR EXISTS (
                 SELECT 1 FROM sync_remote_memories known
-                WHERE known.id = ui_tombstones.id))"""
+                WHERE known.id = ui_tombstones.id AND (? IS NULL OR known.remote_url = ?)))"""
         params = (
             cutoff,
             pushed_through,
@@ -471,6 +473,8 @@ class TombstoneStore:
             current_remote,
             current_remote,
             keep_unknown,
+            current_remote,
+            current_remote,
         )
         with self._lock, self._conn:
             self._conn.execute(

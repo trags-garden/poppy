@@ -4382,3 +4382,31 @@ def test_returning_to_an_old_server_does_not_bring_back_a_purged_deletion(
     newer = pull(engine=engine, tombstones=tombstones, client=edited, state=load(tmp_path), poppy_dir=tmp_path)
     assert newer.applied_live == 1
     assert engine.get("X") is not None
+
+
+def test_dashboard_keeps_deletion_the_current_server_may_hold_from_a_lost_upload(tmp_path, monkeypatch):
+    from poppy.config import PoppyConfig, save_config
+    from poppy.sync import sync
+    from poppy.ui import server as ui_server
+
+    deleted_at = datetime.now(timezone.utc) - timedelta(days=8)
+    memory = _memory("X", updated=deleted_at - timedelta(days=1))
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(memory)
+    tombstones.note_remote_memories({"X"}, "https://old.test")
+    # The new server stored X, but its upload response was lost: no record of it here.
+    new = _FakeClient(base_url="https://new.test", echo=True)
+    new.rows_by_id["X"] = memory_to_wire(memory)
+    engine.delete("X")
+    tombstones.add(memory, tombstoned_at=deleted_at)
+
+    monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
+    save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url=new.base_url, auto_sync="off"))
+    monkeypatch.setattr(ui_server, "get_fast_engine", lambda _d: engine)
+    ui_server.create_app(poppy_dir=tmp_path)
+    assert tombstones.get("X") is not None
+
+    result = sync(engine=engine, tombstones=tombstones, client=new, poppy_dir=tmp_path)
+    assert (result.pull.applied_live, result.push.sent_tombstones) == (0, 1)
+    assert engine.get("X") is None
+    assert is_tombstone(new.rows_by_id["X"])

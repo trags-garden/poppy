@@ -138,6 +138,7 @@ def test_create_app_purges_acknowledged_known_deletion_with_remote_configured(
     memory = _ingest(engine, "acknowledged", "deleted fact acknowledged by the cloud")
     tombstones = TombstoneStore(tmp_path / "memories.db")
     remote_url = "https://trags.test"
+    save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url=remote_url))
     tombstones.note_remote_memories({memory.id}, remote_url)
     deletion = tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
     tombstones.mark_sent([deletion], remote_url)
@@ -174,10 +175,22 @@ def test_create_app_purges_deletion_acknowledged_by_the_configured_remote(
     assert tombstones.get(memory.id) is None
 
 
-def test_create_app_purges_deletion_known_only_to_a_server_no_longer_in_use(
+def test_deletion_known_only_to_a_server_no_longer_in_use_waits_for_the_next_sync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from poppy.sync import sync
     from poppy.ui import server as ui_server
+
+    class CurrentServer:
+        """Holds nothing and takes nothing: this sync only records that."""
+
+        base_url = "https://current.test"
+
+        def iter_all_since(self, *_args, **_kwargs):
+            return iter(())
+
+        def ping(self) -> None:
+            pass
 
     monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
     save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url="https://current.test", auto_sync="off"))
@@ -190,6 +203,11 @@ def test_create_app_purges_deletion_known_only_to_a_server_no_longer_in_use(
 
     monkeypatch.setattr(ui_server, "get_fast_engine", lambda _d: engine)
     ui_server.create_app(poppy_dir=tmp_path)
+    # The current server may hold X from a lost upload response, so the dashboard
+    # waits for a sync to find out.
+    assert tombstones.get(memory.id) is not None
+
+    sync(engine=engine, tombstones=tombstones, client=CurrentServer(), poppy_dir=tmp_path)
     assert tombstones.get(memory.id) is None
     assert tombstones.suppressed_deletion(memory.id, "https://old.test") == deletion.tombstoned_at
 
