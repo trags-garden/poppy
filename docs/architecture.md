@@ -129,11 +129,11 @@ Everything below lives in the data directory. Writers are named by module.
 Outside the data directory: downloaded models are cached under
 `POPPY_FASTEMBED_CACHE` if set, else `$XDG_CACHE_HOME/fastembed`, else
 `~/.cache/fastembed` (`engine/_model_cache.py:fastembed_cache_dir`). The
-encryption key lives only in the OS keychain (`keychain.py`). The Trags key goes
-to the keychain too, but falls back to `config.json` when the keychain write
-cannot be read back (`config.py:_save_trags_api_key`), and
-`consolidate-api-key` is always stored in `config.json`, so treat that file as
-secret. `setup/` edits each client's own config
+encryption key comes from `POPPY_DB_KEY` if set, else the OS keychain
+(`encryption.py:resolve_key`). The Trags key goes to the keychain too, but falls
+back to `config.json` when the keychain write cannot be read back
+(`config.py:_save_trags_api_key`), and `consolidate-api-key` set through
+`poppy config` is stored in `config.json`, so treat that file as secret. `setup/` edits each client's own config
 files.
 
 ## Import direction
