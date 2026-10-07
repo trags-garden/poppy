@@ -2,13 +2,21 @@ import json
 import os
 import stat
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from poppy.paths import ensure_poppy_dir
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX (Windows)
+    fcntl = None  # type: ignore[assignment]
+
 CONFIG_FILENAME = "config.json"
+# Serializes writes to config.json across processes (see _config_lock).
+CONFIG_LOCK_FILENAME = "config.json.lock"
 
 # The Trags sync API key is kept in the OS keychain (the same credential store
 # the encryption key uses), not in config.json, whenever a keychain backend is
@@ -41,13 +49,24 @@ _AUTO_SYNC_VALUES = {"on", "off"}
 _TELEMETRY_ON = {"on", "true", "1", "yes"}
 _TELEMETRY_OFF = {"off", "false", "0", "no"}
 
+# Where Poppy sends sync traffic unless trags-api-url says otherwise. The API
+# used to live on the site's own host; installs that already synced there stay
+# on it (see _pin_legacy_api_url), because sync bookkeeping is keyed by URL and
+# a new host would look like a server this install has never talked to.
+DEFAULT_TRAGS_API_URL = "https://api.trags.ai"
+LEGACY_TRAGS_API_URL = "https://trags.ai"
+# Owned by poppy.sync.state and the tombstone store; read here directly so
+# loading config, which every command and hook does, never imports sync.
+_SYNC_STATE_FILENAME = "sync_state.json"
+_MEMORY_DB_FILENAME = "memories.db"
+
 
 @dataclass
 class PoppyConfig:
     poppy_dir: Path = field(default_factory=lambda: Path.home() / ".poppy")
     obsidian_vault: Path | None = None
     trags_api_key: str | None = None
-    trags_api_url: str = "https://trags.ai"
+    trags_api_url: str = DEFAULT_TRAGS_API_URL
     # Stop-hook consolidation. When enabled, the Stop hook tries the host CLI
     # (claude -p / cursor-agent -p / codex exec / gemini -p) first, then falls back to an
     # OpenAI-compatible endpoint configured here.
@@ -105,6 +124,10 @@ class PoppyConfig:
     # signal to floor. Any value > 0 means "don't inject an unscored dump":
     # SessionStart shows only its status banner. 0.0 = off (inject as before).
     session_start_min_score: float = 0.0
+    # True while trags_api_url holds the old API host only because this load
+    # could not tell whether the install synced there (see _pin_legacy_api_url).
+    # Saves then leave the URL out, so the guess never reaches disk.
+    _api_url_provisional: bool = field(default=False, init=False, repr=False, compare=False)
 
     def set(self, key: str, value: str) -> object:
         """Parse and apply a `config set` value; returns the parsed value."""
@@ -458,6 +481,93 @@ def _save_trags_api_key(config: "PoppyConfig", data: dict) -> None:
             data["trags_api_key"] = config.trags_api_key
 
 
+def _synced_with_legacy_api_url(poppy_dir: Path) -> bool | None:
+    """Whether this install has synced with the old API host.
+
+    True or False when the evidence could be read; None when it could not, so
+    the answer is unknown.
+
+    Watermarks and recorded sync errors live in sync_state.json, keyed by URL.
+    Sync records which memories a server holds in the memory database first and
+    writes sync_state.json after, so a first sync whose state write failed
+    leaves only the database record. When the state file names neither host,
+    the database is checked too. A state file naming only the new host means
+    the install already moved there.
+    """
+    try:
+        data = json.loads((poppy_dir / _SYNC_STATE_FILENAME).read_text())
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError):
+        return None
+    remotes = data.get("remotes") if isinstance(data, dict) else ()
+    if remotes is None:
+        remotes = {}
+    if not isinstance(remotes, dict):
+        return None
+    # Same normalization as sync's own state keys: no trailing slash.
+    urls = {str(url).rstrip("/") for url in remotes}
+    if LEGACY_TRAGS_API_URL in urls:
+        return True
+    if DEFAULT_TRAGS_API_URL in urls:
+        return False
+    return _legacy_api_url_in_memory_db(poppy_dir)
+
+
+def _legacy_api_url_in_memory_db(poppy_dir: Path) -> bool | None:
+    """Whether the memory database records memories held by the old API host.
+
+    No database means no. A database that cannot be read (encrypted, locked,
+    unreadable, or any error) is unknown, never no: only evidence read in full
+    may move an existing install to the new host. An encrypted store is never
+    readable here, so such an install keeps the old host on every load until a
+    sync records state for it; existing installs are not who the new default
+    is for.
+    """
+    db_path = poppy_dir / _MEMORY_DB_FILENAME
+    try:
+        if not db_path.exists():
+            return False
+        from poppy.db import read_only_probe  # noqa: PLC0415
+
+        with read_only_probe(db_path) as conn:
+            if conn is None:
+                return None
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_remote_memories'"
+            ).fetchone():
+                # A store that never synced has no record of any server.
+                return False
+            row = conn.execute(
+                "SELECT 1 FROM sync_remote_memories WHERE remote_url = ? LIMIT 1", (LEGACY_TRAGS_API_URL,)
+            ).fetchone()
+    except Exception:
+        return None
+    return row is not None
+
+
+def _apply_trags_api_url(config: "PoppyConfig", url: object) -> None:
+    # A URL the user chose is never provisional, so the next save writes it.
+    config.trags_api_url = url
+    config._api_url_provisional = False
+
+
+def _save_trags_api_url(config: "PoppyConfig", data: dict) -> None:
+    """Persist the URL whenever leaving it out would reload a different one.
+
+    An absent value means the default, except on an install that synced with
+    the old host, where the next load would pin it back there. So a user who
+    switches such an install to the default has that choice written down.
+    """
+    if config._api_url_provisional:
+        return
+    url = config.trags_api_url
+    # Unknown (unreadable sync evidence) counts as yes: writing the default
+    # down is harmless, losing the user's choice is not.
+    if url != DEFAULT_TRAGS_API_URL or _synced_with_legacy_api_url(config.poppy_dir) is not False:
+        data["trags_api_url"] = url
+
+
 def _load_trags_api_key(config: "PoppyConfig", data: dict) -> None:
     if "trags_api_key" in data:
         config.trags_api_key = data["trags_api_key"]
@@ -477,7 +587,14 @@ _REGISTRY: tuple[ConfigKey, ...] = (
         save=_save_trags_api_key,
         load=_load_trags_api_key,
     ),
-    _key("trags_api_url", settings_name="trags-api-url", default="https://trags.ai", parse=_parse_str),
+    _key(
+        "trags_api_url",
+        settings_name="trags-api-url",
+        default=DEFAULT_TRAGS_API_URL,
+        parse=_parse_str,
+        apply=_apply_trags_api_url,
+        save=_save_trags_api_url,
+    ),
     _key(
         "consolidate_enabled",
         settings_name="consolidate-enabled",
@@ -871,20 +988,106 @@ def _migrate_trags_key_to_keychain(config: PoppyConfig) -> None:
         pass
 
 
+def _pin_legacy_api_url(config: PoppyConfig, data: dict) -> None:
+    """Keep an install that synced with the old API host on that host, once.
+
+    Sync state (watermarks, recorded errors, which memories and deletions the
+    server has seen) is keyed by URL. An install that never set trags-api-url
+    and already synced under the old default would otherwise meet the new
+    default as a brand-new server and send everything again. Writing the old
+    host into config.json makes the choice explicit, so this runs once and an
+    explicit trags-api-url, old or new, is never touched.
+
+    When the evidence cannot be read, this process uses the old host, which is
+    always safe, and nothing is written, not even by a later save in this
+    process: the next load decides again. Never raises: if the write fails,
+    this process still uses the old host and the next load retries.
+    """
+    if isinstance(data.get("trags_api_url"), str):
+        return
+    # Absent, or not a string (which no Poppy writes): decide as if absent.
+    config.trags_api_url = DEFAULT_TRAGS_API_URL
+    synced = _synced_with_legacy_api_url(config.poppy_dir)
+    if synced is False:
+        return
+    config.trags_api_url = LEGACY_TRAGS_API_URL
+    if synced is None:
+        config._api_url_provisional = True
+        return
+    try:
+        config.trags_api_url = _write_api_url_pin(config.poppy_dir)
+    except Exception:
+        pass
+
+
+def _write_api_url_pin(poppy_dir: Path) -> str:
+    """Add the old host to config.json as it is on disk now; return the URL in effect.
+
+    Not save_config: that writes this process's snapshot, and another process
+    may have saved settings since this load read the file (turned auto-sync
+    off, or chose a host). Under the config lock the file is re-read, only the
+    URL is added, and a URL that has appeared in the meantime wins.
+    """
+    path = poppy_dir / CONFIG_FILENAME
+    with _config_lock(poppy_dir):
+        try:
+            on_disk = json.loads(path.read_text())
+        except FileNotFoundError:
+            on_disk = {}
+        if not isinstance(on_disk, dict):
+            raise ValueError(f"{path} does not hold a JSON object")
+        existing = on_disk.get("trags_api_url")
+        if isinstance(existing, str):
+            return existing
+        on_disk["trags_api_url"] = LEGACY_TRAGS_API_URL
+        _write_config_payload(poppy_dir, json.dumps(on_disk, indent=2))
+    return LEGACY_TRAGS_API_URL
+
+
+@contextmanager
+def _config_lock(poppy_dir: Path) -> Iterator[None]:
+    """Exclusive lock for writing config.json, held only around the file I/O.
+
+    save_config replaces the whole file and the API host pin edits it in place;
+    without a shared lock a save could land between the pin's read and its
+    replace and be lost. Callers do keychain and other slow work before taking
+    it. Best effort, like the sync state lock: where flock is unavailable the
+    body still runs.
+    """
+    fd = os.open(
+        str(poppy_dir / CONFIG_LOCK_FILENAME), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), _CONFIG_FILE_MODE
+    )
+    try:
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                pass
+        yield
+    finally:
+        # Closing the descriptor releases the lock.
+        os.close(fd)
+
+
 def save_config(config: PoppyConfig) -> None:
     ensure_poppy_dir(config.poppy_dir)
     data: dict = {}
     for entry in _REGISTRY:
         entry.save(config, data)
-    config_path = config.poppy_dir / CONFIG_FILENAME
     payload = json.dumps(data, indent=2)
+    with _config_lock(config.poppy_dir):
+        _write_config_payload(config.poppy_dir, payload)
+
+
+def _write_config_payload(poppy_dir: Path, payload: str) -> None:
+    config_path = poppy_dir / CONFIG_FILENAME
     # Atomic, never-world-readable write: tempfile.mkstemp creates a fresh file
     # with 0600 honored (it is guaranteed-new, unlike os.open(O_CREAT, 0600)
     # whose mode is ignored for an existing 0644 file), so the plaintext key
     # never lands in a world-readable inode. os.replace then renames it over the
     # target atomically, so a crash can't leave a half-written or loose-perm
     # config, and an existing 0644 config is replaced by the 0600 inode.
-    fd, tmp_name = tempfile.mkstemp(dir=str(config.poppy_dir), prefix=".config-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(poppy_dir), prefix=".config-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(payload)
@@ -905,10 +1108,12 @@ def load_config(poppy_dir: Path | None = None) -> PoppyConfig:
     poppy_dir = poppy_dir or Path.home() / ".poppy"
     config = PoppyConfig(poppy_dir=poppy_dir)
     config_path = poppy_dir / CONFIG_FILENAME
+    data: dict = {}
     if config_path.exists():
         data = json.loads(config_path.read_text())
         for entry in _REGISTRY:
             entry.load(config, data)
+    _pin_legacy_api_url(config, data)
     # Transparent one-time upgrade: relocate any plaintext key into the keychain
     # and scrub it from the file. No-op once migrated, or on headless hosts.
     _migrate_trags_key_to_keychain(config)
@@ -917,7 +1122,7 @@ def load_config(poppy_dir: Path | None = None) -> PoppyConfig:
 
 # Fields that never persist to config.json (runtime-only state). The registry
 # meta-test asserts every OTHER dataclass field is owned by exactly one entry.
-_NON_PERSISTED_FIELDS = {"poppy_dir"}
+_NON_PERSISTED_FIELDS = {"poppy_dir", "_api_url_provisional"}
 
 
 def _registry_field_names() -> set[str]:
