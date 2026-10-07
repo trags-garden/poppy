@@ -401,9 +401,115 @@ def test_error_record_alone_pins_old_host(tmp_path):
 
 
 @pytest.mark.parametrize("content", ["not json", "[]", '{"remotes": []}'])
-def test_unreadable_sync_state_stays_on_old_host(tmp_path, content):
+def test_unreadable_sync_state_uses_old_host_without_pinning(tmp_path, content):
+    """Unknown state means the old host for this process only; the next load,
+    once the file reads again, makes the real decision."""
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
     (tmp_path / "sync_state.json").write_text(content)
     assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert _saved(tmp_path) == {"engine": "seed"}
+
+
+@_POSIX_ONLY
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores file modes")
+def test_permission_denied_sync_state_is_not_pinned(tmp_path):
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
+    _write_sync_state(tmp_path, _NEW_API)
+    state = tmp_path / "sync_state.json"
+    state.chmod(0)
+    try:
+        assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    finally:
+        state.chmod(0o600)
+    assert _saved(tmp_path) == {"engine": "seed"}
+    # Readable again, the state names the new host: no pin, then or later.
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+    assert _saved(tmp_path) == {"engine": "seed"}
+
+
+def _note_db_remote(poppy_dir: Path, url: str) -> None:
+    from poppy.tombstones import TombstoneStore
+
+    store = TombstoneStore(poppy_dir / "memories.db")
+    store.note_remote_memories({"m1"}, url)
+    store._conn.close()
+
+
+def test_old_host_known_only_to_memory_db_is_pinned(tmp_path):
+    """Sync records what a server holds before it writes sync_state.json, so a
+    first sync whose state write failed leaves only the database record."""
+    _note_db_remote(tmp_path, _OLD_API + "/")
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert _saved(tmp_path) == {"trags_api_url": _OLD_API}
+
+
+def test_memory_db_without_old_host_is_not_pinned(tmp_path):
+    _note_db_remote(tmp_path, "https://self-hosted.example")
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_state_naming_new_host_skips_memory_db(tmp_path):
+    _note_db_remote(tmp_path, _OLD_API)
+    _write_sync_state(tmp_path, _NEW_API)
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+
+
+@pytest.mark.parametrize("content", [b"", b"not a database, or an encrypted one" * 200])
+def test_unreadable_memory_db_is_skipped(tmp_path, content):
+    (tmp_path / "memories.db").write_bytes(content)
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_pin_keeps_settings_saved_by_another_process(tmp_path, monkeypatch):
+    """Another process can save between this load's read and its pin write. The
+    pin re-reads the file and adds only the URL, and a URL saved meanwhile wins."""
+    import poppy.config as config_module
+
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
+    _write_sync_state(tmp_path, _OLD_API)
+    concurrent = {"engine": "seed", "auto_sync": "off", "trags_api_url": _NEW_API}
+    real = config_module._synced_with_legacy_api_url
+
+    def racing(poppy_dir):
+        answer = real(poppy_dir)
+        (tmp_path / "config.json").write_text(json.dumps(concurrent))
+        return answer
+
+    monkeypatch.setattr(config_module, "_synced_with_legacy_api_url", racing)
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+    assert _saved(tmp_path) == concurrent
+
+
+def test_pin_adds_only_the_url_to_the_file_on_disk(tmp_path, monkeypatch):
+    import poppy.config as config_module
+
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
+    _write_sync_state(tmp_path, _OLD_API)
+    real = config_module._synced_with_legacy_api_url
+
+    def racing(poppy_dir):
+        answer = real(poppy_dir)
+        (tmp_path / "config.json").write_text('{"engine": "seed", "auto_sync": "off"}')
+        return answer
+
+    monkeypatch.setattr(config_module, "_synced_with_legacy_api_url", racing)
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert _saved(tmp_path) == {"engine": "seed", "auto_sync": "off", "trags_api_url": _OLD_API}
+
+
+def test_pin_and_key_migration_store_the_key_once(tmp_path, monkeypatch):
+    import poppy.config as config_module
+
+    stores = []
+    monkeypatch.setattr(config_module, "_store_trags_key_in_keychain", lambda cfg: stores.append(1) or True)
+    (tmp_path / "config.json").write_text('{"trags_api_key": "usr_plain"}')
+    _write_sync_state(tmp_path, _OLD_API)
+
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert stores == [1]
+    assert _saved(tmp_path) == {"trags_api_url": _OLD_API}
 
 
 @pytest.mark.parametrize("explicit", ["https://self-hosted.example", _NEW_API, _OLD_API + "/"])

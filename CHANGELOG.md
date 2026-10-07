@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without setting `trags-api-url` keeps using it: the first run after upgrading
   writes `https://trags.ai` into `config.json`, so nothing is uploaded again and
   no sync history is lost. An explicitly set `trags-api-url` is never changed.
+  Downgrading to an older Poppy after syncing with `https://api.trags.ai` by
+  default sends sync back to `https://trags.ai`, which it treats as a new server.
 
 ### Removed
 
