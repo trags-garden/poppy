@@ -513,6 +513,9 @@ uv run pytest -v
 uv run poppy --help
 ```
 
+For a map of the code, see
+[docs/architecture.md](https://github.com/trags-garden/poppy/blob/main/docs/architecture.md).
+
 For the exact source of a release, download it from PyPI instead:
 
 ```bash

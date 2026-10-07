@@ -2,7 +2,8 @@
 
 Poppy's source is published openly under the Apache License 2.0
 (see [LICENSE](LICENSE)). You are free to read, run, self-host, fork, and modify
-it under those terms.
+it under those terms. For a map of the code, see
+[docs/architecture.md](docs/architecture.md).
 
 Poppy is maintained by the Trags team. We are not accepting pull requests right
 now. Bug reports and feature requests are welcome as
