@@ -45,9 +45,9 @@ LEGACY_LOCK_TTL_S = 300
 
 _OPEN_FLAGS = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
 
-# ``poppy doctor`` from an older version briefly takes the lock to test it, so
-# a contended lock is retried for this long (seconds, in steps) before another
-# worker is taken to hold it.
+# A capture worker that stops early holds the lock only briefly, so a contended
+# lock is retried for this long (seconds, in steps) before the caller skips.
+# That keeps the SessionEnd backstop from skipping behind such a worker.
 CONTENDED_RETRY_S = 0.1
 _CONTENDED_STEPS = 4
 
@@ -101,6 +101,10 @@ def is_held(path: Path) -> bool:
     make a capture skip. A pid reused since a crash can show a capture in flight
     that is not; the answer is informational only.
     """
+    if fcntl is None:
+        # Windows: ``os.kill(pid, 0)`` sends a console control event there
+        # instead of probing, so the pid check below must not run.
+        return False
     try:
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
@@ -117,7 +121,7 @@ def is_held(path: Path) -> bool:
         os.kill(pid, 0)
     except PermissionError:
         return True  # alive, owned by another user
-    except OSError:
+    except (OSError, OverflowError):
         return False
     return True
 
