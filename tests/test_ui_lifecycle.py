@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from poppy.config import PoppyConfig, save_config
 from poppy.engine.seed import SeedEngine
 from poppy.models import Memory, Source
 from poppy.ui.tombstones import TombstoneStore
@@ -137,6 +138,7 @@ def test_create_app_purges_acknowledged_known_deletion_with_remote_configured(
     memory = _ingest(engine, "acknowledged", "deleted fact acknowledged by the cloud")
     tombstones = TombstoneStore(tmp_path / "memories.db")
     remote_url = "https://trags.test"
+    save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url=remote_url))
     tombstones.note_remote_memories({memory.id}, remote_url)
     deletion = tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
     tombstones.mark_sent([deletion], remote_url)
@@ -150,6 +152,64 @@ def test_create_app_purges_acknowledged_known_deletion_with_remote_configured(
     assert response.status_code == 200
     assert response.json()["items"] == []
     assert tombstones.get(memory.id) is None
+
+
+def test_create_app_purges_deletion_acknowledged_by_the_configured_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from poppy.ui import server as ui_server
+
+    monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
+    save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url="https://current.test/"))
+    engine = SeedEngine(db_path=tmp_path / "memories.db")
+    memory = _ingest(engine, "switched", "deleted fact the old server never acknowledged")
+    tombstones = TombstoneStore(tmp_path / "memories.db")
+    for url in ("https://old.test", "https://current.test"):
+        tombstones.note_remote_memories({memory.id}, url)
+    deletion = tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
+    tombstones.mark_sent([deletion], "https://current.test")
+    engine.delete(memory.id)
+
+    monkeypatch.setattr(ui_server, "get_fast_engine", lambda _d: engine)
+    ui_server.create_app(poppy_dir=tmp_path)
+    assert tombstones.get(memory.id) is None
+
+
+def test_deletion_known_only_to_a_server_no_longer_in_use_waits_for_the_next_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from poppy.sync import sync
+    from poppy.ui import server as ui_server
+
+    class CurrentServer:
+        """Holds nothing and takes nothing: this sync only records that."""
+
+        base_url = "https://current.test"
+
+        def iter_all_since(self, *_args, **_kwargs):
+            return iter(())
+
+        def ping(self) -> None:
+            pass
+
+    monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
+    save_config(PoppyConfig(poppy_dir=tmp_path, trags_api_url="https://current.test", auto_sync="off"))
+    engine = SeedEngine(db_path=tmp_path / "memories.db")
+    memory = _ingest(engine, "retired", "deleted fact only the old server holds")
+    tombstones = TombstoneStore(tmp_path / "memories.db")
+    tombstones.note_remote_memories({memory.id}, "https://old.test")
+    deletion = tombstones.add(memory, tombstoned_at=datetime.now(timezone.utc) - timedelta(days=8))
+    engine.delete(memory.id)
+
+    monkeypatch.setattr(ui_server, "get_fast_engine", lambda _d: engine)
+    ui_server.create_app(poppy_dir=tmp_path)
+    # The current server may hold X from a lost upload response, so the dashboard
+    # waits for a sync to find out.
+    assert tombstones.get(memory.id) is not None
+
+    sync(engine=engine, tombstones=tombstones, client=CurrentServer(), poppy_dir=tmp_path)
+    assert tombstones.get(memory.id) is None
+    assert tombstones.suppressed_deletion(memory.id, "https://old.test") == deletion.tombstoned_at
 
 
 def test_memory_out_includes_expires_at(app_client: TestClient, tmp_path: Path) -> None:
@@ -617,7 +677,7 @@ def test_tombstone_migration_guard_covers_the_sqlcipher_driver(tmp_path: Path) -
 
     losing = _Conn("duplicate column name: memory_expires_at")
     _migrate_columns(losing)  # must not raise
-    assert losing.altered == 3  # swallowed every duplicate
+    assert losing.altered == 4  # swallowed every duplicate, including rejected_remotes
 
     broken = _Conn("no such table: ui_tombstones")
     with pytest.raises(Exception, match="no such table"):

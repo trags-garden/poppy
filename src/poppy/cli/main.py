@@ -2277,7 +2277,8 @@ def _fail_if_unresolved_error(url) -> None:
 
 def _print_push(res) -> None:
     click.echo(
-        f"  push: {res.sent_live} live, {res.sent_tombstones} tombstones, {res.skipped} skipped, {res.errors} errors"
+        f"  push: {res.sent_live} live, {res.sent_tombstones} tombstones, "
+        f"{res.skipped} skipped, {res.rejected} rejected, {res.errors} errors"
     )
 
 

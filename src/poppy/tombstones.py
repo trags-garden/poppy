@@ -1,8 +1,8 @@
 """Trash and sync bookkeeping storage.
 
 Owns Trash (the seven-day soft delete table), the per-server record of known
-memory IDs, and the sent marks for deletions. CLI, MCP, dashboard, write_flow,
-and sync all use this store.
+memory IDs, the sent marks for deletions, and the deletions a server never took.
+CLI, MCP, dashboard, write_flow, and sync all use this store.
 """
 
 from __future__ import annotations
@@ -47,6 +47,24 @@ CREATE TABLE IF NOT EXISTS sync_remote_memories (
     remote_url TEXT NOT NULL,
     PRIMARY KEY (id, remote_url)
 );
+
+-- Deletions a remote holding the memory never acknowledged (it refused them, or
+-- the user moved to another server), kept after their Trash entry ages out so
+-- pull does not bring the memory back. Holds no memory text and never ages.
+CREATE TABLE IF NOT EXISTS sync_suppressed_deletions (
+    id TEXT NOT NULL,
+    remote_url TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (id, remote_url)
+);
+"""
+
+# Any local write of a memory ID (a restore pulled from another device, an
+# import, a re-create) ends its suppression, atomically with the write.
+SUPPRESSION_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS sync_suppressed_deletions_clear AFTER INSERT ON memories BEGIN
+    DELETE FROM sync_suppressed_deletions WHERE id = new.id;
+END
 """
 
 
@@ -65,11 +83,16 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     too.
     """
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(ui_tombstones)").fetchall()}
-    for name in ("superseded_by", "memory_expires_at", "token"):
+    for name, definition in (
+        ("superseded_by", "TEXT"),
+        ("memory_expires_at", "TEXT"),
+        ("token", "TEXT"),
+        ("rejected_remotes", "TEXT NOT NULL DEFAULT '{}'"),
+    ):
         if name in cols:
             continue
         try:
-            conn.execute(f"ALTER TABLE ui_tombstones ADD COLUMN {name} TEXT")
+            conn.execute(f"ALTER TABLE ui_tombstones ADD COLUMN {name} {definition}")
         except Exception as exc:
             # The check and the ALTER are not atomic across processes: the UI,
             # the CLI and the autosync worker can open the store at the same
@@ -101,6 +124,7 @@ class Tombstone:
     # conditional delete cannot remove a replacement written in the same tick.
     token: str | None = None
     sent_remotes: set[str] = field(default_factory=set)
+    rejected_remotes: set[str] = field(default_factory=set)
 
     @property
     def expires_at(self) -> datetime:
@@ -118,6 +142,11 @@ class TombstoneStore:
         self._conn.executescript(SCHEMA)
         _migrate_columns(self._conn)
         self._migrate_sync_provenance()
+        # The engine owns `memories`. A store opened before it exists has no live
+        # rows to clear yet; the next open adds the trigger.
+        if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories'").fetchone():
+            with self._conn:
+                self._conn.execute(SUPPRESSION_TRIGGER)
 
     def _migrate_sync_provenance(self) -> None:
         """Backfill once, atomically with the sent_remotes column as the marker.
@@ -282,6 +311,15 @@ class TombstoneStore:
                 [(mid, remote_url.rstrip("/")) for mid in memory_ids],
             )
 
+    def suppressed_deletion(self, memory_id: str, remote_url: str) -> datetime | None:
+        """When this remote refused to delete the ID, if its Trash entry has since aged out."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT deleted_at FROM sync_suppressed_deletions WHERE id = ? AND remote_url = ?",
+                (memory_id, remote_url.rstrip("/")),
+            ).fetchone()
+        return datetime.fromisoformat(row["deleted_at"]) if row else None
+
     def mark_sent(self, tombstones: list[Tombstone], remote_url: str) -> None:
         """Acknowledge a batch without clearing any concurrent replacements."""
         if not tombstones:
@@ -292,6 +330,19 @@ class TombstoneStore:
                 "UPDATE ui_tombstones SET sent_remotes = json_set(sent_remotes, ?, 1) WHERE id = ? AND token = ?",
                 [(path, ts.memory.id, ts.token) for ts in tombstones],
             )
+
+    def mark_rejected(self, tombstones: list[Tombstone], remote_url: str) -> int:
+        """Record permanent refusals for these deletions; count only new marks."""
+        if not tombstones:
+            return 0
+        path = "$." + json.dumps(remote_url.rstrip("/"))
+        with self._lock, self._conn:
+            cursor = self._conn.executemany(
+                """UPDATE ui_tombstones SET rejected_remotes = json_set(rejected_remotes, ?, 1)
+                WHERE id = ? AND token = ? AND json_extract(rejected_remotes, ?) IS NULL""",
+                [(path, ts.memory.id, ts.token, path) for ts in tombstones],
+            )
+            return cursor.rowcount
 
     def repush_stamp(self) -> str | None:
         """When the UTC rewrite moved a push candidate here, or None if it never did.
@@ -338,7 +389,12 @@ class TombstoneStore:
         return [self._row_to_tombstone(r) for r in rows]
 
     def purge_expired(
-        self, *, pushed_through: str | None, require_sent: bool = False, keep_unknown: bool = False
+        self,
+        *,
+        pushed_through: str | None,
+        require_sent: bool = False,
+        keep_unknown: bool = False,
+        current_remote: str | None = None,
     ) -> int:
         """Age out records past the restore window. Returns ui tombstones purged.
 
@@ -353,22 +409,36 @@ class TombstoneStore:
         ``pushed_through`` is the point up to which deletions no longer need to
         be kept. Both callers pass the current time and set ``require_sent``:
 
-        * ``sync``, after pull and push, purges deletions acknowledged by every
-          remote known to hold the memory, independent of the live watermark.
-          Its pull records remote-held IDs before the purge, so unknown IDs
+        * ``sync``, after pull and push, purges deletions its own remote has
+          acknowledged, independent of the live watermark. Its pull records
+          remote-held IDs before the purge, so IDs that remote does not hold
           can age out after seven days.
-        * the local dashboard, on startup, uses the same acknowledgements,
-          regardless of whether a remote key can currently be read. With sync
-          configured, it also sets ``keep_unknown`` to leave unknown IDs for
+        * the local dashboard, on startup, uses the same acknowledgements for
+          the configured remote. With sync configured, it also sets
+          ``keep_unknown`` to leave IDs that remote is not known to hold for
           sync's pull to discover: a lost upload response can leave a remote
           copy with no local record of it.
 
-        ``keep_unknown`` defaults to false. When true, IDs with no row in
-        ``sync_remote_memories`` are kept regardless of age. With both options
-        true, only IDs known to a remote and acknowledged by every remote that
-        knows them can be purged. When no remote key is resolvable, the dashboard
-        leaves ``keep_unknown`` false so unknown IDs age out after seven days;
-        known but unsent deletions are still kept by ``require_sent``.
+        ``current_remote`` is the sync server in use now. A deletion it has
+        acknowledged, or refused for good, no longer waits on any other remote:
+        servers the user stopped using keep their rows in
+        ``sync_remote_memories`` (switching back still sends the deletion while
+        it is in Trash) but no longer hold Trash open. Without it, as when the
+        dashboard has no remote configured, every remote known to hold the
+        memory has to acknowledge or refuse the deletion first.
+
+        ``keep_unknown`` defaults to false. When true, IDs the current remote
+        (or, without one, any remote) is not known to hold are kept regardless
+        of age, until a sync to that remote records what it holds. A deletion
+        known only to a server no longer in use therefore stays in Trash until
+        the next sync. When no remote key is resolvable, the dashboard leaves
+        ``keep_unknown`` false so unknown IDs age out after seven days; known
+        but unsent deletions are still kept by ``require_sent``.
+
+        A purged deletion leaves a content-free suppression record for every
+        remote known to hold the memory that never acknowledged it (refused, or
+        a server no longer in use), written in the same transaction, so pull
+        does not bring the memory back from that remote.
 
         The argument is required, with no default. Passing ``None`` purges
         nothing, which is the safe answer for a caller that cannot tell which
@@ -380,24 +450,43 @@ class TombstoneStore:
         # spelling: `12:00+02:00` is 10:00Z, and as raw text it would purge an
         # 11:00Z record that has not been acknowledged.
         pushed_through = utc_iso(pushed_through)
-        with self._lock:
-            purged = 0
-            if pushed_through is not None:
-                cursor = self._conn.execute(
-                    """DELETE FROM ui_tombstones WHERE tombstoned_at < ? AND tombstoned_at <= ?
-                    AND (? = 0 OR NOT EXISTS (
-                        SELECT 1 FROM sync_remote_memories known
-                        WHERE known.id = ui_tombstones.id AND NOT EXISTS (
-                            SELECT 1 FROM json_each(ui_tombstones.sent_remotes) sent
-                            WHERE sent.key = known.remote_url)))
-                    AND (? = 0 OR EXISTS (
-                        SELECT 1 FROM sync_remote_memories known
-                        WHERE known.id = ui_tombstones.id))""",
-                    (cutoff, pushed_through, require_sent, keep_unknown),
-                )
-                purged = cursor.rowcount
-            self._conn.commit()
-            return purged
+        if pushed_through is None:
+            return 0
+        current_remote = current_remote.rstrip("/") if current_remote else None
+        expired = """ui_tombstones.tombstoned_at < ? AND ui_tombstones.tombstoned_at <= ?
+            AND (? = 0 OR NOT EXISTS (
+                SELECT 1 FROM sync_remote_memories known
+                WHERE known.id = ui_tombstones.id AND (? IS NULL OR known.remote_url = ?)
+                AND NOT EXISTS (
+                    SELECT 1 FROM json_each(ui_tombstones.sent_remotes) sent
+                    WHERE sent.key = known.remote_url)
+                AND NOT EXISTS (
+                    SELECT 1 FROM json_each(ui_tombstones.rejected_remotes) rejected
+                    WHERE rejected.key = known.remote_url)))
+            AND (? = 0 OR EXISTS (
+                SELECT 1 FROM sync_remote_memories known
+                WHERE known.id = ui_tombstones.id AND (? IS NULL OR known.remote_url = ?)))"""
+        params = (
+            cutoff,
+            pushed_through,
+            require_sent,
+            current_remote,
+            current_remote,
+            keep_unknown,
+            current_remote,
+            current_remote,
+        )
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"""INSERT OR REPLACE INTO sync_suppressed_deletions (id, remote_url, deleted_at)
+                SELECT ui_tombstones.id, unsent.remote_url, ui_tombstones.tombstoned_at
+                FROM ui_tombstones JOIN sync_remote_memories unsent ON unsent.id = ui_tombstones.id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM json_each(ui_tombstones.sent_remotes) sent WHERE sent.key = unsent.remote_url)
+                AND {expired}""",
+                params,
+            )
+            return self._conn.execute(f"DELETE FROM ui_tombstones WHERE {expired}", params).rowcount
 
     @staticmethod
     def _row_to_tombstone(row: sqlite3.Row) -> Tombstone:
@@ -425,4 +514,5 @@ class TombstoneStore:
             superseded_by=row["superseded_by"] if "superseded_by" in keys else None,
             token=row["token"] if "token" in keys else None,
             sent_remotes=set(json.loads(row["sent_remotes"])),
+            rejected_remotes=set(json.loads(row["rejected_remotes"])),
         )

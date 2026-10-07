@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automatic sync no longer leaves a write waiting for the next trigger when it lands just as the previous sync finishes.
 - The Hermes plugin no longer drops memories and searches whose text starts with a dash.
 - Sync pull no longer turns a stored confidence of 0.0 into 1.0.
+- A deletion the sync server refuses no longer retries on every sync. It leaves
+  Trash after seven days, and the memory does not come back on a later sync.
+- Trash no longer waits on a sync server you have stopped using.
 - `poppy build mcpb` outside a source checkout now says it needs one and points
   to `poppy setup claude-desktop`, instead of crashing or suggesting npm tooling.
 - Claude Desktop bundles no longer install development dependencies on startup.
