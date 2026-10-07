@@ -24,7 +24,7 @@ def test_default_config():
     assert config.poppy_dir == Path.home() / ".poppy"
     assert config.obsidian_vault is None
     assert config.trags_api_key is None
-    assert config.trags_api_url == "https://trags.ai"
+    assert config.trags_api_url == "https://api.trags.ai"
 
 
 def test_save_and_load_config(tmp_path):
@@ -330,3 +330,142 @@ def test_non_settable_keys_reject_config_set(key):
     reachable through `config set`."""
     with pytest.raises(ValueError):
         PoppyConfig().set(key, "x")
+
+
+# --- Default API host and the pin for installs that synced with the old one --
+
+_OLD_API = "https://trags.ai"
+_NEW_API = "https://api.trags.ai"
+
+
+def _write_sync_state(poppy_dir: Path, *urls: str) -> None:
+    remotes = {url: {"last_pushed_at": "2026-10-01T00:00:00+00:00", "pushed_count": 3} for url in urls}
+    (poppy_dir / "sync_state.json").write_text(json.dumps({"remotes": remotes}))
+
+
+def _saved(poppy_dir: Path) -> dict:
+    return json.loads((poppy_dir / "config.json").read_text())
+
+
+def test_fresh_install_defaults_to_api_host(tmp_path):
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+    # Nothing to pin, so loading writes nothing.
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_missing_poppy_dir_loads_default(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    assert load_config(poppy_dir=missing).trags_api_url == _NEW_API
+    assert not missing.exists()
+
+
+def test_existing_config_without_old_host_state_gets_new_default(tmp_path):
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
+    _write_sync_state(tmp_path, "https://self-hosted.example")
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+    assert _saved(tmp_path) == {"engine": "seed"}
+
+
+def test_install_that_synced_with_new_host_is_not_pinned(tmp_path):
+    (tmp_path / "config.json").write_text("{}")
+    _write_sync_state(tmp_path, _NEW_API)
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+    assert _saved(tmp_path) == {}
+
+
+@pytest.mark.parametrize("state_key", [_OLD_API, _OLD_API + "/"])
+def test_install_that_synced_with_old_host_stays_there(tmp_path, state_key):
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
+    _write_sync_state(tmp_path, state_key)
+
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert _saved(tmp_path) == {"engine": "seed", "trags_api_url": _OLD_API}
+
+    # Runs once: the pin is now an explicit value, so a second load reads it
+    # back without rewriting the file.
+    before = (tmp_path / "config.json").read_text()
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert (tmp_path / "config.json").read_text() == before
+
+
+def test_old_host_state_without_config_file_is_pinned(tmp_path):
+    """A key from the environment needs no config.json, yet can have synced."""
+    _write_sync_state(tmp_path, _OLD_API)
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert _saved(tmp_path) == {"trags_api_url": _OLD_API}
+
+
+def test_error_record_alone_pins_old_host(tmp_path):
+    (tmp_path / "sync_state.json").write_text(json.dumps({"remotes": {_OLD_API: {"errors": {"auth": "401"}}}}))
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+
+
+@pytest.mark.parametrize("content", ["not json", "[]", '{"remotes": []}'])
+def test_unreadable_sync_state_stays_on_old_host(tmp_path, content):
+    (tmp_path / "sync_state.json").write_text(content)
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+
+
+@pytest.mark.parametrize("explicit", ["https://self-hosted.example", _NEW_API, _OLD_API + "/"])
+def test_explicit_url_is_untouched_by_old_host_state(tmp_path, explicit):
+    (tmp_path / "config.json").write_text(json.dumps({"trags_api_url": explicit}))
+    _write_sync_state(tmp_path, _OLD_API)
+    before = (tmp_path / "config.json").read_text()
+    assert load_config(poppy_dir=tmp_path).trags_api_url == explicit
+    assert (tmp_path / "config.json").read_text() == before
+
+
+def test_switching_a_pinned_install_to_the_default_sticks(tmp_path):
+    """Setting the default on a pinned install is written down, or the next
+    load would see no URL plus old-host state and pin it straight back."""
+    _write_sync_state(tmp_path, _OLD_API)
+    cfg = load_config(poppy_dir=tmp_path)
+    assert cfg.trags_api_url == _OLD_API
+
+    cfg.set("trags-api-url", _NEW_API)
+    save_config(cfg)
+
+    assert _saved(tmp_path)["trags_api_url"] == _NEW_API
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _NEW_API
+
+
+def test_default_url_is_not_written_without_old_host_state(tmp_path):
+    cfg = PoppyConfig(poppy_dir=tmp_path)
+    cfg.set("trags-api-url", _NEW_API)
+    save_config(cfg)
+    assert "trags_api_url" not in _saved(tmp_path)
+
+
+@_POSIX_ONLY
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory modes")
+def test_read_only_poppy_dir_still_uses_old_host(tmp_path):
+    _write_sync_state(tmp_path, _OLD_API)
+    tmp_path.chmod(0o500)
+    try:
+        assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    finally:
+        tmp_path.chmod(0o700)
+    assert not (tmp_path / "config.json").exists()
+    # Writable again: the next load records the pin.
+    assert load_config(poppy_dir=tmp_path).trags_api_url == _OLD_API
+    assert _saved(tmp_path) == {"trags_api_url": _OLD_API}
+
+
+def test_sync_status_reports_the_host_in_use(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setenv("POPPY_TRAGS_API_KEY", "usr_test")
+    runner = CliRunner()
+
+    fresh = runner.invoke(cli, ["sync", "status"])
+    assert fresh.exit_code == 0, fresh.output
+    assert f"url:             {_NEW_API}" in fresh.output
+
+    _write_sync_state(tmp_path, _OLD_API)
+    pinned = runner.invoke(cli, ["sync", "status"])
+    assert pinned.exit_code == 0, pinned.output
+    assert f"url:             {_OLD_API}" in pinned.output
+    assert "pushed (total):  3" in pinned.output

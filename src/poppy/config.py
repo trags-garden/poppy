@@ -41,13 +41,23 @@ _AUTO_SYNC_VALUES = {"on", "off"}
 _TELEMETRY_ON = {"on", "true", "1", "yes"}
 _TELEMETRY_OFF = {"off", "false", "0", "no"}
 
+# Where Poppy sends sync traffic unless trags-api-url says otherwise. The API
+# used to live on the site's own host; installs that already synced there stay
+# on it (see _pin_legacy_api_url), because sync bookkeeping is keyed by URL and
+# a new host would look like a server this install has never talked to.
+DEFAULT_TRAGS_API_URL = "https://api.trags.ai"
+LEGACY_TRAGS_API_URL = "https://trags.ai"
+# Owned by poppy.sync.state; read here directly so loading config, which every
+# command and hook does, never imports the sync package.
+_SYNC_STATE_FILENAME = "sync_state.json"
+
 
 @dataclass
 class PoppyConfig:
     poppy_dir: Path = field(default_factory=lambda: Path.home() / ".poppy")
     obsidian_vault: Path | None = None
     trags_api_key: str | None = None
-    trags_api_url: str = "https://trags.ai"
+    trags_api_url: str = DEFAULT_TRAGS_API_URL
     # Stop-hook consolidation. When enabled, the Stop hook tries the host CLI
     # (claude -p / cursor-agent -p / codex exec / gemini -p) first, then falls back to an
     # OpenAI-compatible endpoint configured here.
@@ -458,6 +468,43 @@ def _save_trags_api_key(config: "PoppyConfig", data: dict) -> None:
             data["trags_api_key"] = config.trags_api_key
 
 
+def _synced_with_legacy_api_url(poppy_dir: Path) -> bool:
+    """Whether this install has sync state recorded for the old API host.
+
+    Watermarks and recorded sync errors live in sync_state.json, keyed by URL,
+    and every sync that records which memories a server holds or which
+    deletions it acknowledged also writes that server's entry there, so this
+    one file answers for all of them. A file that exists but cannot be read
+    answers yes: staying on the old host is always safe, while a wrong no would
+    send everything again to a host the local bookkeeping has never seen.
+    """
+    try:
+        data = json.loads((poppy_dir / _SYNC_STATE_FILENAME).read_text())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    remotes = data.get("remotes") if isinstance(data, dict) else ()
+    if remotes is None:
+        return False
+    if not isinstance(remotes, dict):
+        return True
+    # Same normalization as sync's own state keys: no trailing slash.
+    return any(str(url).rstrip("/") == LEGACY_TRAGS_API_URL for url in remotes)
+
+
+def _save_trags_api_url(config: "PoppyConfig", data: dict) -> None:
+    """Persist the URL whenever leaving it out would reload a different one.
+
+    An absent value means the default, except on an install that synced with
+    the old host, where the next load would pin it back there. So a user who
+    switches such an install to the default has that choice written down.
+    """
+    url = config.trags_api_url
+    if url != DEFAULT_TRAGS_API_URL or _synced_with_legacy_api_url(config.poppy_dir):
+        data["trags_api_url"] = url
+
+
 def _load_trags_api_key(config: "PoppyConfig", data: dict) -> None:
     if "trags_api_key" in data:
         config.trags_api_key = data["trags_api_key"]
@@ -477,7 +524,13 @@ _REGISTRY: tuple[ConfigKey, ...] = (
         save=_save_trags_api_key,
         load=_load_trags_api_key,
     ),
-    _key("trags_api_url", settings_name="trags-api-url", default="https://trags.ai", parse=_parse_str),
+    _key(
+        "trags_api_url",
+        settings_name="trags-api-url",
+        default=DEFAULT_TRAGS_API_URL,
+        parse=_parse_str,
+        save=_save_trags_api_url,
+    ),
     _key(
         "consolidate_enabled",
         settings_name="consolidate-enabled",
@@ -871,6 +924,26 @@ def _migrate_trags_key_to_keychain(config: PoppyConfig) -> None:
         pass
 
 
+def _pin_legacy_api_url(config: PoppyConfig, data: dict) -> None:
+    """Keep an install that synced with the old API host on that host, once.
+
+    Sync state (watermarks, recorded errors, which memories and deletions the
+    server has seen) is keyed by URL. An install that never set trags-api-url
+    and already synced under the old default would otherwise meet the new
+    default as a brand-new server and send everything again. Writing the old
+    host into config.json makes the choice explicit, so this runs once and an
+    explicit trags-api-url, old or new, is never touched. Never raises: if the
+    write fails, this process still uses the old host and the next load retries.
+    """
+    if "trags_api_url" in data or not _synced_with_legacy_api_url(config.poppy_dir):
+        return
+    config.trags_api_url = LEGACY_TRAGS_API_URL
+    try:
+        save_config(config)
+    except Exception:
+        pass
+
+
 def save_config(config: PoppyConfig) -> None:
     ensure_poppy_dir(config.poppy_dir)
     data: dict = {}
@@ -905,10 +978,12 @@ def load_config(poppy_dir: Path | None = None) -> PoppyConfig:
     poppy_dir = poppy_dir or Path.home() / ".poppy"
     config = PoppyConfig(poppy_dir=poppy_dir)
     config_path = poppy_dir / CONFIG_FILENAME
+    data: dict = {}
     if config_path.exists():
         data = json.loads(config_path.read_text())
         for entry in _REGISTRY:
             entry.load(config, data)
+    _pin_legacy_api_url(config, data)
     # Transparent one-time upgrade: relocate any plaintext key into the keychain
     # and scrub it from the file. No-op once migrated, or on headless hosts.
     _migrate_trags_key_to_keychain(config)

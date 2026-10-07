@@ -2010,7 +2010,7 @@ def setup_claude_desktop(print_instructions: bool, print_import_prompt: bool):
 @click.option(
     "--api-url",
     default=None,
-    help="Override trags-api-url (defaults to the configured value or https://trags.ai).",
+    help="Override trags-api-url (defaults to the configured value or https://api.trags.ai).",
 )
 def setup_trags(api_url: str | None):
     """One-command device-code onboarding for Trags cloud sync.
@@ -2168,7 +2168,7 @@ def _sync_client():
         click.echo(
             "Trags API key not configured. Set it with:\n"
             "  poppy config set trags-api-key <usr_xxxxx>\n"
-            "  poppy config set trags-api-url <https://your-trags-host>   # optional, defaults to https://trags.ai",
+            "  poppy config set trags-api-url <https://your-trags-host>   # optional, defaults to https://api.trags.ai",
             err=True,
         )
         raise click.Abort()
