@@ -45,6 +45,12 @@ LEGACY_LOCK_TTL_S = 300
 
 _OPEN_FLAGS = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
 
+# A capture worker that stops early holds the lock only briefly, so a contended
+# lock is retried for this long (seconds, in steps) before the caller skips.
+# That keeps the SessionEnd backstop from skipping behind such a worker.
+CONTENDED_RETRY_S = 0.1
+_CONTENDED_STEPS = 4
+
 
 def _safe(session_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", session_id) or "session"
@@ -96,6 +102,8 @@ def is_held(path: Path) -> bool:
     that is not; the answer is informational only.
     """
     if fcntl is None:
+        # Windows: ``os.kill(pid, 0)`` sends a console control event there
+        # instead of probing, so the pid check below must not run.
         return False
     try:
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -123,8 +131,8 @@ def single_flight(poppy_dir: Path, session_id: str) -> Iterator[bool]:
     """Hold the per-session capture lock for the duration of the block.
 
     Yields ``True`` if the lock was acquired (caller should do the capture) or
-    ``False`` if another worker holds it (caller should skip). Always releases
-    a lock it acquired, even on error.
+    ``False`` if another worker still holds it after ``CONTENDED_RETRY_S``
+    (caller should skip). Always releases a lock it acquired, even on error.
     Where locking is unavailable (Windows, or a filesystem that refuses locks)
     it acquires without exclusion rather than skipping every capture.
     """
@@ -142,6 +150,11 @@ def single_flight(poppy_dir: Path, session_id: str) -> Iterator[bool]:
         return
     try:
         acquired = _try_lock(fd)
+        for _ in range(_CONTENDED_STEPS):
+            if acquired is not False:
+                break
+            time.sleep(CONTENDED_RETRY_S / _CONTENDED_STEPS)
+            acquired = _try_lock(fd)
         if acquired is None:
             sys.stderr.write("poppy capture: file locking unavailable here; capturing without the session lock\n")
         if acquired:
