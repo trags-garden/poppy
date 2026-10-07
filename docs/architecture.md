@@ -59,8 +59,9 @@ given `consolidation.py:consolidate_capture_event` →
 `capture/window.py:read_window` → `consolidation.py:_orchestrator` →
 `capture/orchestrator.py:CaptureOrchestrator.run` →
 `consolidation.py:call_llm` → `capture/reconciler.py:reconcile_and_ingest` →
-`engine.ingest` → `capture/watermark.py:set_watermark` (only after the ingest
-succeeds) → back in `run_capture_worker`, `sync/auto.py:trigger`. The
+`engine.ingest` → `capture/watermark.py:set_watermark` (only after a
+successful extract and reconcile) → back in `run_capture_worker`,
+`sync/auto.py:trigger` if anything was stored. The
 end-of-session and post-compaction backstops follow the same shape through
 `_session_end_worker` and `_post_compact_worker`. Note that the flow starts in
 `cli/`, passes through `consolidation.py`, and only its middle lives in
@@ -126,8 +127,13 @@ Everything below lives in the data directory. Writers are named by module.
 | `logs/daemon.log` | Daemon output when started by a service or `daemon start` | `mcp_server/lifecycle.py` |
 
 Outside the data directory: downloaded models are cached under
-`~/.cache/fastembed` (`engine/_model_cache.py:fastembed_cache_dir`), keys go to
-the OS keychain (`keychain.py`), and `setup/` edits each client's own config
+`POPPY_FASTEMBED_CACHE` if set, else `$XDG_CACHE_HOME/fastembed`, else
+`~/.cache/fastembed` (`engine/_model_cache.py:fastembed_cache_dir`). The
+encryption key lives only in the OS keychain (`keychain.py`). The Trags key goes
+to the keychain too, but falls back to `config.json` when the keychain write
+cannot be read back (`config.py:_save_trags_api_key`), and
+`consolidate-api-key` is always stored in `config.json`, so treat that file as
+secret. `setup/` edits each client's own config
 files.
 
 ## Import direction
@@ -169,8 +175,8 @@ reason.
 
 ## Locks and what they guarantee
 
-Locks here are advisory `flock` locks unless stated, and become no-ops where
-`fcntl` is missing (Windows).
+Locks here are advisory `flock` locks unless stated. Poppy supports macOS and
+Linux, where `flock` is always available.
 
 | Lock | File | Protects | If it can't be taken |
 |---|---|---|---|
@@ -178,7 +184,7 @@ Locks here are advisory `flock` locks unless stated, and become no-ops where
 | Encryption gate (`db.py:acquire_shared_gate`, `db.py:exclusive_gate`) | `db.gate` | Every connection holds it shared; `poppy encrypt` takes it exclusive, so a migration never runs under an open connection. | A new connection waits about 10 s, then raises `EncryptionError`. A migration waits about 5 s, then refuses and names the live writers. |
 | Write gate (`db.py:write_gate`) | `write.gate` | Orders multi-step read-decide-write sequences across processes: forget, restore, edit, supersede, each pulled row, and store upgrades at open. | Gives up after about 10 s and runs the sequence anyway; callers' own checks still apply. |
 | Writer registry (`writers.py:registered`) | `writers/<surface>.<pid>.lock` | Lets an encryption migration see which long-running processes are live (MCP server, daemon, dashboard, sync and capture workers). The kernel drops the lock when a process dies. | Registration failure is ignored; the process still runs. `writers.py:live_writers` removes files whose owner is gone. |
-| Background sync lock (`sync/auto.py:run_worker`) | `sync.lock` | At most one auto-sync worker at a time. A manual `poppy sync` does not take it. | The new worker exits; the running one sees `sync.pending`. After releasing, a worker checks `sync.pending` once more and drains it, so a write that lands as it finishes is not stranded. |
+| Background sync lock (`sync/auto.py:run_worker`) | `sync.lock` | At most one auto-sync worker at a time. A manual `poppy sync` does not take it. | The new worker exits; the running one sees `sync.pending`. When a worker stops because nothing was pending, it checks `sync.pending` once more after releasing the lock and drains it, so a write that lands as it finishes is not stranded. After an auth stop, a quota stop, an exhausted round budget or a re-armed failure, `sync.pending` waits for the next trigger. |
 | Sync state lock (`sync/state.py:state_lock`) | `sync_state.json.lock` | Read-modify-write of `sync_state.json` by any sync process, manual or background. | Blocks until free. If `flock` itself errors, the update runs unlocked. |
 | Capture state lock (`capture/_state.py:update`) | `capture_state.json.lock` | Read-modify-write of watermarks and turn counters from concurrent hook processes. | Blocks until free. |
 | Telemetry lock (`telemetry.py:_analytics_file_lock`) | `analytics.json.lock` | Updates to `analytics.json`. | Blocks until free. |
@@ -204,7 +210,7 @@ Locks here are advisory `flock` locks unless stated, and become no-ops where
   `tombstones.py:TombstoneStore`.
 - **Watermark.** A "processed up to here" marker. Capture keeps one per session
   (the last turn captured, in `capture_state.json`), advanced only after a
-  successful write. Sync keeps one pull and one push timestamp per server (in
+  successful extract and reconcile (an empty extract leaves it in place). Sync keeps one pull and one push timestamp per server (in
   `sync_state.json`).
 - **Daemon.** One long-running Poppy process that serves MCP over HTTP to all
   clients and holds the retrieval models, so other processes can borrow them
