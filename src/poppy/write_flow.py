@@ -29,7 +29,7 @@ from poppy.sources import KNOWN_SOURCES
 if TYPE_CHECKING:
     from poppy.capture.reconciler import Conflict
     from poppy.config import PoppyConfig
-    from poppy.ui.tombstones import Tombstone, TombstoneStore
+    from poppy.tombstones import Tombstone, TombstoneStore
 
 
 def make_memory_id() -> str:
@@ -215,7 +215,7 @@ def forget(
     ``tombstones`` lets a caller reuse an already-open store.
     """
     from poppy.db import write_gate
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     reader = reader if reader is not None else engine
     store = tombstones if tombstones is not None else TombstoneStore(poppy_dir / "memories.db")
@@ -254,8 +254,9 @@ class RestoreResult:
     ``found`` is whether a tombstone existed at all (a 404 for the UI when not).
     ``memory`` is the live row afterwards — freshly restored, or the pre-existing
     one when the id was already live. ``expired`` marks the one case with no live
-    row: the memory's own TTL ran out while it sat in the tombstone table, so the
-    tombstone is cleared and nothing is re-ingested. ``raced`` means another
+    row: the memory's own TTL ran out while it sat in the tombstone table, so
+    nothing is re-ingested and the tombstone stays to age out of the 7-day
+    window on its own. ``raced`` means another
     writer resolved this tombstone while the row was being written: the restore
     still stands, but a tombstone left by that writer may sit beside it until the
     next sync or delete resolves the pair.
@@ -302,7 +303,7 @@ def restore(
     Returns a :class:`RestoreResult`; ``found=False`` when no tombstone exists.
     """
     from poppy.db import write_gate
-    from poppy.ui.tombstones import TombstoneStore
+    from poppy.tombstones import TombstoneStore
 
     store = tombstones if tombstones is not None else TombstoneStore(poppy_dir / "memories.db")
 
