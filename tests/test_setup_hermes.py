@@ -7,6 +7,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import threading
 import types
 from importlib import resources
 from pathlib import Path
@@ -329,7 +330,7 @@ def test_plugin_recall_tool_runs_poppy_recall(plugin) -> None:
     module, calls = plugin
     provider = module.PoppyMemoryProvider()
     provider.handle_tool_call("poppy_recall", {"query": "auth flow", "project": "web", "limit": 3})
-    assert calls == [["recall", "auth flow", "--json", "--project", "web", "--limit", "3"]]
+    assert calls == [["recall", "--json", "--project", "web", "--limit", "3", "--", "auth flow"]]
 
 
 def test_plugin_remember_tool_runs_poppy_remember(plugin) -> None:
@@ -338,7 +339,7 @@ def test_plugin_remember_tool_runs_poppy_remember(plugin) -> None:
     result = provider.handle_tool_call(
         "poppy_remember", {"content": "use uv", "memory_type": "decision", "project": "web"}
     )
-    assert calls == [["remember", "use uv", "--type", "decision", "--project", "web"]]
+    assert calls == [["remember", "--type", "decision", "--project", "web", "--", "use uv"]]
     assert json.loads(result) == {"result": "ok"}
 
 
@@ -346,7 +347,50 @@ def test_plugin_forget_tool_runs_poppy_forget(plugin) -> None:
     module, calls = plugin
     provider = module.PoppyMemoryProvider()
     provider.handle_tool_call("poppy_forget", {"memory_id": "abc123"})
-    assert calls == [["forget", "abc123", "--yes"]]
+    assert calls == [["forget", "--yes", "--", "abc123"]]
+
+
+def test_plugin_passes_dash_prefixed_recall_query_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    query = "- use uv for installs"
+
+    provider.handle_tool_call("poppy_recall", {"query": query})
+
+    assert calls == [["recall", "--json", "--limit", "10", "--", query]]
+
+
+def test_plugin_passes_dash_prefixed_memory_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    content = "- use uv for installs"
+
+    provider.handle_tool_call("poppy_remember", {"content": content})
+
+    assert calls == [["remember", "--type", "fact", "--", content]]
+
+
+def test_plugin_prefetch_passes_dash_prefixed_query_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    query = "- use uv for installs"
+
+    provider.prefetch(query)
+
+    assert calls == [["recall", "--limit", "5", "--", query]]
+
+
+def test_plugin_mirrored_write_passes_dash_prefixed_content_after_separator(plugin) -> None:
+    module, calls = plugin
+    provider = module.PoppyMemoryProvider()
+    content = "- use uv for installs"
+
+    provider.on_memory_write("add", "memory", content)
+    for thread in threading.enumerate():
+        if thread.name == "poppy-memwrite":
+            thread.join(timeout=5)
+
+    assert calls == [["remember", "--type", "fact", "--", content]]
 
 
 def test_plugin_unknown_tool_returns_error_without_running_poppy(plugin) -> None:
