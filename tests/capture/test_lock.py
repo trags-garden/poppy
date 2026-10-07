@@ -9,10 +9,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
+import poppy.capture.lock as lock_module
 from poppy.capture.lock import (
-    CONTENDED_RETRY_S,
     LEGACY_LOCK_TTL_S,
     _legacy_lock_path,
     _lock_path,
@@ -131,36 +130,20 @@ def test_crashed_holder_releases_the_lock(tmp_path: Path) -> None:
         assert acquired is True
 
 
-def _probe(tmp_path: Path, monkeypatch, *, release_after: int | None) -> tuple[list[float], int]:
-    """Hold the lock the way ``is_held`` probes it, dropping it on a given retry."""
-    tmp_path.mkdir(exist_ok=True)
-    fd = os.open(str(_lock_path(tmp_path, "s1")), os.O_CREAT | os.O_RDWR, 0o600)
+def test_a_contended_lock_skips_without_retry(tmp_path: Path, monkeypatch) -> None:
+    path = _lock_path(tmp_path, "s1")
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    slept: list[float] = []
 
-    def sleep(seconds: float) -> None:
-        slept.append(seconds)
-        if len(slept) == release_after:
-            fcntl.flock(fd, fcntl.LOCK_UN)  # the probe finishes
+    def fail_if_retried(*args) -> None:
+        raise AssertionError(f"contended lock unexpectedly retried after {args}")
 
-    monkeypatch.setattr("poppy.capture.lock.time", SimpleNamespace(time=time.time, sleep=sleep))
-    return slept, fd
-
-
-def test_a_doctor_probe_does_not_make_a_capture_skip(tmp_path: Path, monkeypatch) -> None:
-    slept, fd = _probe(tmp_path, monkeypatch, release_after=1)
-    with single_flight(tmp_path, "s1") as acquired:
-        assert acquired is True
-    os.close(fd)
-    assert len(slept) == 1
-
-
-def test_a_lock_held_past_the_retry_window_still_skips(tmp_path: Path, monkeypatch) -> None:
-    slept, fd = _probe(tmp_path, monkeypatch, release_after=None)
-    with single_flight(tmp_path, "s1") as acquired:
-        assert acquired is False
-    os.close(fd)
-    assert slept and sum(slept) <= CONTENDED_RETRY_S + 1e-9
+    try:
+        monkeypatch.setattr(lock_module.time, "sleep", fail_if_retried)
+        with single_flight(tmp_path, "s1") as acquired:
+            assert acquired is False
+    finally:
+        os.close(fd)
 
 
 def test_a_doctor_check_never_touches_the_capture_lock(tmp_path: Path, monkeypatch) -> None:
@@ -189,3 +172,23 @@ def test_a_dead_holders_pid_is_not_a_capture_in_flight(tmp_path: Path) -> None:
     assert not is_held(_lock_path(tmp_path, "s1"))
     with single_flight(tmp_path, "s1") as acquired:
         assert acquired is True
+
+
+def test_windows_doctor_check_never_probes_a_pid(tmp_path: Path, monkeypatch) -> None:
+    path = _lock_path(tmp_path, "s1")
+    path.write_text(f"{os.getpid()}\n")
+
+    def fail_if_called(*args) -> None:
+        raise AssertionError(f"os.kill unexpectedly called with {args}")
+
+    monkeypatch.setattr(lock_module, "fcntl", None)
+    monkeypatch.setattr(lock_module.os, "kill", fail_if_called)
+
+    assert not is_held(path)
+
+
+def test_a_huge_pid_is_not_a_capture_in_flight(tmp_path: Path) -> None:
+    path = _lock_path(tmp_path, "s1")
+    path.write_text(f"{10**30}\n")
+
+    assert not is_held(path)
