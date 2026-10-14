@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Setup no longer changes another file's permissions when a backup is replaced by a symlink while setup runs.
+
 ### Changed
 
 - Sync and `poppy setup trags` now default to `https://api.trags.ai` instead of

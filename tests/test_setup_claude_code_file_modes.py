@@ -286,14 +286,15 @@ def test_untightenable_backup_is_reported_without_failing_setup(tmp_path, monkey
     stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
     stale.write_text(_token_config("stale-token"))
     stale.chmod(0o644)
-    original_chmod = Path.chmod
+    inode = stale.stat().st_ino
+    original_fchmod = os.fchmod
 
-    def refuse_chmod(self, mode, **kwargs):
-        if self == stale:
+    def refuse_fchmod(fd, mode):
+        if os.fstat(fd).st_ino == inode:
             raise PermissionError(1, "Operation not permitted")
-        return original_chmod(self, mode, **kwargs)
+        return original_fchmod(fd, mode)
 
-    monkeypatch.setattr(Path, "chmod", refuse_chmod)
+    monkeypatch.setattr(claude_code_module.os, "fchmod", refuse_fchmod)
 
     written = claude_code_module.install_mcp_config(
         tmp_path / "claude", "cursor", daemon=True, daemon_token="new-token"
@@ -781,7 +782,8 @@ def test_in_place_token_write_says_what_cannot_be_taken_back(tmp_path, monkeypat
     assert f"Tightened permissions on {target} to owner-only (0600)" in err
     assert "already had it open can still read the token" in err
 
-    # Already private with no ACL: nothing to report, nothing to caveat.
+    # No mode change or reported ACL removal: nothing to report or caveat.
+    monkeypatch.setattr(claude_code_module, "_clear_acl", lambda fd: False)
     claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
     assert capsys.readouterr().err == ""
 
@@ -803,7 +805,102 @@ def test_in_place_acl_removal_on_a_private_file_is_reported(tmp_path, monkeypatc
     assert "Tightened permissions" not in err
 
 
+def test_private_backup_with_unknown_acl_is_not_skipped(tmp_path, monkeypatch):
+    path = tmp_path / "mcp.json"
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.write_text(_token_config("stale-token"))
+    stale.chmod(0o600)
+    cleared = []
+    monkeypatch.setattr(claude_code_module, "_has_acl", lambda target: None)
+
+    def clear_acl(fd):
+        cleared.append(os.fstat(fd).st_ino)
+        return False
+
+    monkeypatch.setattr(claude_code_module, "_clear_acl", clear_acl)
+
+    claude_code_module._tighten_existing_backups(path)
+
+    assert cleared == [stale.stat().st_ino]
+
+
+@pytest.mark.parametrize("acl_seen", [False, None, True], ids=["no-acl", "unknown", "acl"])
+def test_successful_acl_removal_is_reported(tmp_path, monkeypatch, acl_seen):
+    path = tmp_path / "config.json"
+    path.write_text("{}")
+    calls = []
+    monkeypatch.setattr(claude_code_module.sys, "platform", "darwin")
+    monkeypatch.setattr(claude_code_module, "_has_acl", lambda target: acl_seen)
+
+    def chmod(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(claude_code_module.subprocess, "run", chmod)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        assert claude_code_module._clear_acl(fd) is True
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args == [claude_code_module._MACOS_CHMOD, "-N", f"/dev/fd/{fd}"]
+        assert kwargs["pass_fds"] == (fd,)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("backup", [False, True], ids=["in-place-config", "older-backup"])
+def test_unknown_acl_removal_keeps_the_prior_read_warning(tmp_path, monkeypatch, capsys, backup):
+    path = tmp_path / "mcp.json"
+    target = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX) if backup else path
+    target.write_text(_token_config("old-token"))
+    target.chmod(0o600)
+    monkeypatch.setattr(claude_code_module.sys, "platform", "darwin")
+    monkeypatch.setattr(claude_code_module, "_has_acl", lambda target: None)
+    monkeypatch.setattr(
+        claude_code_module.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+
+    if backup:
+        claude_code_module._tighten_existing_backups(path)
+    else:
+        claude_code_module._write_in_place(path, _token_config("new-token"), target=target, contains_token=True)
+
+    err = capsys.readouterr().err
+    assert f"Removed an access control list from {target}" in err
+    warning = "may already have been read" if backup else "already had it open can still read the token"
+    assert warning in err
+    assert "old-token" not in err
+    assert "new-token" not in err
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="requires O_NOFOLLOW")
+@pytest.mark.parametrize("mode", [0o600, 0o644], ids=["private", "world-readable"])
+def test_backup_tightening_refuses_a_symlink_after_the_check(tmp_path, monkeypatch, capsys, mode):
+    path = tmp_path / "mcp.json"
+    victim = tmp_path / "victim.json"
+    victim.write_text(_token_config("test-token"))
+    victim.chmod(mode)
+    stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)
+    stale.symlink_to(victim)
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False if self == stale else original_is_symlink(self))
+    monkeypatch.setattr(claude_code_module, "_has_acl", lambda target: True)
+
+    claude_code_module._tighten_existing_backups(path)
+
+    assert stat.S_IMODE(victim.stat().st_mode) == mode
+    assert victim.read_text() == _token_config("test-token")
+    assert original_is_symlink(stale)
+    err = capsys.readouterr().err
+    assert f"the backup slot {stale} is a symlink. Remove it, then re-run `poppy setup`." in err
+    assert "test-token" not in err
+
+
 def test_tightened_backup_is_not_described_as_private_all_along(tmp_path, monkeypatch, capsys):
+    # Isolate the warning for the old mode from any successful ACL removal.
+    monkeypatch.setattr(claude_code_module, "_clear_acl", lambda fd: False)
     path = _cursor_config_path(tmp_path, monkeypatch)
     path.write_text("{}\n")
     stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)

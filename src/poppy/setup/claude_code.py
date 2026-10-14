@@ -550,7 +550,7 @@ def _clear_acl(fd: int) -> bool:
     ``chmod`` narrows a POSIX ACL's mask, so mode 0600 already shuts out every
     other user.
 
-    Returns whether an ACL was there to remove. This only stops new opens: a
+    Returns whether the removal command ran successfully. This only stops new opens: a
     descriptor another user already holds keeps working.
     """
     if sys.platform != "darwin":
@@ -573,7 +573,7 @@ def _clear_acl(fd: int) -> bool:
             return False
         detail = result.stderr.strip() or f"exit status {result.returncode}"
         raise OSError(f"could not remove its access control list: {detail}")
-    return bool(present)
+    return True
 
 
 def _was_readable_by_others(mode: int, *, had_acl: bool) -> bool:
@@ -862,15 +862,24 @@ def _tighten_existing_backups(path: Path) -> None:
             # On macOS a 0600 slot can still carry an ACL, which is checked
             # without reading the file.
             mode = stat.S_IMODE(slot.stat().st_mode)
-            if mode == 0o600 and not _has_acl(slot):
+            if mode == 0o600 and _has_acl(slot) is False:
                 continue
             content = slot.read_text(errors="replace")
             if not _contains_daemon_token(content):
                 continue
-            if mode != 0o600:
-                slot.chmod(0o600)
-            fd = os.open(slot, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             try:
+                fd = os.open(slot, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            except OSError as exc:
+                if exc.errno != errno.ELOOP:
+                    raise
+                click.echo(
+                    f"Refusing to back up {path}: the backup slot {slot} is a symlink. Remove it, then re-run `poppy setup`.",
+                    err=True,
+                )
+                continue
+            try:
+                if mode != 0o600:
+                    os.fchmod(fd, 0o600)
                 removed_acl = _clear_acl(fd)
             finally:
                 os.close(fd)
