@@ -156,6 +156,12 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
                 ) from e
 
             def connect(config):
+                # A `config set trags-api-url` that landed mid-pairing would
+                # pair this server's key with another server's URL.
+                if not api_url_override and config.trags_api_url.rstrip("/") != base_url:
+                    raise click.ClickException(
+                        "The Trags server URL changed during pairing. Run `poppy setup trags` again."
+                    )
                 config.set("trags-api-key", api_key)
                 if api_url_override:
                     config.set("trags-api-url", base_url)
