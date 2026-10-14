@@ -66,7 +66,6 @@ _MEMORY_DB_FILENAME = "memories.db"
 @dataclass
 class PoppyConfig:
     poppy_dir: Path = field(default_factory=lambda: Path.home() / ".poppy")
-    obsidian_vault: Path | None = None
     trags_api_key: str | None = None
     trags_api_url: str = DEFAULT_TRAGS_API_URL
     # Stop-hook consolidation. When enabled, the Stop hook tries the host CLI
@@ -289,10 +288,6 @@ def _choice_parser(name: str, values: set[str]) -> Callable[[str, str], str]:
         return v
 
     return parse
-
-
-def _parse_obsidian(value: str, key: str) -> Path:
-    return Path(value)
 
 
 def _parse_str(value: str, key: str) -> str:
@@ -579,9 +574,6 @@ def _load_trags_api_key(config: "PoppyConfig", data: dict) -> None:
 # save_config. SETTINGS_MAP and _SETTABLE are derived views of the settable
 # entries (settings_name is not None).
 _REGISTRY: tuple[ConfigKey, ...] = (
-    _key(
-        "obsidian_vault", settings_name="obsidian-vault", default=None, to_json=str, coerce=Path, parse=_parse_obsidian
-    ),
     _key(
         "trags_api_key",
         settings_name="trags-api-key",

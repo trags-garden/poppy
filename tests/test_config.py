@@ -27,18 +27,19 @@ _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mod
 def test_default_config():
     config = PoppyConfig()
     assert config.poppy_dir == Path.home() / ".poppy"
-    assert config.obsidian_vault is None
     assert config.trags_api_key is None
     assert config.trags_api_url == "https://api.trags.ai"
 
 
-def test_save_and_load_config(tmp_path):
-    config = PoppyConfig(poppy_dir=tmp_path)
-    config.obsidian_vault = Path("/Users/test/cortex")
-    save_config(config)
+def test_load_config_ignores_legacy_obsidian_vault(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"obsidian_vault": "/tmp/vault", "auto_sync": "off"}))
 
     loaded = load_config(poppy_dir=tmp_path)
-    assert loaded.obsidian_vault == Path("/Users/test/cortex")
+    assert loaded == PoppyConfig(poppy_dir=tmp_path, auto_sync="off")
+    assert not hasattr(loaded, "obsidian_vault")
+
+    save_config(loaded)
+    assert "obsidian_vault" not in json.loads((tmp_path / "config.json").read_text())
 
 
 def test_locked_update_preserves_consent_after_a_stale_load(tmp_path):
@@ -227,7 +228,6 @@ def test_partial_redaction_section_loads_the_valid_half(tmp_path):
 
 def test_load_config_missing_file(tmp_path):
     loaded = load_config(poppy_dir=tmp_path)
-    assert loaded.obsidian_vault is None
     assert loaded.trags_api_key is None
 
 
@@ -241,9 +241,6 @@ def test_config_creates_directory(tmp_path):
 
 def test_config_set_get():
     config = PoppyConfig()
-    config.set("obsidian-vault", "/Users/test/cortex")
-    assert config.obsidian_vault == Path("/Users/test/cortex")
-
     config.set("trags-api-key", "sk-test123")
     assert config.trags_api_key == "sk-test123"
 
@@ -385,7 +382,6 @@ def test_relevance_floor_load_clamps_bad_stored_value(tmp_path):
 # trags-api-key is covered by the keychain tests above — its persistence is
 # backend-dependent, so it does not fit this generic set/save/load loop.
 _SETTABLE_SAMPLES = {
-    "obsidian-vault": ("/tmp/poppy-vault-xyz", Path("/tmp/poppy-vault-xyz")),
     "trags-api-url": ("https://example.test", "https://example.test"),
     "consolidate-enabled": ("true", True),
     "consolidate-model": ("gpt-x", "gpt-x"),
