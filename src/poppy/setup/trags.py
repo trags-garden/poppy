@@ -26,7 +26,7 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from poppy.config import load_config, save_config
+from poppy.config import load_config, update_config
 from poppy.runtime import get_poppy_dir
 
 _DEFAULT_POLL_INTERVAL_S = 2.0
@@ -154,10 +154,13 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
                 raise click.ClickException(
                     "Could not decrypt the API key the server returned. Run `poppy setup trags` again."
                 ) from e
-            cfg.set("trags-api-key", api_key)
-            if api_url_override:
-                cfg.set("trags-api-url", base_url)
-            save_config(cfg)
+
+            def connect(config):
+                config.set("trags-api-key", api_key)
+                if api_url_override:
+                    config.set("trags-api-url", base_url)
+
+            update_config(poppy_dir, connect)
             from poppy.config import trags_api_key_location
 
             key_location = trags_api_key_location(poppy_dir)

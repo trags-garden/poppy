@@ -166,6 +166,34 @@ def test_successful_write_invalidates_cached_miss(tmp_path):
 
 
 @requires_keyring
+def test_migration_scrub_preserves_a_concurrent_setting(tmp_path, monkeypatch):
+    import poppy.config as config_module
+    from poppy import telemetry
+
+    (tmp_path / "config.json").write_text(json.dumps({"trags_api_key": KEY, "auto_sync": "off"}))
+    real_store = config_module._store_trags_key_in_keychain
+    other_writer_done = False
+
+    def store_then_answer(config):
+        nonlocal other_writer_done
+        stored = real_store(config)
+        if stored and not other_writer_done:
+            other_writer_done = True
+            telemetry.set_enabled(tmp_path, False)
+        return stored
+
+    monkeypatch.setattr(config_module, "_store_trags_key_in_keychain", store_then_answer)
+    load_config(tmp_path)
+
+    saved = json.loads((tmp_path / "config.json").read_text())
+    assert other_writer_done
+    assert "trags_api_key" not in saved
+    assert saved["telemetry_enabled"] is False
+    assert saved["auto_sync"] == "off"
+    assert resolve_trags_api_key(load_config(tmp_path)) == KEY
+
+
+@requires_keyring
 @pytest.mark.parametrize("already_stored", [False, True])
 def test_migration_invalidates_cached_miss_even_if_scrub_fails(tmp_path, monkeypatch, already_stored):
     import poppy.config as config_module

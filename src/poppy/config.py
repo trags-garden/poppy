@@ -3,9 +3,10 @@ import os
 import stat
 import tempfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import TypeVar
 
 from poppy.paths import ensure_poppy_dir
 
@@ -17,6 +18,7 @@ except ImportError:  # pragma: no cover - non-POSIX (Windows)
 CONFIG_FILENAME = "config.json"
 # Serializes writes to config.json across processes (see _config_lock).
 CONFIG_LOCK_FILENAME = "config.json.lock"
+_T = TypeVar("_T")
 
 # The Trags sync API key is kept in the OS keychain (the same credential store
 # the encryption key uses), not in config.json, whenever a keychain backend is
@@ -976,19 +978,26 @@ def _migrate_trags_key_to_keychain(config: PoppyConfig) -> None:
         return
     if not _store_trags_key_in_keychain(config):
         return
-    # Scrub from the in-memory copy and, via save_config, from the file on disk.
+    # Scrub from the in-memory copy and from the current file on disk.
     # The save rewrites config.json, changing the signature resolve keys on, so
     # the next resolve re-reads the now-populated keychain.
+    migrated_key = config.trags_api_key
     config.trags_api_key = None
+
+    def scrub(current: PoppyConfig) -> None:
+        # A key changed since this load belongs to the newer writer.
+        if current.trags_api_key == migrated_key:
+            current.trags_api_key = None
+
     try:
-        save_config(config)
+        update_config(config.poppy_dir, scrub)
     except Exception:
         # The key is safely in the keychain now; if the scrub write fails the
         # file still holds its (already-plaintext) copy and a later save retries.
         pass
 
 
-def _pin_legacy_api_url(config: PoppyConfig, data: dict) -> None:
+def _pin_legacy_api_url(config: PoppyConfig, data: dict, *, _locked: bool = False) -> None:
     """Keep an install that synced with the old API host on that host, once.
 
     Sync state (watermarks, recorded errors, which memories and deletions the
@@ -1013,6 +1022,9 @@ def _pin_legacy_api_url(config: PoppyConfig, data: dict) -> None:
     config.trags_api_url = LEGACY_TRAGS_API_URL
     if synced is None:
         config._api_url_provisional = True
+        return
+    if _locked:
+        # update_config will persist this choice with the rest of the mutation.
         return
     try:
         config.trags_api_url = _write_api_url_pin(config.poppy_dir)
@@ -1046,13 +1058,13 @@ def _write_api_url_pin(poppy_dir: Path) -> str:
 
 @contextmanager
 def _config_lock(poppy_dir: Path) -> Iterator[None]:
-    """Exclusive lock for writing config.json, held only around the file I/O.
+    """Exclusive lock shared by config writes and read-modify-write updates.
 
     save_config replaces the whole file and the API host pin edits it in place;
     without a shared lock a save could land between the pin's read and its
-    replace and be lost. Callers do keychain and other slow work before taking
-    it. Best effort, like the sync state lock: where flock is unavailable the
-    body still runs.
+    replace and be lost. Updates hold it through the load, mutation and save.
+    Best effort, like the sync state lock: where flock is unavailable the body
+    still runs.
     """
     fd = os.open(
         str(poppy_dir / CONFIG_LOCK_FILENAME), os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), _CONFIG_FILE_MODE
@@ -1069,14 +1081,32 @@ def _config_lock(poppy_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def save_config(config: PoppyConfig) -> None:
+def save_config(config: PoppyConfig, *, _locked: bool = False) -> None:
+    """Replace the whole config; use update_config for changes to existing settings.
+
+    _locked is reserved for update_config, which already holds the write lock.
+    """
     ensure_poppy_dir(config.poppy_dir)
     data: dict = {}
     for entry in _REGISTRY:
         entry.save(config, data)
     payload = json.dumps(data, indent=2)
-    with _config_lock(config.poppy_dir):
+    with nullcontext() if _locked else _config_lock(config.poppy_dir):
         _write_config_payload(config.poppy_dir, payload)
+
+
+def update_config(poppy_dir: Path, mutate: Callable[[PoppyConfig], _T]) -> _T:
+    """Load, mutate and atomically save current settings under the write lock.
+
+    Return the callback's result. Callbacks must only mutate the supplied
+    config, without calling config persistence functions or prompting users.
+    """
+    ensure_poppy_dir(poppy_dir)
+    with _config_lock(poppy_dir):
+        config = load_config(poppy_dir, _locked=True)
+        result = mutate(config)
+        save_config(config, _locked=True)
+        return result
 
 
 def _write_config_payload(poppy_dir: Path, payload: str) -> None:
@@ -1104,7 +1134,7 @@ def _write_config_payload(poppy_dir: Path, payload: str) -> None:
         raise
 
 
-def load_config(poppy_dir: Path | None = None) -> PoppyConfig:
+def load_config(poppy_dir: Path | None = None, *, _locked: bool = False) -> PoppyConfig:
     poppy_dir = poppy_dir or Path.home() / ".poppy"
     config = PoppyConfig(poppy_dir=poppy_dir)
     config_path = poppy_dir / CONFIG_FILENAME
@@ -1113,10 +1143,12 @@ def load_config(poppy_dir: Path | None = None) -> PoppyConfig:
         data = json.loads(config_path.read_text())
         for entry in _REGISTRY:
             entry.load(config, data)
-    _pin_legacy_api_url(config, data)
+    _pin_legacy_api_url(config, data, _locked=_locked)
     # Transparent one-time upgrade: relocate any plaintext key into the keychain
     # and scrub it from the file. No-op once migrated, or on headless hosts.
-    _migrate_trags_key_to_keychain(config)
+    # An update's save already migrates plaintext keys, without nested locking.
+    if not _locked:
+        _migrate_trags_key_to_keychain(config)
     return config
 
 

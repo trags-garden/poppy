@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Downgrading to an older Poppy after syncing with `https://api.trags.ai` by
   default sends sync back to `https://trags.ai`, which it treats as a new server.
 
+### Fixed
+
+- Concurrent settings changes no longer overwrite each other or erase a telemetry consent answer.
+
 ## [0.3.3] - 2026-10-07
 
 ### Changed

@@ -1263,11 +1263,9 @@ def open_without_sentinel(db_path: Path | str, *, check_same_thread: bool = Fals
 
 
 def _set_config_flag(poppy_dir: Path, value: bool) -> None:
-    from poppy.config import load_config, save_config  # noqa: PLC0415
+    from poppy.config import update_config  # noqa: PLC0415
 
-    cfg = load_config(poppy_dir)
-    cfg.encrypted = value
-    save_config(cfg)
+    update_config(poppy_dir, lambda config: setattr(config, "encrypted", value))
 
 
 def _keychain_state(env_key_active: bool, deps: bool) -> str:
