@@ -12,6 +12,7 @@ import errno
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -276,6 +277,59 @@ def test_state_load_ignores_unknown_keys(tmp_path):
     )
     rs = load(tmp_path).remotes["https://trags.test"]
     assert rs.last_pushed_at == "x"
+
+
+def test_spawn_worker_resolves_executable_in_desktop_bundle(tmp_path, monkeypatch):
+    from poppy.mcp_server import lifecycle
+    from poppy.sync import auto
+
+    monkeypatch.setattr(sys, "argv", ["server/main.py"])
+    executable = str(tmp_path / "bin" / "poppy")
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: executable)
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+
+    monkeypatch.setattr(auto.subprocess, "Popen", fake_popen)
+
+    auto._spawn_worker(tmp_path)
+
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == [executable, "sync", "_auto-worker"]
+    assert argv[0] != "server/main.py"
+    assert kwargs["env"]["POPPY_DIR"] == str(tmp_path)
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdout"].closed
+    assert kwargs["stderr"] is kwargs["stdout"]
+
+
+def test_spawn_worker_logs_failed_executable_without_raising(tmp_path, monkeypatch):
+    from poppy.mcp_server import lifecycle
+    from poppy.sync import auto
+
+    monkeypatch.setattr(sys, "argv", ["server/main.py"])
+    executable = str(tmp_path / "bin" / "poppy")
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: executable)
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        raise OSError("Executable unavailable")
+
+    monkeypatch.setattr(auto.subprocess, "Popen", fake_popen)
+
+    assert auto._spawn_worker(tmp_path) is None
+
+    assert len(calls) == 1
+    assert calls[0][0][0] == executable
+    assert calls[0][1]["stdout"].closed
+    lines = (tmp_path / auto.LOG_FILENAME).read_text().splitlines()
+    assert len(lines) == 1
+    assert "sync worker spawn failed" in lines[0]
+    assert executable in lines[0]
+    assert "Executable unavailable" in lines[0]
 
 
 def test_run_worker_stops_on_auth_error(tmp_path, monkeypatch):

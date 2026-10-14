@@ -20,6 +20,8 @@ Design:
       3. Release and close lock.
       4. If the loop ended with no pending work, check once for a new flag;
          re-acquire and drain with the remaining round budget if it is set.
+         Limit handoff passes, and spawn a fresh worker for quota-exempt work
+         still pending after exhausting the round budget.
 
 The trigger MUST NEVER raise — write paths swallow exceptions defensively.
 """
@@ -30,7 +32,6 @@ import fcntl
 import json
 import os
 import subprocess
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,7 @@ LOG_FILENAME = "sync-worker.log"
 # structured LOG_FILENAME stays parseable. Capped at MAX_RAW_LOG_BYTES.
 RAW_LOG_FILENAME = "sync-worker.raw.log"
 MAX_RAW_LOG_BYTES = 1 * 1024 * 1024  # 1 MB rolling truncate
+MAX_HANDOFF_PASSES = 32
 
 # Coalesce bursts of writes. Long enough to absorb a consolidate() that
 # inserts ~10 facts back-to-back, short enough to feel "automatic".
@@ -99,7 +101,9 @@ def _open_raw_log(poppy_dir: Path):
 
 def _spawn_worker(poppy_dir: Path) -> None:
     """Spawn `poppy sync _auto-worker` detached. Best effort."""
-    poppy_bin = sys.argv[0] if sys.argv and sys.argv[0] else "poppy"
+    from poppy.mcp_server.lifecycle import resolve_poppy_executable
+
+    poppy_bin = resolve_poppy_executable()
     raw_fd = _open_raw_log(poppy_dir)
     env = {**os.environ, "POPPY_DIR": str(poppy_dir)}
     try:
@@ -112,8 +116,8 @@ def _spawn_worker(poppy_dir: Path) -> None:
             close_fds=True,
             env=env,
         )
-    except OSError:
-        pass
+    except OSError as exc:
+        _log(poppy_dir, f"sync worker spawn failed: executable={poppy_bin!r}: {exc!r}")
     finally:
         if raw_fd is not subprocess.DEVNULL:
             try:
@@ -276,7 +280,9 @@ def _drain_pending(poppy_dir: Path, *, rounds: int, max_rounds: int) -> tuple[_D
             time.sleep(min(2 ** (rounds - 1), 30))
             # A retry flag removed during backoff must not prompt a handoff.
             stop_reason = "generic_failure_rearmed"
-    return "budget_exhausted", rounds
+    if pending_path.exists():
+        _log(poppy_dir, f"sync stopped: round budget exhausted ({max_rounds}); work still pending")
+    return ("quota_stop" if stop_reason == "quota_stop" else "budget_exhausted"), rounds
 
 
 def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
@@ -287,6 +293,7 @@ def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
     pending_path = poppy_dir / PENDING_FILENAME
     lock_path = poppy_dir / LOCK_FILENAME
     rounds = 0
+    handoff_passes = 0
 
     while True:
         lock_fd = open(lock_path, "w")
@@ -313,6 +320,18 @@ def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
 
         # A write may have arrived after the last absence check while its worker
         # still saw our lock held. Check only after releasing and closing it.
-        # Terminal stops and deliberately re-armed failures wait for a trigger.
-        if stop_reason != "pending_absent" or not pending_path.exists():
+        # Auth stops and deliberately re-armed failures wait for a trigger.
+        # Quota-exempt work still queued at the budget gets a fresh worker.
+        quota_budget_exhausted = stop_reason == "quota_stop" and rounds >= max_rounds
+        if stop_reason != "pending_absent" and not quota_budget_exhausted:
+            return
+        if not pending_path.exists():
+            return
+        if handoff_passes >= MAX_HANDOFF_PASSES:
+            _log(poppy_dir, f"sync stopped: handoff pass limit reached ({MAX_HANDOFF_PASSES})")
+            return
+        handoff_passes += 1
+        _log(poppy_dir, f"sync handoff pass {handoff_passes} started")
+        if quota_budget_exhausted:
+            _spawn_worker(poppy_dir)
             return
