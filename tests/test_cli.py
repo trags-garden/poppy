@@ -263,15 +263,30 @@ def test_remember_supersedes_prints_new_id(tmp_path):
     assert f"  supersedes {old_id} " in result.output
 
 
-def test_remember_with_type(tmp_path):
+@pytest.mark.parametrize("memory_type", ["fact", "decision", "preference", "lesson"])
+def test_remember_with_type(tmp_path, memory_type):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["remember", "chose FastAPI over Flask", "--type", "decision"],
+        ["remember", "chose FastAPI over Flask", "--type", memory_type],
         env={"POPPY_DIR": str(tmp_path)},
     )
-    assert result.exit_code == 0
-    assert "decision" in result.output.lower()
+    assert result.exit_code == 0, result.output
+    assert memory_type in result.output.lower()
+    listed = runner.invoke(cli, ["list", "--json"], env={"POPPY_DIR": str(tmp_path)})
+    assert json.loads(listed.output)[0]["type"] == memory_type
+
+
+def test_remember_rejects_summary_before_engine(tmp_path, monkeypatch):
+    def unexpected_engine():
+        pytest.fail("invalid --type must be rejected before constructing the engine")
+
+    monkeypatch.setattr("poppy.cli.main._get_engine", unexpected_engine)
+    result = CliRunner().invoke(
+        cli, ["remember", "session summary", "--type", "summary"], env={"POPPY_DIR": str(tmp_path)}
+    )
+    assert result.exit_code == 2
+    assert "Invalid value for '--type'" in result.output
 
 
 def test_remember_check_with_supersedes_is_dry_run(tmp_path):

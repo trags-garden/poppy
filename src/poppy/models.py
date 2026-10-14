@@ -8,7 +8,8 @@ from datetime import datetime
 # a novel type string onto surfaces that render or key off it. Note: cloud sync
 # pull deliberately does NOT normalize — freeform types are by design on the
 # Trags side; the UI's render-time escaping is the XSS guard there.
-MEMORY_TYPES: frozenset[str] = frozenset({"fact", "decision", "preference", "lesson", "summary", "context"})
+WRITABLE_MEMORY_TYPES: tuple[str, ...] = ("fact", "decision", "preference", "lesson")
+MEMORY_TYPES: frozenset[str] = frozenset((*WRITABLE_MEMORY_TYPES, "summary", "context"))
 DEFAULT_MEMORY_TYPE = "fact"
 
 

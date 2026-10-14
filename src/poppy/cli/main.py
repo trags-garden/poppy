@@ -9,7 +9,7 @@ import click
 from poppy import __version__, telemetry, update_check
 from poppy.config import PoppyConfig, config_key, load_config, parse_setting, save_config
 from poppy.engine.interface import RetrievalEngine
-from poppy.models import Filters
+from poppy.models import WRITABLE_MEMORY_TYPES, Filters
 from poppy.runtime import get_engine as _runtime_get_engine
 from poppy.runtime import get_poppy_dir as _runtime_get_poppy_dir
 
@@ -179,7 +179,7 @@ def _update_notice_epilogue(ctx: click.Context, result):
 
 @cli.command()
 @click.argument("content")
-@click.option("--type", "memory_type", default="fact", type=click.Choice(["fact", "decision", "preference", "lesson"]))
+@click.option("--type", "memory_type", default="fact", type=click.Choice(WRITABLE_MEMORY_TYPES))
 @click.option("--project", default=None, help="Project name (auto-detected from cwd if not set)")
 @click.option("--ttl", default=None, help="Expire after duration (e.g. 30d, 12h, 1w3d)")
 @click.option("--expires-at", default=None, help="Expire at ISO-8601 datetime (mutually exclusive with --ttl)")
@@ -459,7 +459,7 @@ def restore(memory_id: str):
     "--type",
     "memory_type",
     default=None,
-    type=click.Choice(["fact", "decision", "preference", "lesson"]),
+    type=click.Choice(WRITABLE_MEMORY_TYPES),
 )
 @click.option("--project", default=None, help="Set project (use --no-project to clear)")
 @click.option("--no-project", is_flag=True, help="Clear project")
