@@ -388,9 +388,15 @@ the memories that changed since the last push, and an upload that fails is
 tried again on the next push. When two devices edit the same memory, the newer
 edit wins.
 
+On a converged store, `poppy sync` may still report `pull: 1 live` on every
+run because the pull watermark is inclusive and serves the newest row again.
+Push going quiet, not pull going quiet, shows that a store has converged.
+
 Forgetting a memory is a soft delete: Trash keeps the record for at least
 7 days and `poppy restore` brings it back, unless the memory's own expiry has
-passed. A deletion goes to Trags only when
+passed. When sync is configured, an expired deletion stays in Trash until the
+current sync server has confirmed the deletion, so it can remain there past 7
+days until the next sync. A deletion goes to Trags only when
 Trags is known to hold that memory, because this machine uploaded it or a pull
 saw it there, so a memory that never left your machine does not reach the
 server just because you deleted it. A deletion carries the whole memory, which
@@ -448,7 +454,7 @@ Poppy can emit is in this table; there are no others.
 | Event | When | Properties |
 |---|---|---|
 | `cli_install` | once, before the first event from a machine | `version` (Poppy version), `python_version`, `platform` (`darwin`, `linux`, `win32`) |
-| `memory_write` | each memory stored by `poppy remember` or the MCP `remember` and `consolidate` tools; automatic capture, imports, and memories edited or superseded in `poppy ui` do not send it | `memory_type` (`fact`, `decision`, `preference`, `lesson`, `summary`, `context`), `has_project` (true/false, never the project name), `source` (`manual` for `poppy remember`, `agent` for an MCP client that does not name itself, a known client such as `claude-code` or `cursor`, or `other` for any client Poppy does not know; `ui`, `claude-memory` and `hermes-memory` appear only when the MCP server's `--source` setting or the connecting client's own name is one of them) |
+| `memory_write` | each memory stored by `poppy remember` or the MCP `remember` and `consolidate` tools; automatic capture, imports, and memories edited or superseded in `poppy ui` do not send it | `memory_type` (`fact`, `decision`, `preference`, `lesson`, `summary`, `context`), `has_project` (true/false, never the project name), `source` (`manual` for `poppy remember`, `agent` for an MCP client that does not name itself, a known client such as `claude-code` or `cursor`, or `other` for any client Poppy does not know; client names are slugified before comparison, so `Claude Memory` becomes `claude-memory`; `ui`, `claude-memory` and `hermes-memory` appear only when the MCP server's `--source` setting or the connecting client's own name is one of them; set `POPPY_MCP_SOURCE` to set the MCP server's source) |
 | `recall_call` | `poppy recall` | `query_length` (character count, never the query text), `result_count`, `engine` (engine name) |
 | `agent_setup` | every `poppy setup <client>` | `agent` (client name, for example `claude-code`) |
 | `setup_completed` | once per machine, on the first `poppy setup <client>` | `agent` (client name) |

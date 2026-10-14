@@ -105,7 +105,7 @@ Everything below lives in the data directory. Writers are named by module.
 
 | File | What it is | Written by |
 |---|---|---|
-| `memories.db` (+ `-wal`, `-shm`) | Memories, full-text index, embeddings, Trash (`ui_tombstones` table) and sync provenance (`sync_remote_memories` table) | the engines (`engine/seed.py`, `engine/_hybrid.py`), `tombstones.py`, opened through `db.py:connect` |
+| `memories.db` (+ `-wal`, `-shm`) | Memories, full-text index, embeddings, Trash (`ui_tombstones` table), sync provenance (`sync_remote_memories` table), and content-free deletion-suppression records (`sync_suppressed_deletions` table) that stop a pull re-ingesting a deletion purged from Trash before its server acknowledged it | the engines (`engine/seed.py`, `engine/_hybrid.py`), `tombstones.py`, opened through `db.py:connect` |
 | `.poppy-encrypted` | Marker that the store is encrypted | `encryption.py` |
 | `memories.db.enc-tmp`, `memories.db.plain-tmp`, `*.stray-*` | Short-lived files during an encryption migration, and sidecars set aside by `poppy encrypt repair` | `encryption.py`, `db.py:quarantine_sidecars` |
 | `db.gate`, `write.gate` | Lock files, see below | `db.py` |
