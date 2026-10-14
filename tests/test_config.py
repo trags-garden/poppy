@@ -2,6 +2,10 @@ import json
 import os
 import stat
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -14,6 +18,7 @@ from poppy.config import (
     load_config,
     resolve_trags_api_key,
     save_config,
+    update_config,
 )
 
 _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes only")
@@ -22,18 +27,121 @@ _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mod
 def test_default_config():
     config = PoppyConfig()
     assert config.poppy_dir == Path.home() / ".poppy"
-    assert config.obsidian_vault is None
     assert config.trags_api_key is None
     assert config.trags_api_url == "https://api.trags.ai"
 
 
-def test_save_and_load_config(tmp_path):
-    config = PoppyConfig(poppy_dir=tmp_path)
-    config.obsidian_vault = Path("/Users/test/cortex")
-    save_config(config)
+def test_load_config_ignores_legacy_obsidian_vault(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"obsidian_vault": "/tmp/vault", "auto_sync": "off"}))
 
     loaded = load_config(poppy_dir=tmp_path)
-    assert loaded.obsidian_vault == Path("/Users/test/cortex")
+    assert loaded == PoppyConfig(poppy_dir=tmp_path, auto_sync="off")
+    assert not hasattr(loaded, "obsidian_vault")
+
+    save_config(loaded)
+    assert "obsidian_vault" not in json.loads((tmp_path / "config.json").read_text())
+
+
+def test_locked_update_preserves_consent_after_a_stale_load(tmp_path):
+    from poppy import telemetry
+
+    # Process A loads before process B records the consent answer.
+    stale = load_config(tmp_path)
+    telemetry.set_enabled(tmp_path, False)
+    assert load_config(tmp_path).telemetry_enabled is False
+    stale.session_start_min_score = 0.5
+    # The old load-mutate-save sequence loses B's answer, even with a save lock.
+    save_config(stale)
+    assert load_config(tmp_path).telemetry_enabled is None
+    assert load_config(tmp_path).session_start_min_score == 0.5
+
+    # Both writers now update only their key on the current, locked snapshot.
+    stale = load_config(tmp_path)
+    assert stale.telemetry_enabled is None
+    telemetry.set_enabled(tmp_path, False)
+    update_config(tmp_path, lambda config: setattr(config, "session_start_min_score", 0.25))
+    current = load_config(tmp_path)
+    assert current.telemetry_enabled is False
+    assert current.session_start_min_score == 0.25
+
+
+@pytest.mark.parametrize("writer", ["telemetry", "config-set"])
+def test_setting_writers_reload_after_waiting_for_the_lock(tmp_path, monkeypatch, writer):
+    import poppy.config as config_module
+    from poppy import telemetry
+
+    real_lock = config_module._config_lock
+    other_writer_done = False
+
+    @contextmanager
+    def lock_after_other_writer(poppy_dir):
+        nonlocal other_writer_done
+        if not other_writer_done:
+            other_writer_done = True
+            # Another process finishes its change just before we get the lock.
+            update_config(poppy_dir, lambda config: setattr(config, "update_check", False))
+        with real_lock(poppy_dir):
+            yield
+
+    monkeypatch.setattr(config_module, "_config_lock", lock_after_other_writer)
+    if writer == "telemetry":
+        telemetry.set_enabled(tmp_path, False)
+        assert load_config(tmp_path).telemetry_enabled is False
+    else:
+        from click.testing import CliRunner
+
+        from poppy.cli.main import cli
+
+        result = CliRunner().invoke(cli, ["config", "set", "auto-sync", "off"], env={"POPPY_DIR": str(tmp_path)})
+        assert result.exit_code == 0, result.output
+        assert load_config(tmp_path).auto_sync == "off"
+    assert other_writer_done
+    assert load_config(tmp_path).update_check is False
+
+
+@_POSIX_ONLY
+def test_two_threads_update_different_keys_without_lost_updates(tmp_path):
+    ready = threading.Barrier(2)
+
+    def writer(key):
+        for _ in range(50):
+            ready.wait(timeout=5)
+
+            def increment(config):
+                value = getattr(config, key)
+                # Widen the race window if the load and mutation are unlocked.
+                time.sleep(0.001)
+                setattr(config, key, round(value + 0.01, 2))
+
+            update_config(tmp_path, increment)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(writer, key) for key in ("recall_min_score", "session_start_min_score")]
+        for future in futures:
+            future.result(timeout=10)
+
+    current = load_config(tmp_path)
+    assert current.recall_min_score == 0.5
+    assert current.session_start_min_score == 0.5
+
+
+def test_update_config_pins_legacy_host_without_nested_locking(tmp_path):
+    _write_sync_state(tmp_path, _OLD_API)
+    update_config(tmp_path, lambda config: setattr(config, "auto_sync", "off"))
+    assert _saved(tmp_path) == {"trags_api_url": _OLD_API, "auto_sync": "off"}
+
+
+def test_update_config_does_not_save_a_failed_mutation(tmp_path):
+    def fail(config):
+        config.auto_sync = "off"
+        raise ValueError("invalid change")
+
+    with pytest.raises(ValueError, match="invalid change"):
+        update_config(tmp_path / "new", fail)
+    assert not (tmp_path / "new" / "config.json").exists()
+    # The failed callback releases the lock and the new directory is usable.
+    assert update_config(tmp_path / "new", lambda config: config.set("auto-sync", "off")) == "off"
+    assert load_config(tmp_path / "new").auto_sync == "off"
 
 
 def test_disabled_projects_round_trip(tmp_path):
@@ -120,7 +228,6 @@ def test_partial_redaction_section_loads_the_valid_half(tmp_path):
 
 def test_load_config_missing_file(tmp_path):
     loaded = load_config(poppy_dir=tmp_path)
-    assert loaded.obsidian_vault is None
     assert loaded.trags_api_key is None
 
 
@@ -134,9 +241,6 @@ def test_config_creates_directory(tmp_path):
 
 def test_config_set_get():
     config = PoppyConfig()
-    config.set("obsidian-vault", "/Users/test/cortex")
-    assert config.obsidian_vault == Path("/Users/test/cortex")
-
     config.set("trags-api-key", "sk-test123")
     assert config.trags_api_key == "sk-test123"
 
@@ -278,7 +382,6 @@ def test_relevance_floor_load_clamps_bad_stored_value(tmp_path):
 # trags-api-key is covered by the keychain tests above — its persistence is
 # backend-dependent, so it does not fit this generic set/save/load loop.
 _SETTABLE_SAMPLES = {
-    "obsidian-vault": ("/tmp/poppy-vault-xyz", Path("/tmp/poppy-vault-xyz")),
     "trags-api-url": ("https://example.test", "https://example.test"),
     "consolidate-enabled": ("true", True),
     "consolidate-model": ("gpt-x", "gpt-x"),

@@ -243,3 +243,48 @@ def test_device_flow_host(tmp_path, monkeypatch, old_host_state, override, expec
         setup_trags.run_device_code_flow(override)
 
     assert posted == [f"{expected}/api/cli-setup/start"]
+
+
+def test_device_flow_refuses_key_when_url_changed_mid_pairing(tmp_path, monkeypatch, capsys):
+    """A URL switched by another process during pairing never gets this server's key."""
+    import json
+
+    import click
+    import httpx
+
+    from poppy import keychain
+    from poppy.config import load_config
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(keychain, "available", lambda: False)
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_a, **_k: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_a: None)
+    (tmp_path / "config.json").write_text(json.dumps({"trags_api_url": "https://server-a.example"}))
+
+    key = "usr_issued_by_server_a"
+    device_pubkey = {}
+
+    def fake_post(url, **kwargs):
+        assert url == "https://server-a.example/api/cli-setup/start"
+        device_pubkey["key"] = serialization.load_pem_public_key(kwargs["json"]["device_pubkey"].encode())
+        return httpx.Response(201, json={"code": "WXYZ", "setup_url": "https://server-a.example/cli"})
+
+    def fake_get(url, **_kwargs):
+        # Another process runs `poppy config set trags-api-url` while the browser step is open.
+        (tmp_path / "config.json").write_text(json.dumps({"trags_api_url": "https://server-b.example"}))
+        ciphertext = device_pubkey["key"].encrypt(key.encode(), _OAEP)
+        return httpx.Response(200, json={"api_key_encrypted": base64.b64encode(ciphertext).decode()})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    with pytest.raises(click.ClickException, match="server URL changed during pairing") as excinfo:
+        setup_trags.run_device_code_flow()
+
+    assert excinfo.value.exit_code != 0
+    cfg = load_config(tmp_path)
+    assert cfg.trags_api_url == "https://server-b.example"
+    assert cfg.trags_api_key is None
+    assert key not in (tmp_path / "config.json").read_text()
+    assert "Connected" not in capsys.readouterr().out

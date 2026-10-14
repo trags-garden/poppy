@@ -38,7 +38,13 @@ import httpx
 
 from poppy.capture import health
 from poppy.capture.cadence import soft_cap_reached
-from poppy.capture.lock import single_flight
+from poppy.capture.lock import (
+    CONTENDED_POLL_S,
+    CONTENDED_RETRY_S,
+    SESSION_END_POLL_S,
+    SESSION_END_RETRY_S,
+    single_flight,
+)
 from poppy.capture.orchestrator import CaptureOrchestrator, CapturePlan
 from poppy.capture.policy import is_capture_enabled
 from poppy.capture.transcript import detect_transcript_host
@@ -46,12 +52,12 @@ from poppy.capture.watermark import get_watermark
 from poppy.capture.window import read_window
 from poppy.config import PoppyConfig, load_config, resolved_consolidate_settings
 from poppy.errors import PoppyError
-from poppy.models import Filters
+from poppy.models import WRITABLE_MEMORY_TYPES, Filters
 from poppy.project import project_from_cwd
 from poppy.runtime import get_engine, get_poppy_dir
 from poppy.sources import source_from_capture_host, source_from_host_cli
 
-ALLOWED_TYPES = {"fact", "decision", "preference", "lesson"}
+_WRITABLE_TYPES_PROMPT = ", ".join(json.dumps(memory_type) for memory_type in WRITABLE_MEMORY_TYPES)
 
 # Minimum qualifying turns in a SessionEnd backstop window before a consolidation
 # pass is worthwhile. Preserves the pre-watermark gate; the mid-session loop adds
@@ -63,12 +69,12 @@ MIN_BACKSTOP_TURNS = 4
 # tuned later by the automatic reconciliation tuning pass.
 MIN_CAPTURE_CHARS = 200
 
-CONSOLIDATION_PROMPT = """You are a developer-memory consolidator. The transcript below is one coding-agent session.
+CONSOLIDATION_PROMPT = f"""You are a developer-memory consolidator. The transcript below is one coding-agent session.
 
 Extract durable memories that would help in a future, unrelated session in this project. Each item is one sentence, self-contained, and would still be true in a week.
 
 Output strict JSON: an array of objects with two keys:
-  - "type": one of "fact", "decision", "preference", "lesson"
+  - "type": one of {_WRITABLE_TYPES_PROMPT}
   - "content": one sentence
 
 Skip:
@@ -77,12 +83,12 @@ Skip:
   - Routine status updates ("ran tests", "committed").
 
 If nothing durable: return [].
-Cap: {max_items} items.
+Cap: {{max_items}} items.
 
 Respond with ONLY the JSON array, no prose, no fences.
 
 Transcript:
-{transcript}
+{{transcript}}
 """
 
 
@@ -538,7 +544,7 @@ def parse_json_array(text: str) -> list[dict[str, str]]:
         content = raw_content.strip()
         if not content:
             continue
-        if not isinstance(mtype, str) or mtype not in ALLOWED_TYPES:
+        if not isinstance(mtype, str) or mtype not in WRITABLE_MEMORY_TYPES:
             mtype = "fact"
         out.append({"type": mtype, "content": content})
     return out
@@ -652,9 +658,10 @@ def _orchestrator(cfg: PoppyConfig, poppy_dir: Path, *, engine=None) -> CaptureO
 
 
 def consolidate_stop_event(payload: dict) -> int:
-    """Run consolidation for a Stop hook payload. Returns the number of memories stored.
+    """Flush a SessionEnd transcript tail. Returns the number of memories stored.
 
     No-op (returns 0) if disabled, transcript missing, or session already consolidated.
+    Cursor preCompact also uses this entry point, with the short lock retry.
     """
     cfg = load_config(get_poppy_dir())
     project = project_from_cwd(payload.get("cwd"))
@@ -668,8 +675,15 @@ def consolidate_stop_event(payload: dict) -> int:
 
     poppy_dir = get_poppy_dir()
 
-    with single_flight(poppy_dir, session_id) as acquired:
+    session_end = payload.get("hook_event_name", "SessionEnd") in ("SessionEnd", "sessionEnd")
+    retry_s = SESSION_END_RETRY_S if session_end else CONTENDED_RETRY_S
+    poll_s = SESSION_END_POLL_S if session_end else CONTENDED_POLL_S
+    with single_flight(poppy_dir, session_id, retry_s=retry_s, poll_s=poll_s) as acquired:
         if not acquired:
+            if session_end:
+                sys.stderr.write(
+                    f"poppy capture: SessionEnd could not acquire the session lock within {retry_s:g}s; skipping\n"
+                )
             return 0
 
         # Incremental capture: read only the window (watermark, end].
@@ -763,12 +777,12 @@ def consolidate_capture_event(payload: dict) -> int:
         return _orchestrator(cfg, poppy_dir).run(plan).stored
 
 
-COMPACT_CONSOLIDATION_PROMPT = """You are a developer-memory consolidator. The text below is Claude Code's auto-generated summary of a long coding session that just hit context-compaction.
+COMPACT_CONSOLIDATION_PROMPT = f"""You are a developer-memory consolidator. The text below is Claude Code's auto-generated summary of a long coding session that just hit context-compaction.
 
 Extract durable memories that would help in a future, unrelated session in this project. Each item is one sentence, self-contained, and would still be true in a week.
 
 Output strict JSON: an array of objects with two keys:
-  - "type": one of "fact", "decision", "preference", "lesson"
+  - "type": one of {_WRITABLE_TYPES_PROMPT}
   - "content": one sentence
 
 Skip:
@@ -777,12 +791,12 @@ Skip:
   - Routine status updates ("ran tests", "committed").
 
 If nothing durable: return [].
-Cap: {max_items} items.
+Cap: {{max_items}} items.
 
 Respond with ONLY the JSON array, no prose, no fences.
 
 Compact summary:
-{summary}
+{{summary}}
 """
 
 

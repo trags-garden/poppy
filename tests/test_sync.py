@@ -12,6 +12,7 @@ import errno
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -276,6 +277,59 @@ def test_state_load_ignores_unknown_keys(tmp_path):
     )
     rs = load(tmp_path).remotes["https://trags.test"]
     assert rs.last_pushed_at == "x"
+
+
+def test_spawn_worker_resolves_executable_in_desktop_bundle(tmp_path, monkeypatch):
+    from poppy.mcp_server import lifecycle
+    from poppy.sync import auto
+
+    monkeypatch.setattr(sys, "argv", ["server/main.py"])
+    executable = str(tmp_path / "bin" / "poppy")
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: executable)
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+
+    monkeypatch.setattr(auto.subprocess, "Popen", fake_popen)
+
+    auto._spawn_worker(tmp_path)
+
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == [executable, "sync", "_auto-worker"]
+    assert argv[0] != "server/main.py"
+    assert kwargs["env"]["POPPY_DIR"] == str(tmp_path)
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdout"].closed
+    assert kwargs["stderr"] is kwargs["stdout"]
+
+
+def test_spawn_worker_logs_failed_executable_without_raising(tmp_path, monkeypatch):
+    from poppy.mcp_server import lifecycle
+    from poppy.sync import auto
+
+    monkeypatch.setattr(sys, "argv", ["server/main.py"])
+    executable = str(tmp_path / "bin" / "poppy")
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: executable)
+    calls = []
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        raise OSError("Executable unavailable")
+
+    monkeypatch.setattr(auto.subprocess, "Popen", fake_popen)
+
+    assert auto._spawn_worker(tmp_path) is None
+
+    assert len(calls) == 1
+    assert calls[0][0][0] == executable
+    assert calls[0][1]["stdout"].closed
+    lines = (tmp_path / auto.LOG_FILENAME).read_text().splitlines()
+    assert len(lines) == 1
+    assert "sync worker spawn failed" in lines[0]
+    assert executable in lines[0]
+    assert "Executable unavailable" in lines[0]
 
 
 def test_run_worker_stops_on_auth_error(tmp_path, monkeypatch):
@@ -3847,6 +3901,170 @@ def test_client_wraps_invalid_json_response(operation, status, unknown_outcome):
     assert len(str(exc.value).splitlines()) == 1
 
 
+@pytest.mark.parametrize(
+    "operation, body",
+    [(op, body) for op in ("upsert", "get", "list_since", "replace") for body in (None, [], "row", {"id": 1})]
+    + [(op, body) for op in ("get", "list_since") for body in ({}, {"id": "m1"})],
+)
+def test_client_rejects_wrong_shape_json(operation, body):
+    import httpx
+
+    from poppy.sync.client import TragsResponseError
+
+    status = 201 if operation == "upsert" else 200
+    with _wired_client(lambda request: httpx.Response(status, content=json.dumps(body))) as client:
+        args = {
+            "upsert": ({"id": "m1"},),
+            "get": ("m1",),
+            "list_since": (),
+            "replace": ("m1", {"id": "m1"}),
+        }[operation]
+        with pytest.raises(TragsResponseError) as exc:
+            getattr(client, operation)(*args)
+
+    assert "https://trags.test/api/memories" in str(exc.value)
+    assert f"HTTP {status}" in str(exc.value)
+    assert "expected" in str(exc.value)
+    assert exc.value.status_code == status
+    assert exc.value.outcome_unknown == (operation in {"upsert", "replace"})
+
+
+def test_push_accepts_id_only_upsert_reply(tmp_path):
+    """The server answers a write it could not re-read with 200 {"id": ...}; that is a success."""
+    import httpx
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("m1", updated=_NOW))
+
+    def handler(request):
+        return httpx.Response(200, json={"id": json.loads(request.content)["id"]})
+
+    with _wired_client(handler) as client:
+        result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+
+    assert result.sent_live == 1
+    assert result.errors == 0
+    remote = load(tmp_path).remotes[client.base_url]
+    assert remote.last_pushed_at is not None
+    assert "push" not in remote.errors
+
+
+def test_client_rejects_non_object_upsert_reply():
+    import httpx
+
+    from poppy.sync.client import TragsResponseError
+
+    with _wired_client(lambda request: httpx.Response(200, json=[])) as client:
+        with pytest.raises(TragsResponseError) as exc:
+            client.upsert({"id": "m1"})
+
+    assert exc.value.outcome_unknown
+    assert len(str(exc.value).splitlines()) == 1
+
+
+@pytest.mark.parametrize("command", ["pull", "run"])
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        {},
+        {"items": []},
+        {"next_cursor": None},
+        {"items": None, "next_cursor": None},
+        {"items": {}, "next_cursor": None},
+        {"items": [None], "next_cursor": None},
+        {"items": [{}], "next_cursor": None},
+        {"items": [], "next_cursor": 42},
+    ],
+)
+def test_main_sync_pull_wrong_shape_prints_one_line(tmp_path, monkeypatch, capsys, command, body):
+    import sys
+
+    import httpx
+
+    from poppy.cli import main as main_mod
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
+    requests = []
+
+    def handler(request):
+        requests.append(request.method)
+        return httpx.Response(200, json=body)
+
+    with _wired_client(handler) as client:
+        monkeypatch.setattr(main_mod, "_sync_client", lambda: (client, client.base_url))
+        monkeypatch.setattr(sys, "argv", ["poppy", "sync", command])
+        with pytest.raises(SystemExit) as exc:
+            main_mod.main()
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "poppy: Invalid response from Trags at https://trags.test/api/memories?limit=100 (HTTP 200): "
+        "expected an object with an items array of memory rows and a next_cursor string or null.\n"
+    )
+    assert len(captured.err.splitlines()) == 1
+    assert "Traceback" not in captured.err
+    assert requests == ["GET"]
+
+
+@pytest.mark.parametrize("response_error", [False, True])
+def test_cli_sync_errors_share_progress_formatter(tmp_path, monkeypatch, capsys, response_error):
+    import sys
+
+    import httpx
+
+    from poppy.cli import main as main_mod
+    from poppy.sync import client as client_mod
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"engine": "seed"}')
+    engine, _ = _engine_and_tombstones(tmp_path)
+    for i in range(2):
+        engine.ingest(_memory(f"m{i}", updated=_NOW + timedelta(seconds=i)))
+
+    def handler(request):
+        row = json.loads(request.content)
+        if row["id"] == "m0":
+            return httpx.Response(201, json=row)
+        if response_error:
+            return httpx.Response(201, text="not json")
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    formatted = []
+    formatter = client_mod.sync_error_message
+
+    def record_format(exc):
+        formatted.append((type(exc), exc.sent_pushed))
+        return formatter(exc)
+
+    monkeypatch.setattr(client_mod, "sync_error_message", record_format)
+    with _wired_client(handler) as client:
+        monkeypatch.setattr(main_mod, "_sync_client", lambda: (client, client.base_url))
+        monkeypatch.setattr(sys, "argv", ["poppy", "sync", "push"])
+        with pytest.raises(SystemExit) as exc:
+            main_mod.main()
+
+    assert exc.value.code == 1
+    error_type = client_mod.TragsResponseError if response_error else client_mod.TragsTransportError
+    assert formatted[-1] == (error_type, 1)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    if response_error:
+        assert captured.err == (
+            "poppy: Invalid JSON response from Trags (HTTP 201). This run sent 1 row during this run. "
+            "The last request may still have completed. The next sync retries.\n"
+        )
+    else:
+        assert captured.err == (
+            "Cannot reach Trags at https://trags.test: timed out. "
+            "This run sent 1 row before the host stopped answering. "
+            "The last request may still have completed. The next sync retries.\nAborted!\n"
+        )
+
+
 def test_main_sync_push_invalid_json_keeps_row_pending(tmp_path, monkeypatch, capsys):
     import sys
 
@@ -3887,7 +4105,7 @@ def test_main_sync_push_invalid_json_keeps_row_pending(tmp_path, monkeypatch, ca
         assert remote.last_pushed_at is None
         assert remote.pushed_count == 0
         assert "Invalid JSON response" in remote.errors["push"]
-        assert tombstones.known_ids(client.base_url) == set()
+        assert tombstones.known_ids(client.base_url) == {"m1"}
 
         malformed = False
         result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
@@ -3895,6 +4113,88 @@ def test_main_sync_push_invalid_json_keeps_row_pending(tmp_path, monkeypatch, ca
     assert result.sent_live == 1
     assert [row["id"] for row in requests] == ["m1", "m1"]
     assert "push" not in load(tmp_path).remotes[client.base_url].errors
+
+
+def test_push_unreadable_success_records_provenance_for_later_forget(tmp_path, forget_memory):
+    from poppy.sync.client import TragsResponseError
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("m1", updated=_NOW))
+    client = _FakeClient(
+        upsert_error=TragsResponseError("Invalid JSON response from Trags (HTTP 201).", outcome_unknown=True)
+    )
+
+    with pytest.raises(TragsResponseError, match="Invalid JSON response"):
+        push(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+
+    reopened = TombstoneStore(tmp_path / "memories.db")
+    assert reopened.known_ids(client.base_url) == {"m1"}
+    remote = load(tmp_path).remotes[client.base_url]
+    assert remote.last_pushed_at is None
+    assert "Invalid JSON response" in remote.errors["push"]
+
+    forget_memory(engine, reopened, tmp_path, "m1")
+    good = _FakeClient()
+    result = push(engine=engine, tombstones=reopened, client=good, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.sent_tombstones == 1
+    assert good.upserts[0]["id"] == "m1"
+    assert is_tombstone(good.upserts[0])
+
+
+def test_pull_unreadable_page_persists_error_for_status(tmp_path):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+    from poppy.sync.client import TragsResponseError
+
+    (tmp_path / "config.json").write_text('{"engine": "seed", "trags_api_url": "https://trags.test/"}')
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    message = "Invalid JSON response from Trags (HTTP 200)."
+    client = _FakeClient(
+        rows=[memory_to_wire(_memory("m1", updated=_NOW))],
+        iter_error=TragsResponseError(message),
+        iter_error_after=1,
+    )
+    record_error(tmp_path, client.base_url, "previous push failure", source="push")
+
+    with pytest.raises(TragsResponseError, match="Invalid JSON response"):
+        pull(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+
+    remote = load(tmp_path).remotes[client.base_url]
+    assert remote.errors == {"push": "previous push failure", "pull": message}
+    assert remote.last_pulled_at is None
+    assert engine.get("m1") is None
+    status = CliRunner().invoke(
+        cli, ["sync", "status"], env={"POPPY_DIR": str(tmp_path), "POPPY_TRAGS_API_KEY": "usr_test"}
+    )
+    assert status.exit_code == 0
+    assert f"last error (pull): {message}" in status.output
+
+
+def test_push_counts_replaced_deletion_as_skipped(tmp_path, capsys):
+    from poppy.cli.main import _print_push
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("m1", updated=_NOW))
+    tombstones.note_remote_memories({"m2"}, "https://trags.test")
+    original = tombstones.add(_memory("m2", updated=_NOW), tombstoned_at=_NOW + timedelta(seconds=1))
+
+    class ReplacingClient(_FakeClient):
+        def upsert(self, row):
+            result = super().upsert(row)
+            tombstones.add(original.memory, tombstoned_at=original.tombstoned_at)
+            return result
+
+    client = ReplacingClient()
+    result = push(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+
+    assert tombstones.get("m2").token != original.token
+    assert result.skipped == 1
+    assert result.sent_live == 1
+    assert result.sent_tombstones == 0
+    assert [row["id"] for row in client.upserts] == ["m1"]
+    _print_push(result)
+    assert "1 skipped" in capsys.readouterr().out
 
 
 def _invalid_json_client(handler):
@@ -4011,6 +4311,7 @@ def test_push_invalid_json_says_how_many_rows_were_sent(tmp_path):
     engine, tombstones = _engine_and_tombstones(tmp_path)
     engine.ingest(_memory("m1", updated=_NOW))
     engine.ingest(_memory("m2", updated=_NOW + timedelta(seconds=1)))
+    engine.ingest(_memory("m3", updated=_NOW + timedelta(seconds=2)))
 
     def handler(request):
         row = json.loads(request.content)
@@ -4023,7 +4324,7 @@ def test_push_invalid_json_says_how_many_rows_were_sent(tmp_path):
         push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
 
     assert str(exc.value) == (
-        "Invalid JSON response from Trags (HTTP 201). This run sent 1 row before that reply. "
+        "Invalid JSON response from Trags (HTTP 201). This run sent 2 rows during this run. "
         "The last request may still have completed. The next sync retries."
     )
 

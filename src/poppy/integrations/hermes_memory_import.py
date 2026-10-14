@@ -29,12 +29,6 @@ _DELIMITER = "§"
 
 
 @dataclass
-class ParsedHermesMemory:
-    body: str
-    source_file: str  # "MEMORY.md" | "USER.md"
-
-
-@dataclass
 class HermesImportResult:
     imported: int
     skipped: int
