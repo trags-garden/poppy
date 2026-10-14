@@ -496,19 +496,18 @@ def start_daemon(
         command = ["launchctl", "kickstart", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"]
         result = _checked_service_command("start the Poppy daemon", command)
         success = "Started Poppy daemon with launchd."
+        output_location = str(poppy_dir / "logs" / "daemon.log")
     elif installed and platform.startswith("linux"):
         command = ["systemctl", "--user", "start", SYSTEMD_FILENAME]
         result = _checked_service_command("start the Poppy daemon", command)
         success = "Started Poppy daemon with systemd."
+        output_location = f"`journalctl --user -u {SYSTEMD_FILENAME} -n 50`"
     else:
         command = [resolve_poppy_executable(), "daemon", "run"]
         _spawn_detached(command, poppy_dir / "logs" / "daemon.log")
         success = "Started Poppy daemon as a detached process."
+        output_location = str(poppy_dir / "logs" / "daemon.log")
     if not _wait_for_daemon(poppy_dir, timeout):
-        if installed and platform.startswith("linux"):
-            output_location = f"`journalctl --user -u {SYSTEMD_FILENAME} -n 50`"
-        else:
-            output_location = str(poppy_dir / "logs" / "daemon.log")
         raise LifecycleError(
             "start the Poppy daemon",
             command,

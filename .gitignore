@@ -38,3 +38,7 @@ qa-store*/
 
 # SQLite in-memory test session sidecar
 :memory:.ses
+
+# Agent context files and local code-understanding caches; never committed
+/AGENTS.md
+/.ua/

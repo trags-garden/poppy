@@ -164,6 +164,24 @@ def _memory_write_name_files() -> set[str]:
     }
 
 
+def _memory_write_capture_counts() -> dict[str, int]:
+    """Count direct ``capture(..., \"memory_write\")`` calls in each allowed file."""
+    allowed_files = ("write_flow.py", "telemetry.py")
+    counts: dict[str, int] = {}
+    for rel in allowed_files:
+        tree = ast.parse((SOURCE_ROOT / rel).read_text(), filename=str(SOURCE_ROOT / rel))
+        counts[rel] = sum(
+            isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Name) and node.func.id.endswith("capture"))
+                or (isinstance(node.func, ast.Attribute) and node.func.attr.endswith("capture"))
+            )
+            and any(isinstance(arg, ast.Constant) and arg.value == "memory_write" for arg in node.args)
+            for node in ast.walk(tree)
+        )
+    return counts
+
+
 def _sending_callers() -> set[str]:
     """Files (relative to src/poppy) that call a sending function.
 
@@ -218,6 +236,9 @@ def test_readme_memory_write_sources_cover_known_sources() -> None:
     # only reach it through the MCP server's `--source` setting or the
     # connecting client's own name; the row must say so.
     configured_only = next((clause for clause in properties.split(";") if "`--source`" in clause), "")
+    assert "the connecting client's own name is one of them" in configured_only, (
+        f"memory_write row must say a connecting client can supply its own source name: {properties!r}"
+    )
     for value in sorted(IMPORT_SOURCE_TYPES | {"ui"}):
         assert f"`{value}`" in configured_only, (
             f"memory_write row must say {value!r} only appears through a configured `--source`: {properties!r}"
@@ -227,6 +248,7 @@ def test_readme_memory_write_sources_cover_known_sources() -> None:
 def test_memory_write_is_sent_only_by_write_flow_remember() -> None:
     # The event name may appear only in its emit helper and the canonical set.
     assert _memory_write_name_files() == {"write_flow.py", "telemetry.py"}
+    assert _memory_write_capture_counts() == {"write_flow.py": 1, "telemetry.py": 0}
     tree = ast.parse((SOURCE_ROOT / "write_flow.py").read_text())
     emitting_functions = {
         func.name

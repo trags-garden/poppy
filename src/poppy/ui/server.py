@@ -46,7 +46,8 @@ CSP_POLICY = (
     "connect-src 'self'; "
     "base-uri 'none'; "
     "frame-ancestors 'none'; "
-    "object-src 'none'"
+    "object-src 'none'; "
+    "form-action 'self'"
 )
 
 
@@ -220,7 +221,11 @@ def create_app(poppy_dir: Path | None = None, allowed_hosts: list[str] | None = 
     # rejected by that check first.
     @app.middleware("http")
     async def _require_json_posts(request: Request, call_next: Any) -> Any:
-        if request.method == "POST" and request.url.path.startswith("/api/") and not has_json_content_type(request):
+        if (
+            request.method == "POST"
+            and request.scope["path"].startswith("/api/")
+            and not has_json_content_type(request)
+        ):
             return JSONResponse(status_code=415, content={"detail": "Content-Type must be application/json"})
         return await call_next(request)
 

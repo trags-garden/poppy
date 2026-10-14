@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Setup no longer changes another file's permissions when a backup is replaced by a symlink while setup runs.
+- `poppy forget` now reports unknown memory IDs as errors, matching `poppy edit`.
+- `poppy sync run` now suggests `poppy setup trags` before manual API-key configuration when unpaired.
+
 ### Changed
 
+- Removed the unused `obsidian-vault` setting; existing config files still load.
 - Sync and `poppy setup trags` now default to `https://api.trags.ai` instead of
   `https://trags.ai`. An install that already synced with `https://trags.ai`
   without setting `trags-api-url` keeps using it: the first run after upgrading
@@ -20,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Sync now reports unexpected server response shapes as a clear error instead of a traceback.
+- Sync now sends later deletions after an unreadable successful upload reply and shows unreadable pull replies in `poppy sync status`.
 
 ## [0.3.3] - 2026-10-07
 

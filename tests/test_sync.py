@@ -4051,7 +4051,7 @@ def test_main_sync_push_invalid_json_keeps_row_pending(tmp_path, monkeypatch, ca
         assert remote.last_pushed_at is None
         assert remote.pushed_count == 0
         assert "Invalid JSON response" in remote.errors["push"]
-        assert tombstones.known_ids(client.base_url) == set()
+        assert tombstones.known_ids(client.base_url) == {"m1"}
 
         malformed = False
         result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
@@ -4059,6 +4059,88 @@ def test_main_sync_push_invalid_json_keeps_row_pending(tmp_path, monkeypatch, ca
     assert result.sent_live == 1
     assert [row["id"] for row in requests] == ["m1", "m1"]
     assert "push" not in load(tmp_path).remotes[client.base_url].errors
+
+
+def test_push_unreadable_success_records_provenance_for_later_forget(tmp_path, forget_memory):
+    from poppy.sync.client import TragsResponseError
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("m1", updated=_NOW))
+    client = _FakeClient(
+        upsert_error=TragsResponseError("Invalid JSON response from Trags (HTTP 201).", outcome_unknown=True)
+    )
+
+    with pytest.raises(TragsResponseError, match="Invalid JSON response"):
+        push(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+
+    reopened = TombstoneStore(tmp_path / "memories.db")
+    assert reopened.known_ids(client.base_url) == {"m1"}
+    remote = load(tmp_path).remotes[client.base_url]
+    assert remote.last_pushed_at is None
+    assert "Invalid JSON response" in remote.errors["push"]
+
+    forget_memory(engine, reopened, tmp_path, "m1")
+    good = _FakeClient()
+    result = push(engine=engine, tombstones=reopened, client=good, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.sent_tombstones == 1
+    assert good.upserts[0]["id"] == "m1"
+    assert is_tombstone(good.upserts[0])
+
+
+def test_pull_unreadable_page_persists_error_for_status(tmp_path):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+    from poppy.sync.client import TragsResponseError
+
+    (tmp_path / "config.json").write_text('{"engine": "seed", "trags_api_url": "https://trags.test/"}')
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    message = "Invalid JSON response from Trags (HTTP 200)."
+    client = _FakeClient(
+        rows=[memory_to_wire(_memory("m1", updated=_NOW))],
+        iter_error=TragsResponseError(message),
+        iter_error_after=1,
+    )
+    record_error(tmp_path, client.base_url, "previous push failure", source="push")
+
+    with pytest.raises(TragsResponseError, match="Invalid JSON response"):
+        pull(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+
+    remote = load(tmp_path).remotes[client.base_url]
+    assert remote.errors == {"push": "previous push failure", "pull": message}
+    assert remote.last_pulled_at is None
+    assert engine.get("m1") is None
+    status = CliRunner().invoke(
+        cli, ["sync", "status"], env={"POPPY_DIR": str(tmp_path), "POPPY_TRAGS_API_KEY": "usr_test"}
+    )
+    assert status.exit_code == 0
+    assert f"last error (pull): {message}" in status.output
+
+
+def test_push_counts_replaced_deletion_as_skipped(tmp_path, capsys):
+    from poppy.cli.main import _print_push
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("m1", updated=_NOW))
+    tombstones.note_remote_memories({"m2"}, "https://trags.test")
+    original = tombstones.add(_memory("m2", updated=_NOW), tombstoned_at=_NOW + timedelta(seconds=1))
+
+    class ReplacingClient(_FakeClient):
+        def upsert(self, row):
+            result = super().upsert(row)
+            tombstones.add(original.memory, tombstoned_at=original.tombstoned_at)
+            return result
+
+    client = ReplacingClient()
+    result = push(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+
+    assert tombstones.get("m2").token != original.token
+    assert result.skipped == 1
+    assert result.sent_live == 1
+    assert result.sent_tombstones == 0
+    assert [row["id"] for row in client.upserts] == ["m1"]
+    _print_push(result)
+    assert "1 skipped" in capsys.readouterr().out
 
 
 def _invalid_json_client(handler):
