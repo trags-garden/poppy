@@ -705,6 +705,113 @@ def test_setup_claude_desktop_writes_config(tmp_path):
     assert "--print-import-prompt" in result.output
 
 
+@pytest.mark.parametrize("path_choice", ["different", "same", "symlink", "missing"])
+def test_doctor_reports_running_executable(tmp_path, monkeypatch, capsys, path_choice):
+    from poppy.cli.doctor import DoctorContext, check_executable
+
+    running_bin = tmp_path / "running" / "poppy"
+    running_bin.parent.mkdir()
+    running_bin.touch()
+    path_bin = tmp_path / "path" / "poppy"
+    path_bin.parent.mkdir()
+    if path_choice == "different":
+        path_bin.touch()
+    elif path_choice == "same":
+        path_bin = running_bin
+    elif path_choice == "symlink":
+        path_bin.symlink_to(running_bin)
+    else:
+        path_bin = None
+    monkeypatch.setattr("sys.argv", [str(running_bin)])
+    monkeypatch.setattr("poppy.cli.doctor.shutil.which", lambda _name: str(path_bin) if path_bin else None)
+
+    ctx = DoctorContext()
+    check_executable(ctx)
+
+    expected = f"  [✓] poppy executable: OK, {running_bin}\n"
+    if path_choice == "different":
+        expected += (
+            f"  [!] poppy on PATH: WARN, another `poppy` sits earlier on PATH at {path_bin}, "
+            "commands typed in a shell will use that one\n"
+        )
+    elif path_choice == "missing":
+        expected += (
+            "  [✗] poppy on PATH: FAIL, `poppy` is not on PATH and the agent hooks call it by name "
+            f"(running {running_bin}), add the directory holding `poppy` to PATH\n"
+        )
+    assert capsys.readouterr().out == expected
+    assert ctx.ok == (path_choice != "missing")
+
+
+def test_doctor_running_executable_follows_renamed_launcher_symlink(tmp_path, monkeypatch, capsys):
+    from poppy.cli.doctor import DoctorContext, check_executable
+
+    target = tmp_path / "new" / "bin" / "poppy"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    launcher = tmp_path / "poppy-new"
+    launcher.symlink_to(target)
+    old_bin = tmp_path / "old" / "bin" / "poppy"
+    old_bin.parent.mkdir(parents=True)
+    old_bin.touch()
+    monkeypatch.setattr("sys.argv", [str(launcher)])
+    monkeypatch.setattr("poppy.cli.doctor.shutil.which", lambda _name: str(old_bin))
+
+    ctx = DoctorContext()
+    check_executable(ctx)
+
+    assert capsys.readouterr().out == (
+        f"  [✓] poppy executable: OK, {target.resolve()}\n"
+        f"  [!] poppy on PATH: WARN, another `poppy` sits earlier on PATH at {old_bin}, "
+        "commands typed in a shell will use that one\n"
+    )
+    assert ctx.ok
+
+
+def test_doctor_running_executable_follows_poppy_symlink_to_renamed_target(tmp_path, monkeypatch, capsys):
+    from poppy.cli.doctor import DoctorContext, check_executable
+
+    target = tmp_path / "new" / "bin" / "poppy-v2"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    launcher = tmp_path / "new" / "bin" / "poppy"
+    launcher.symlink_to(target)
+    old_bin = tmp_path / "old" / "bin" / "poppy"
+    old_bin.parent.mkdir(parents=True)
+    old_bin.touch()
+    monkeypatch.setattr("sys.argv", [str(launcher)])
+    monkeypatch.setattr("sys.executable", str(tmp_path / "python"))
+    monkeypatch.setattr("poppy.cli.doctor.shutil.which", lambda _name: str(old_bin))
+
+    ctx = DoctorContext()
+    check_executable(ctx)
+
+    assert capsys.readouterr().out == (
+        f"  [✓] poppy executable: OK, {target.resolve()}\n"
+        f"  [!] poppy on PATH: WARN, another `poppy` sits earlier on PATH at {old_bin}, "
+        "commands typed in a shell will use that one\n"
+    )
+    assert ctx.ok
+
+
+def test_doctor_reports_unresolved_executable(tmp_path, monkeypatch, capsys):
+    from poppy.cli.doctor import DoctorContext, check_executable
+
+    monkeypatch.setattr("sys.argv", ["doctor-test"])
+    monkeypatch.setattr("sys.executable", str(tmp_path / "python"))
+    monkeypatch.setattr("poppy.cli.doctor.shutil.which", lambda _name: None)
+
+    ctx = DoctorContext()
+    check_executable(ctx)
+
+    assert capsys.readouterr().out == (
+        f"  [✓] poppy executable: OK, running from {tmp_path / 'python'}\n"
+        "  [✗] poppy on PATH: FAIL, `poppy` is not on PATH and the agent hooks call it by name, "
+        "add the directory holding `poppy` to PATH\n"
+    )
+    assert not ctx.ok
+
+
 def test_doctor_reports_capture_consent_pending(tmp_path, monkeypatch):
     """doctor reports the granular capture status: a fresh (consent-pending) install
     shows the consent nudge, not a bare 'disabled' with a stale hint."""

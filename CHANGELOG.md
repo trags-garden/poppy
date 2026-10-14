@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy doctor` now reports the running executable and warns when shell commands would use a different Poppy install on PATH.
 - Concurrent settings changes no longer overwrite each other or erase a telemetry consent answer.
 - Automatic capture now cleans up old unused lock files and waits for an active capture at session end so the final turns are saved.
 - Automatic sync now starts correctly from Claude Desktop bundles and logs worker startup failures.
