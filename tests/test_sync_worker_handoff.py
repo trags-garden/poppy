@@ -167,7 +167,9 @@ def test_auth_stop_does_not_handoff_pending(tmp_path, stub_sync, lock_handles):
 
 
 @pytest.mark.parametrize("max_rounds", [0, 1, 4, 7])
-def test_generic_failures_share_budget(tmp_path, stub_sync, lock_handles, no_delays, max_rounds):
+def test_generic_failures_retry_up_to_round_budget_without_handoff(
+    tmp_path, stub_sync, lock_handles, no_delays, max_rounds
+):
     def fail(poppy_dir):
         raise RuntimeError("Server unavailable")
 
@@ -201,9 +203,63 @@ def test_handoffs_share_budget(tmp_path, monkeypatch, stub_sync, lock_handles, r
     auto.run_worker(tmp_path, max_rounds=3)
 
     assert len(calls) == 3
-    assert absence_checks == [False, False]
+    # The final absence check determines whether budget exhaustion needs a log.
+    assert absence_checks == [False, False, False]
     assert registration_events == ["enter", "exit"] * 3
     assert len(lock_handles) == 3
+    log = (tmp_path / auto.LOG_FILENAME).read_text()
+    assert log.count("sync handoff pass") == 2
+
+
+def test_handoffs_stop_at_pass_limit(tmp_path, monkeypatch, stub_sync, lock_handles):
+    assert auto.MAX_HANDOFF_PASSES > 0
+    monkeypatch.setattr(auto, "MAX_HANDOFF_PASSES", 2)
+    pending = tmp_path / auto.PENDING_FILENAME
+    exists = Path.exists
+    calls = stub_sync()
+
+    def queue_after_absence(path):
+        present = exists(path)
+        if path == pending and not present:
+            pending.touch()
+        return present
+
+    monkeypatch.setattr(Path, "exists", queue_after_absence)
+    pending.touch()
+
+    auto.run_worker(tmp_path, max_rounds=10)
+
+    assert len(calls) == auto.MAX_HANDOFF_PASSES + 1
+    assert len(lock_handles) == auto.MAX_HANDOFF_PASSES + 1
+    assert all(handle.closed for handle in lock_handles)
+    assert exists(pending)
+    log = (tmp_path / auto.LOG_FILENAME).read_text()
+    assert log.count("sync handoff pass") == auto.MAX_HANDOFF_PASSES
+    assert log.count("handoff pass limit reached (2)") == 1
+
+
+def test_quota_budget_stop_with_transport_retry_does_not_spawn_worker(tmp_path, monkeypatch, stub_sync, lock_handles):
+    pending = tmp_path / auto.PENDING_FILENAME
+    spawned = []
+
+    def fail_quota(poppy_dir):
+        exc = TragsQuotaError("Memory limit reached")
+        exc.transport_retry = True
+        raise exc
+
+    calls = stub_sync(fail_quota)
+    monkeypatch.setattr(auto, "_spawn_worker", spawned.append)
+    pending.touch()
+
+    auto.run_worker(tmp_path, max_rounds=2)
+
+    assert len(calls) == 2
+    assert spawned == []
+    assert pending.exists()
+    assert len(lock_handles) == 1
+    log = (tmp_path / auto.LOG_FILENAME).read_text()
+    assert log.count("round budget exhausted (2); work still pending; worker stops") == 1
+    assert "sync handoff pass" not in log
 
 
 def test_budget_exhaustion_does_not_check_pending_after_release(tmp_path, monkeypatch, stub_sync, lock_handles):
