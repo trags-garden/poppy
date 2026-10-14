@@ -211,3 +211,35 @@ def test_device_flow_falls_back_to_default_poll_interval(tmp_path, monkeypatch, 
         setup_trags.run_device_code_flow()
 
     assert sleeps == [setup_trags._DEFAULT_POLL_INTERVAL_S]
+
+
+@pytest.mark.parametrize(
+    ("old_host_state", "override", "expected"),
+    [
+        pytest.param(False, None, "https://api.trags.ai", id="fresh-install"),
+        pytest.param(True, None, "https://trags.ai", id="synced-with-old-host"),
+        pytest.param(True, "https://self-hosted.example/", "https://self-hosted.example", id="override-wins"),
+    ],
+)
+def test_device_flow_host(tmp_path, monkeypatch, old_host_state, override, expected):
+    import json
+
+    import click
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    if old_host_state:
+        (tmp_path / "sync_state.json").write_text(json.dumps({"remotes": {"https://trags.ai": {}}}))
+    posted = []
+
+    def fake_post(url, **_kwargs):
+        posted.append(url)
+        return httpx.Response(410)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with pytest.raises(click.ClickException, match="Failed to start setup"):
+        setup_trags.run_device_code_flow(override)
+
+    assert posted == [f"{expected}/api/cli-setup/start"]
