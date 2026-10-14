@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sync now reports unexpected server response shapes as a clear error instead of a traceback.
 - Sync now sends later deletions after an unreadable successful upload reply and shows unreadable pull replies in `poppy sync status`.
 
 ## [0.3.3] - 2026-10-07
