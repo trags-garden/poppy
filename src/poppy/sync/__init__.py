@@ -1212,10 +1212,6 @@ def remote_is_configured(poppy_dir: Path) -> bool:
         return True
 
 
-def make_client_from_config(*, base_url: str, api_key: str) -> TragsClient:
-    return TragsClient(base_url=base_url, api_key=api_key)
-
-
 # Public re-export helpers used by the CLI ----------------------------------
 
 

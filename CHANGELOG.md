@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed the unused `obsidian-vault` setting; existing config files still load.
 - Sync and `poppy setup trags` now default to `https://api.trags.ai` instead of
   `https://trags.ai`. An install that already synced with `https://trags.ai`
   without setting `trags-api-url` keeps using it: the first run after upgrading
