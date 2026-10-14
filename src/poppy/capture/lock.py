@@ -54,6 +54,9 @@ CONTENDED_RETRY_S = 0.1
 CONTENDED_POLL_S = CONTENDED_RETRY_S / 4
 SESSION_END_RETRY_S = 30.0
 SESSION_END_POLL_S = 0.25
+# A pruner can unlink the file between a worker's open and its lock; the worker
+# then reopens, at most this many times.
+LOCK_ATTEMPTS = 5
 
 
 def _safe(session_id: str) -> str:
@@ -88,6 +91,16 @@ def _try_lock(fd: int) -> bool | None:
     return True
 
 
+def _same_file(fd: int, path: str | Path) -> bool:
+    """Whether ``fd`` is still the file at ``path`` (not unlinked or replaced)."""
+    try:
+        held = os.fstat(fd)
+        at_path = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (at_path.st_dev, at_path.st_ino)
+
+
 def _prune(poppy_dir: Path, session_id: str) -> None:
     """Best-effort removal of old, unlocked files, once per capture run."""
     if fcntl is None:
@@ -113,8 +126,7 @@ def _prune(poppy_dir: Path, session_id: str) -> None:
                         locked = os.fstat(fd)
                         if not stat.S_ISREG(locked.st_mode) or locked.st_mtime >= cutoff:
                             continue
-                        at_path = os.stat(entry.path, follow_symlinks=False)
-                        if (locked.st_dev, locked.st_ino) == (at_path.st_dev, at_path.st_ino):
+                        if _same_file(fd, entry.path):
                             os.unlink(entry.path)
                     finally:
                         os.close(fd)
@@ -192,20 +204,33 @@ def single_flight(
     if fcntl is None:
         yield True
         return
-    try:
-        fd = os.open(str(_lock_path(poppy_dir, session_id)), _OPEN_FLAGS, 0o600)
-    except OSError:
+    path = _lock_path(poppy_dir, session_id)
+    deadline = time.monotonic() + retry_s
+    for _ in range(LOCK_ATTEMPTS):
+        try:
+            fd = os.open(str(path), _OPEN_FLAGS, 0o600)
+        except OSError:
+            yield False
+            return
+        try:
+            acquired = _try_lock(fd)
+            while acquired is False:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_s, remaining))
+                acquired = _try_lock(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        if acquired is not True or _same_file(fd, path):
+            break
+        # Pruned between open and lock: this lock guards an unlinked file.
+        os.close(fd)
+    else:
         yield False
         return
     try:
-        deadline = time.monotonic() + retry_s
-        acquired = _try_lock(fd)
-        while acquired is False:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(poll_s, remaining))
-            acquired = _try_lock(fd)
         if acquired is None:
             sys.stderr.write("poppy capture: file locking unavailable here; capturing without the session lock\n")
         if acquired:

@@ -112,6 +112,46 @@ def test_every_other_acquirer_is_skipped_while_held(tmp_path: Path) -> None:
             assert fourth is False
 
 
+def test_a_file_pruned_between_open_and_lock_is_reopened(tmp_path: Path, monkeypatch) -> None:
+    path = _lock_path(tmp_path, "s1")
+    real_try_lock = lock_module._try_lock
+    swapped = []
+
+    def prune_then_lock(fd: int):
+        if not swapped:
+            # Another session's pruner unlinks the file; a third worker recreates it.
+            path.unlink()
+            path.touch()
+            swapped.append(True)
+        return real_try_lock(fd)
+
+    monkeypatch.setattr(lock_module, "_try_lock", prune_then_lock)
+    with single_flight(tmp_path, "s1") as first:
+        assert first is True
+        assert swapped == [True]
+        # The holder's pid landed in the file at the path, so it locked that inode.
+        assert int(path.read_text()) == os.getpid()
+        with single_flight(tmp_path, "s1", retry_s=0) as second:
+            assert second is False
+
+
+def test_a_lock_file_pruned_on_every_attempt_skips(tmp_path: Path, monkeypatch) -> None:
+    path = _lock_path(tmp_path, "s1")
+    real_try_lock = lock_module._try_lock
+    attempts = []
+
+    def always_pruned(fd: int):
+        attempts.append(fd)
+        path.unlink()
+        path.touch()
+        return real_try_lock(fd)
+
+    monkeypatch.setattr(lock_module, "_try_lock", always_pruned)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is False
+    assert len(attempts) == lock_module.LOCK_ATTEMPTS
+
+
 def test_holder_keeps_the_lock_however_old_the_file_is(tmp_path: Path) -> None:
     path = _lock_path(tmp_path, "s1")
     with single_flight(tmp_path, "s1") as first:
