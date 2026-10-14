@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Setup no longer changes another file's permissions when a backup is replaced by a symlink while setup runs.
 - `poppy forget` now reports unknown memory IDs as errors, matching `poppy edit`.
 - `poppy sync run` now suggests `poppy setup trags` before manual API-key configuration when unpaired.
 
@@ -26,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Concurrent settings changes no longer overwrite each other or erase a telemetry consent answer.
+- Automatic capture now cleans up old unused lock files and waits for an active capture at session end so the final turns are saved.
+- Automatic sync now starts correctly from Claude Desktop bundles and logs worker startup failures.
+- Sync now reports unexpected server response shapes as a clear error instead of a traceback.
 - Sync now sends later deletions after an unreadable successful upload reply and shows unreadable pull replies in `poppy sync status`.
 
 ## [0.3.3] - 2026-10-07

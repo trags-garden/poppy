@@ -2233,25 +2233,9 @@ def _abort_on_transport_error(exc) -> None:
     Still one line and still `click.Abort` — so click's own `Aborted!` marker
     follows it, exactly as the auth and quota handlers above already do.
     """
-    simulated = getattr(exc, "simulated", False)
-    pulled = getattr(exc, "applied_pulled", 0)
-    pushed = getattr(exc, "sent_pushed", 0)
-    unknown = getattr(exc, "outcome_unknown", False) and not simulated
-    did = []
-    if pulled:
-        did.append(f"applied {pulled} pulled change{'' if pulled == 1 else 's'}")
-    if pushed:
-        did.append(f"sent {pushed} row{'' if pushed == 1 else 's'}")
-    parts = [f"{exc}."]
-    if did:
-        lead = "This run would have" if simulated else "This run"
-        parts.append(f"{lead} {' and '.join(did)} before the host stopped answering.")
-    elif not unknown:
-        parts.append("Nothing was sent and nothing changed locally.")
-    if unknown:
-        parts.append("The last request may still have completed.")
-    parts.append("The next sync retries.")
-    click.echo(" ".join(parts), err=True)
+    from poppy.sync.client import sync_error_message
+
+    click.echo(sync_error_message(exc), err=True)
     raise click.Abort()
 
 
