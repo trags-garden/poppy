@@ -238,49 +238,28 @@ def test_handoffs_stop_at_pass_limit(tmp_path, monkeypatch, stub_sync, lock_hand
     assert log.count("handoff pass limit reached (2)") == 1
 
 
-@pytest.mark.parametrize("pending_after_release", [True, False])
-def test_quota_budget_stop_rechecks_pending_and_spawns_one_fresh_worker(
-    tmp_path, monkeypatch, stub_sync, lock_handles, pending_after_release
-):
+def test_quota_budget_stop_with_transport_retry_does_not_spawn_worker(tmp_path, monkeypatch, stub_sync, lock_handles):
     pending = tmp_path / auto.PENDING_FILENAME
-    exists = Path.exists
-    handoff_checks = []
     spawned = []
 
     def fail_quota(poppy_dir):
-        pending.touch()
-        raise TragsQuotaError("Memory limit reached")
-
-    def check_after_release(path):
-        if path == pending and lock_handles[-1].closed:
-            assert writers.live_writers(tmp_path) == []
-            handoff_checks.append(True)
-            if not pending_after_release:
-                pending.unlink()
-        return exists(path)
-
-    def spawn(poppy_dir):
-        assert poppy_dir == tmp_path
-        assert all(handle.closed for handle in lock_handles)
-        assert writers.live_writers(tmp_path) == []
-        with open(tmp_path / auto.LOCK_FILENAME) as probe:
-            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        spawned.append(poppy_dir)
+        exc = TragsQuotaError("Memory limit reached")
+        exc.transport_retry = True
+        raise exc
 
     calls = stub_sync(fail_quota)
-    monkeypatch.setattr(Path, "exists", check_after_release)
-    monkeypatch.setattr(auto, "_spawn_worker", spawn)
+    monkeypatch.setattr(auto, "_spawn_worker", spawned.append)
     pending.touch()
 
     auto.run_worker(tmp_path, max_rounds=2)
 
     assert len(calls) == 2
-    assert handoff_checks == [True]
-    assert spawned == ([tmp_path] if pending_after_release else [])
+    assert spawned == []
+    assert pending.exists()
     assert len(lock_handles) == 1
     log = (tmp_path / auto.LOG_FILENAME).read_text()
-    assert log.count("round budget exhausted (2); work still pending") == 1
-    assert log.count("sync handoff pass 1 started") == int(pending_after_release)
+    assert log.count("round budget exhausted (2); work still pending; worker stops") == 1
+    assert "sync handoff pass" not in log
 
 
 def test_budget_exhaustion_does_not_check_pending_after_release(tmp_path, monkeypatch, stub_sync, lock_handles):

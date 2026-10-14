@@ -20,8 +20,8 @@ Design:
       3. Release and close lock.
       4. If the loop ended with no pending work, check once for a new flag;
          re-acquire and drain with the remaining round budget if it is set.
-         Limit handoff passes, and spawn a fresh worker for quota-exempt work
-         still pending after exhausting the round budget.
+         Limit handoff passes. Work still pending after the round budget
+         waits for the next write to spawn a new worker.
 
 The trigger MUST NEVER raise — write paths swallow exceptions defensively.
 """
@@ -281,8 +281,12 @@ def _drain_pending(poppy_dir: Path, *, rounds: int, max_rounds: int) -> tuple[_D
             # A retry flag removed during backoff must not prompt a handoff.
             stop_reason = "generic_failure_rearmed"
     if pending_path.exists():
-        _log(poppy_dir, f"sync stopped: round budget exhausted ({max_rounds}); work still pending")
-    return ("quota_stop" if stop_reason == "quota_stop" else "budget_exhausted"), rounds
+        _log(
+            poppy_dir,
+            f"sync stopped: round budget exhausted ({max_rounds}); work still pending; "
+            "worker stops, the next write starts a new one",
+        )
+    return "budget_exhausted", rounds
 
 
 def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
@@ -320,10 +324,9 @@ def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
 
         # A write may have arrived after the last absence check while its worker
         # still saw our lock held. Check only after releasing and closing it.
-        # Auth stops and deliberately re-armed failures wait for a trigger.
-        # Quota-exempt work still queued at the budget gets a fresh worker.
-        quota_budget_exhausted = stop_reason == "quota_stop" and rounds >= max_rounds
-        if stop_reason != "pending_absent" and not quota_budget_exhausted:
+        # Auth, quota and budget stops, and deliberately re-armed failures,
+        # wait for the next trigger.
+        if stop_reason != "pending_absent":
             return
         if not pending_path.exists():
             return
@@ -332,6 +335,3 @@ def run_worker(poppy_dir: Path, *, max_rounds: int = 32) -> None:
             return
         handoff_passes += 1
         _log(poppy_dir, f"sync handoff pass {handoff_passes} started")
-        if quota_budget_exhausted:
-            _spawn_worker(poppy_dir)
-            return
