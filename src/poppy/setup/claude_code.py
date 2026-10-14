@@ -1194,12 +1194,6 @@ def poppy_daemon_registration(
     return None
 
 
-def poppy_daemon_url(client: str = "claude-code", claude_config_dir: Path | None = None) -> str | None:
-    """Loopback daemon URL Poppy is registered under for ``client``, else ``None``."""
-    registration = poppy_daemon_registration(client, claude_config_dir)
-    return registration[0] if registration else None
-
-
 # ---------------------------------------------------------------------------
 # Hooks
 # ---------------------------------------------------------------------------

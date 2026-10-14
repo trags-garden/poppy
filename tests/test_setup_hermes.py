@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import logging
 import subprocess
 import sys
 import threading
@@ -13,6 +14,7 @@ from importlib import resources
 from pathlib import Path
 
 import pytest
+from click import Option
 from click.testing import CliRunner
 
 from poppy.cli.main import cli
@@ -286,9 +288,8 @@ def test_plugin_init_references_memory_provider_abc(tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Import the installed plugin with Hermes' two imports stubbed and the
-    poppy subprocess replaced by a recorder. Yields (module, calls)."""
+def plugin_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Import the installed plugin with Hermes' two imports stubbed."""
 
     class MemoryProvider:
         pass
@@ -315,6 +316,13 @@ def plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     spec = importlib.util.spec_from_file_location("hermes_poppy_plugin", init_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def plugin(plugin_module, monkeypatch: pytest.MonkeyPatch):
+    """Replace the poppy subprocess with a recorder. Returns (module, calls)."""
+    module = plugin_module
 
     calls: list[list[str]] = []
 
@@ -393,6 +401,69 @@ def test_plugin_mirrored_write_passes_dash_prefixed_content_after_separator(plug
     assert calls == [["remember", "--type", "fact", "--", content]]
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"success": False, "error": "poppy exited 2: disk full"},
+        {"success": False, "error": "poppy timed out after 30s"},
+        {"success": False, "error": "poppy not found"},
+        RuntimeError("unexpected mirror failure"),
+    ],
+)
+def test_plugin_mirrored_write_warns_on_failure(plugin, monkeypatch, caplog, failure) -> None:
+    module, _ = plugin
+
+    def fail(args, timeout):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(module, "_run_poppy", fail)
+    with caplog.at_level(logging.WARNING, logger=module.logger.name):
+        module.PoppyMemoryProvider().on_memory_write("add", "memory", "use uv")
+        for thread in threading.enumerate():
+            if thread.name == "poppy-memwrite":
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+    reason = str(failure) if isinstance(failure, Exception) else failure["error"]
+    assert caplog.record_tuples == [
+        (module.logger.name, logging.WARNING, f"Poppy memory mirror remember failed: {reason}")
+    ]
+
+
+def test_plugin_run_poppy_failure_includes_exit_code_and_stderr_tail(plugin_module, monkeypatch) -> None:
+    module = plugin_module
+    monkeypatch.setattr(module, "_resolve_poppy_path", lambda: "/fake/poppy")
+    completed = subprocess.CompletedProcess([], 2, stdout="other output", stderr="x" * 1500 + "disk full")
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: completed)
+
+    assert module._run_poppy(["remember"]) == {
+        "success": False,
+        "error": f"poppy exited 2: {completed.stderr[-1000:]}",
+    }
+
+
+@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired("poppy", 30), FileNotFoundError("poppy")])
+def test_plugin_run_poppy_handles_timeout_and_missing_binary(plugin_module, monkeypatch, failure) -> None:
+    module = plugin_module
+    monkeypatch.setattr(module, "_resolve_poppy_path", lambda: "/fake/poppy")
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(module.subprocess, "run", fail)
+    reason = "poppy timed out after 30s" if isinstance(failure, subprocess.TimeoutExpired) else "poppy not found"
+    assert module._run_poppy(["remember"], timeout=30) == {"success": False, "error": reason}
+
+
+def test_plugin_run_poppy_handles_unresolved_binary(plugin_module, monkeypatch) -> None:
+    monkeypatch.setattr(plugin_module, "_resolve_poppy_path", lambda: None)
+    result = plugin_module._run_poppy(["remember"])
+    assert not result["success"]
+    assert "poppy not found" in result["error"]
+
+
 def test_plugin_unknown_tool_returns_error_without_running_poppy(plugin) -> None:
     module, calls = plugin
     provider = module.PoppyMemoryProvider()
@@ -424,10 +495,10 @@ def test_plugin_manifest_hooks_are_implemented_by_the_provider(plugin, tmp_path:
         assert hook in vars(module.PoppyMemoryProvider), hook
 
 
-def _plugin_subcommands(source: str) -> list[str]:
-    """The first argument of every ``_run_poppy`` call in the plugin: either an
-    inline list or a local variable assigned a list in the same function."""
-    subcommands = []
+def _plugin_commands(source: str) -> list[tuple[str, set[str]]]:
+    """Extract subcommands and flags from inline lists and local argv lists,
+    including conditional extend/append calls before each invocation."""
+    commands = []
     for func in ast.walk(ast.parse(source)):
         if not isinstance(func, ast.FunctionDef):
             continue
@@ -442,18 +513,71 @@ def _plugin_subcommands(source: str) -> list[str]:
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_run_poppy":
                 argv = node.args[0]
                 if isinstance(argv, ast.Name):
-                    argv = lists[argv.id]
-                assert isinstance(argv, ast.List), ast.unparse(node)
-                subcommands.append(ast.literal_eval(argv.elts[0]))
-    return subcommands
+                    argv_name = argv.id
+                    elements = list(lists[argv_name].elts)
+                    for mutation in sorted(ast.walk(func), key=lambda n: getattr(n, "lineno", 0)):
+                        if (
+                            isinstance(mutation, ast.Call)
+                            and mutation.lineno < node.lineno
+                            and isinstance(mutation.func, ast.Attribute)
+                            and isinstance(mutation.func.value, ast.Name)
+                            and mutation.func.value.id == argv_name
+                        ):
+                            if mutation.func.attr == "extend":
+                                assert isinstance(mutation.args[0], ast.List), ast.unparse(mutation)
+                                elements.extend(mutation.args[0].elts)
+                            elif mutation.func.attr == "append":
+                                elements.append(mutation.args[0])
+                else:
+                    assert isinstance(argv, ast.List), ast.unparse(node)
+                    elements = argv.elts
+                flags = set()
+                for element in elements[1:]:
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                        if element.value == "--":
+                            break
+                        if element.value.startswith("--"):
+                            flags.add(element.value.split("=", 1)[0])
+                commands.append((ast.literal_eval(elements[0]), flags))
+    return commands
 
 
-def test_plugin_only_runs_registered_poppy_subcommands(tmp_path: Path) -> None:
+def _assert_plugin_cli_contract(source: str) -> None:
+    for subcommand, flags in _plugin_commands(source):
+        assert subcommand in cli.commands, subcommand
+        options = {
+            option
+            for param in cli.commands[subcommand].params
+            if isinstance(param, Option)
+            for option in param.opts + param.secondary_opts
+        }
+        assert flags <= options, f"{subcommand}: undefined flags {sorted(flags - options)}"
+
+
+def test_plugin_only_runs_registered_poppy_subcommands_and_flags(tmp_path: Path) -> None:
     install_for_hermes(hermes_home=tmp_path)
     source = (tmp_path / "plugins" / "poppy" / "__init__.py").read_text()
-    subcommands = _plugin_subcommands(source)
+    subcommands = [subcommand for subcommand, _ in _plugin_commands(source)]
     assert {"recall", "remember", "forget", "stats"} <= set(subcommands)
-    assert set(subcommands) <= set(cli.commands)
+    _assert_plugin_cli_contract(source)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '_run_poppy(["recall", "--bogus", "query"])',
+        'cmd = ["recall"]\n    if project:\n        cmd.extend(["--bogus", "value"])\n    _run_poppy(cmd)',
+        'cmd = ["recall"]\n    cmd.append("--bogus=value")\n    _run_poppy(cmd)',
+        '_run_poppy(["recall", "--yes", "query"])',
+    ],
+)
+def test_plugin_cli_contract_rejects_undefined_flags(body: str) -> None:
+    with pytest.raises(AssertionError, match="recall: undefined flags"):
+        _assert_plugin_cli_contract(f"def tool():\n    {body}\n")
+
+
+def test_plugin_cli_contract_ignores_content_after_separator() -> None:
+    _assert_plugin_cli_contract('def tool():\n    _run_poppy(["recall", "--", "--bogus"])\n')
 
 
 def test_setup_command_promises_only_what_the_plugin_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

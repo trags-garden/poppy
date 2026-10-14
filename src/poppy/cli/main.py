@@ -9,7 +9,7 @@ import click
 from poppy import __version__, telemetry, update_check
 from poppy.config import PoppyConfig, config_key, load_config, parse_setting, save_config
 from poppy.engine.interface import RetrievalEngine
-from poppy.models import Filters
+from poppy.models import WRITABLE_MEMORY_TYPES, Filters
 from poppy.runtime import get_engine as _runtime_get_engine
 from poppy.runtime import get_poppy_dir as _runtime_get_poppy_dir
 
@@ -179,7 +179,7 @@ def _update_notice_epilogue(ctx: click.Context, result):
 
 @cli.command()
 @click.argument("content")
-@click.option("--type", "memory_type", default="fact", type=click.Choice(["fact", "decision", "preference", "lesson"]))
+@click.option("--type", "memory_type", default="fact", type=click.Choice(WRITABLE_MEMORY_TYPES))
 @click.option("--project", default=None, help="Project name (auto-detected from cwd if not set)")
 @click.option("--ttl", default=None, help="Expire after duration (e.g. 30d, 12h, 1w3d)")
 @click.option("--expires-at", default=None, help="Expire at ISO-8601 datetime (mutually exclusive with --ttl)")
@@ -414,8 +414,7 @@ def forget(memory_id: str, yes: bool):
     engine = _get_engine()
     mem = engine.get(memory_id)
     if mem is None:
-        click.echo(f"Memory {memory_id} not found.")
-        return
+        raise click.ClickException(f"memory not found: {memory_id}")
 
     if not yes:
         click.echo(f"  {mem.content}")
@@ -459,7 +458,7 @@ def restore(memory_id: str):
     "--type",
     "memory_type",
     default=None,
-    type=click.Choice(["fact", "decision", "preference", "lesson"]),
+    type=click.Choice(WRITABLE_MEMORY_TYPES),
 )
 @click.option("--project", default=None, help="Set project (use --no-project to clear)")
 @click.option("--no-project", is_flag=True, help="Clear project")
@@ -503,7 +502,7 @@ def edit(
             poppy_dir=_get_poppy_dir(),
         )
     except KeyError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(exc.args[0]) from exc
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -2166,9 +2165,9 @@ def _sync_client():
     api_key = resolve_trags_api_key(cfg)
     if not api_key:
         click.echo(
-            "Trags API key not configured. Set it with:\n"
-            "  poppy config set trags-api-key <usr_xxxxx>\n"
-            "  poppy config set trags-api-url <https://your-trags-host>   # optional, defaults to https://api.trags.ai",
+            "Trags API key not configured. Connect with:\n"
+            "  poppy setup trags\n"
+            "  or poppy config set trags-api-key <usr_xxxxx>",
             err=True,
         )
         raise click.Abort()
