@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from poppy import __version__, telemetry, update_check
-from poppy.config import PoppyConfig, config_key, load_config, parse_setting, save_config
+from poppy.config import PoppyConfig, config_key, load_config, parse_setting, update_config
 from poppy.engine.interface import RetrievalEngine
 from poppy.models import WRITABLE_MEMORY_TYPES, Filters
 from poppy.runtime import get_engine as _runtime_get_engine
@@ -601,20 +601,19 @@ def engines_use(name: str, migrate: bool):
     from poppy.engine.registry import resolve_engine
 
     poppy_dir = _get_poppy_dir()
-    cfg = load_config(poppy_dir)
     try:
-        cfg.set("engine", name)
+        parsed = parse_setting("engine", name)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
-    save_config(cfg)
-    click.echo(f"Set engine = {cfg.engine}")
+    update_config(poppy_dir, lambda config: config_key("engine").apply(config, parsed))
+    click.echo(f"Set engine = {parsed}")
 
     # Probe the new engine to learn its model_id, then count stale rows.
     db_path = poppy_dir / "memories.db"
     try:
-        new_engine = resolve_engine(cfg.engine, db_path)
+        new_engine = resolve_engine(parsed, db_path)
     except (ImportError, ValueError) as exc:
-        click.echo(f"⚠  engine {cfg.engine!r} unavailable here ({exc}); falling back at runtime.")
+        click.echo(f"⚠  engine {parsed!r} unavailable here ({exc}); falling back at runtime.")
         return
 
     stats = stale_stats(db_path, new_engine.model_id)
@@ -760,9 +759,7 @@ def config_set(key: str, value: str):
         except telemetry.TelemetryChoiceError as exc:
             raise click.ClickException(str(exc)) from exc
     else:
-        cfg = load_config(poppy_dir=poppy_dir)
-        entry.apply(cfg, parsed)
-        save_config(cfg)
+        update_config(poppy_dir, lambda config: entry.apply(config, parsed))
     if key == "trags-api-key":
         # Never echo the secret back to the terminal / scrollback.
         from poppy import keychain
@@ -877,13 +874,16 @@ def redaction_add(literal: str | None, env_var: str | None):
             param_hint="--env",
         )
 
-    config = load_config(_get_poppy_dir())
-    entries = config.redaction_env_vars if env_var is not None else config.redaction_literals
-    if value in entries:
+    def add(config: PoppyConfig) -> bool:
+        entries = config.redaction_env_vars if env_var is not None else config.redaction_literals
+        if value in entries:
+            return False
+        entries.append(value)
+        return True
+
+    if not update_config(_get_poppy_dir(), add):
         click.echo(f"Custom {kind} redaction already exists{_redaction_detail(kind, value)}.")
         return
-    entries.append(value)
-    save_config(config)
     click.echo(f"Added custom {kind} redaction{_redaction_detail(kind, value)}.")
 
 
@@ -893,13 +893,17 @@ def redaction_add(literal: str | None, env_var: str | None):
 def redaction_remove(literal: str | None, env_var: str | None):
     """Remove a literal or environment-variable redaction."""
     kind, value = _redaction_entry(literal, env_var)
-    config = load_config(_get_poppy_dir())
-    entries = config.redaction_env_vars if env_var is not None else config.redaction_literals
-    if value not in entries:
+
+    def remove(config: PoppyConfig) -> bool:
+        entries = config.redaction_env_vars if env_var is not None else config.redaction_literals
+        if value not in entries:
+            return False
+        entries.remove(value)
+        return True
+
+    if not update_config(_get_poppy_dir(), remove):
         click.echo(f"No custom {kind} redaction found{_redaction_detail(kind, value)}.")
         return
-    entries.remove(value)
-    save_config(config)
     click.echo(f"Removed custom {kind} redaction{_redaction_detail(kind, value)}.")
 
 
@@ -1429,7 +1433,7 @@ def _consent_disclosure() -> str:
 def _set_consent(config, *, granted: bool) -> None:
     """Persist the consent evidence record through one mutation path."""
     config.consent = "granted" if granted else "denied"
-    save_config(config)
+    update_config(config.poppy_dir, lambda current: setattr(current, "consent", config.consent))
 
 
 @cli.group("autocapture", invoke_without_command=True)
@@ -1501,9 +1505,7 @@ def autocapture_on(is_global: bool, project: str | None, yes: bool):
             "project (a repo with a CLAUDE.md, pyproject.toml, package.json, .git, ...) "
             "or pass --project NAME."
         )
-    changed = config.enable_project(project)
-    if changed:
-        save_config(config)
+    changed = update_config(poppy_dir, lambda current: current.enable_project(project))
     click.echo(
         f"Automatic capture is back on for '{project}'."
         if changed
@@ -1552,9 +1554,7 @@ def autocapture_off(is_global: bool, project: str | None):
             click.echo("Automatic capture disabled. This choice persists across upgrades.")
             return
 
-    changed = config.disable_project(detected_project)
-    if changed:
-        save_config(config)
+    changed = update_config(config.poppy_dir, lambda current: current.disable_project(detected_project))
     click.echo(
         f"Automatic capture is off for '{detected_project}'."
         if changed
@@ -1617,9 +1617,7 @@ def capture(action: str, project: str | None):
 
     config = load_config(_get_poppy_dir())
     if action == "off":
-        changed = config.disable_project(project)
-        if changed:
-            save_config(config)
+        changed = update_config(config.poppy_dir, lambda current: current.disable_project(project))
         click.echo(
             f"Automatic capture is off for '{project}'."
             if changed
@@ -1628,9 +1626,7 @@ def capture(action: str, project: str | None):
         legacy_on_command = " ".join(("poppy", "capture --on"))
         click.echo(f"Recall still works here. Run `{legacy_on_command}` to re-enable capturing.")
     elif action == "on":
-        changed = config.enable_project(project)
-        if changed:
-            save_config(config)
+        changed = update_config(config.poppy_dir, lambda current: current.enable_project(project))
         click.echo(
             f"Automatic capture is back on for '{project}'."
             if changed

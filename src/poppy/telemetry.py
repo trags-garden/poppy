@@ -193,12 +193,10 @@ def set_enabled(poppy_dir: Path, enabled: bool) -> None:
     link this machine to an account before any event has been sent. Declining
     mints nothing: a machine that says no never gets an identifier at all.
     """
-    from poppy.config import load_config, save_config
+    from poppy.config import update_config
 
     try:
-        cfg = load_config(poppy_dir)
-        cfg.telemetry_enabled = enabled
-        save_config(cfg)
+        update_config(poppy_dir, lambda config: setattr(config, "telemetry_enabled", enabled))
     except Exception as exc:
         raise TelemetryChoiceError(f"could not record the choice in {poppy_dir / 'config.json'}: {exc}") from exc
 
