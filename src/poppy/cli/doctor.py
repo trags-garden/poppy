@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -239,16 +240,32 @@ def _poppy_registered(settings: dict) -> bool:
     return isinstance(servers, dict) and "poppy" in servers
 
 
-def check_executable(ctx: DoctorContext) -> None:
-    from poppy.mcp_server.lifecycle import resolve_poppy_executable
+def _running_executable() -> str | None:
+    # The binary actually running, never a PATH lookup: a launcher symlink with
+    # any name resolves to its target, else the `poppy` next to the interpreter
+    # (pytest or `python -m poppy` put a non-poppy file in argv[0]).
+    argv0 = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if os.path.basename(argv0) == "poppy" and os.path.isfile(argv0):
+        return argv0
+    sibling = os.path.join(os.path.dirname(os.path.realpath(sys.executable)), "poppy")
+    return sibling if os.path.exists(sibling) else None
 
+
+def check_executable(ctx: DoctorContext) -> None:
     line = ctx.line
 
-    poppy_bin = resolve_poppy_executable()
-    resolved = poppy_bin != "poppy"
-    line("poppy executable", "OK" if resolved else "FAIL", poppy_bin if resolved else "not on PATH")
+    running_bin = _running_executable()
+    line("poppy executable", "OK", running_bin or f"running from {sys.executable}")
     path_bin = shutil.which("poppy")
-    if path_bin and os.path.realpath(path_bin) != os.path.realpath(poppy_bin):
+    if path_bin is None:
+        line(
+            "poppy on PATH",
+            "FAIL",
+            "`poppy` is not on PATH and the agent hooks call it by name"
+            + (f" (running {running_bin})" if running_bin else ""),
+            hint="add the directory holding `poppy` to PATH",
+        )
+    elif running_bin and os.path.realpath(path_bin) != running_bin:
         line(
             "poppy on PATH",
             "WARN",
