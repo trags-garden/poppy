@@ -66,7 +66,7 @@ def _run_poppy(args: List[str], timeout: int = _RECALL_TIMEOUT) -> dict:
     """Run a poppy CLI command. Returns {success, output, error}."""
     poppy_path = _resolve_poppy_path()
     if not poppy_path:
-        return {"success": False, "error": "poppy CLI not found. Install: pipx install poppy-memory"}
+        return {"success": False, "error": "poppy not found. Install: pipx install poppy-memory"}
 
     cmd = [poppy_path] + args
     env = os.environ.copy()
@@ -82,14 +82,15 @@ def _run_poppy(args: List[str], timeout: int = _RECALL_TIMEOUT) -> dict:
         stderr = result.stderr.strip()
         if result.returncode == 0:
             return {"success": True, "output": stdout}
-        return {"success": False, "error": stderr or stdout or f"poppy exited {result.returncode}"}
+        detail = stderr[-1000:] or stdout[-1000:] or "no output"
+        return {"success": False, "error": f"poppy exited {result.returncode}: {detail}"}
     except subprocess.TimeoutExpired:
         return {"success": False, "error": f"poppy timed out after {timeout}s"}
     except FileNotFoundError:
         global _cached_poppy_path
         with _poppy_path_lock:
             _cached_poppy_path = None
-        return {"success": False, "error": "poppy CLI not found"}
+        return {"success": False, "error": "poppy not found"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -169,7 +170,6 @@ class PoppyMemoryProvider(MemoryProvider):
 
     def __init__(self):
         self._session_id = ""
-        self._sync_thread: Optional[threading.Thread] = None
 
     @property
     def name(self) -> str:
@@ -231,12 +231,14 @@ class PoppyMemoryProvider(MemoryProvider):
         def _write():
             try:
                 memory_type = "preference" if target == "user" else "fact"
-                _run_poppy(
+                result = _run_poppy(
                     ["remember", "--type", memory_type, "--", content[:5000]],
                     timeout=_REMEMBER_TIMEOUT,
                 )
+                if not result["success"]:
+                    logger.warning("Poppy memory mirror remember failed: %s", result.get("error", "unknown error"))
             except Exception as e:
-                logger.debug("Poppy memory mirror failed: %s", e)
+                logger.warning("Poppy memory mirror remember failed: %s", e)
 
         t = threading.Thread(target=_write, daemon=True, name="poppy-memwrite")
         t.start()
@@ -256,8 +258,7 @@ class PoppyMemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def shutdown(self) -> None:
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=10.0)
+        """No-op: the provider has no background sync worker."""
 
     # -- Tool implementations -----------------------------------------------
 

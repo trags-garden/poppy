@@ -414,8 +414,7 @@ def forget(memory_id: str, yes: bool):
     engine = _get_engine()
     mem = engine.get(memory_id)
     if mem is None:
-        click.echo(f"Memory {memory_id} not found.")
-        return
+        raise click.ClickException(f"memory not found: {memory_id}")
 
     if not yes:
         click.echo(f"  {mem.content}")
@@ -503,7 +502,7 @@ def edit(
             poppy_dir=_get_poppy_dir(),
         )
     except KeyError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(exc.args[0]) from exc
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -2166,9 +2165,9 @@ def _sync_client():
     api_key = resolve_trags_api_key(cfg)
     if not api_key:
         click.echo(
-            "Trags API key not configured. Set it with:\n"
-            "  poppy config set trags-api-key <usr_xxxxx>\n"
-            "  poppy config set trags-api-url <https://your-trags-host>   # optional, defaults to https://api.trags.ai",
+            "Trags API key not configured. Connect with:\n"
+            "  poppy setup trags\n"
+            "  or poppy config set trags-api-key <usr_xxxxx>",
             err=True,
         )
         raise click.Abort()
