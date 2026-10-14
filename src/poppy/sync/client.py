@@ -35,14 +35,14 @@ class TragsError(PoppyError):
 
 
 class TragsResponseError(TragsError):
-    """A successful HTTP response had an unparseable JSON body.
+    """A successful HTTP response had an unreadable or unexpected JSON body.
 
     Carries what the run had already done, as ``TragsTransportError`` does, so
-    the one line the user reads still says how many rows went out first.
+    the one line the user reads still says how many rows went out during the run.
     """
 
-    def __init__(self, message: str, *, outcome_unknown: bool = False) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, *, outcome_unknown: bool = False, status_code: int | None = None) -> None:
+        super().__init__(message, status_code=status_code)
         self.outcome_unknown = outcome_unknown
         # Filled in by the sync layer as it unwinds (see ``_note_transport_progress``).
         self.applied_pulled = 0
@@ -50,18 +50,7 @@ class TragsResponseError(TragsError):
         self.simulated = False
 
     def __str__(self) -> str:
-        parts = [super().__str__()]
-        did = []
-        if self.applied_pulled:
-            did.append(f"applied {self.applied_pulled} pulled change{'' if self.applied_pulled == 1 else 's'}")
-        if self.sent_pushed:
-            did.append(f"sent {self.sent_pushed} row{'' if self.sent_pushed == 1 else 's'}")
-        if did:
-            lead = "This run would have" if self.simulated else "This run"
-            parts.append(f"{lead} {' and '.join(did)} before that reply.")
-        if self.outcome_unknown:
-            parts.append("The last request may still have completed. The next sync retries.")
-        return " ".join(parts)
+        return sync_error_message(self)
 
 
 class TragsAuthError(TragsError):
@@ -120,6 +109,33 @@ class TragsTransportError(TragsError):
         # happened, not work anything did. A simulated count reported as a
         # completed one is the same lie in the other direction.
         self.simulated = False
+
+
+def sync_error_message(exc: TragsResponseError | TragsTransportError) -> str:
+    """Format sync progress once for unreadable replies and transport failures."""
+    response_error = isinstance(exc, TragsResponseError)
+    simulated = exc.simulated
+    unknown = exc.outcome_unknown and (response_error or not simulated)
+    did = []
+    if exc.applied_pulled:
+        pulled = exc.applied_pulled
+        did.append(f"applied {pulled} pulled change{'' if pulled == 1 else 's'}")
+    if exc.sent_pushed:
+        pushed = exc.sent_pushed
+        did.append(f"sent {pushed} row{'' if pushed == 1 else 's'}")
+    message = TragsError.__str__(exc)
+    parts = [message if response_error else f"{message}."]
+    if did:
+        lead = "This run would have" if simulated else "This run"
+        when = "during this run" if response_error else "before the host stopped answering"
+        parts.append(f"{lead} {' and '.join(did)} {when}.")
+    elif not response_error and not unknown:
+        parts.append("Nothing was sent and nothing changed locally.")
+    if unknown:
+        parts.append("The last request may still have completed.")
+    if not response_error or unknown:
+        parts.append("The next sync retries.")
+    return " ".join(parts)
 
 
 # Transport faults that failed BEFORE any request byte could reach the server:
@@ -202,8 +218,8 @@ class TragsClient:
             params["cursor"] = cursor
         resp = self._send("GET", f"{self.base_url}/api/memories", params=params)
         self._raise_for_status(resp)
-        body = self._response_json(resp)
-        return Page(items=list(body.get("items") or []), next_cursor=body.get("next_cursor"))
+        body = self._response_json(resp, page=True)
+        return Page(items=body["items"], next_cursor=body["next_cursor"])
 
     def iter_all_since(
         self,
@@ -277,13 +293,35 @@ class TragsClient:
             ) from exc
 
     @staticmethod
-    def _response_json(resp: httpx.Response, *, outcome_unknown: bool = False):
+    def _response_json(resp: httpx.Response, *, outcome_unknown: bool = False, page: bool = False) -> dict:
         try:
-            return resp.json()
+            body = resp.json()
         except ValueError as exc:
             raise TragsResponseError(
-                f"Invalid JSON response from Trags (HTTP {resp.status_code}).", outcome_unknown=outcome_unknown
+                f"Invalid JSON response from Trags (HTTP {resp.status_code}).",
+                outcome_unknown=outcome_unknown,
+                status_code=resp.status_code,
             ) from exc
+
+        if page:
+            expected = "an object with an items array of memory rows and a next_cursor string or null"
+            valid = (
+                isinstance(body, dict)
+                and isinstance(body.get("items"), list)
+                and all(_is_memory_row(row) for row in body["items"])
+                and "next_cursor" in body
+                and (body["next_cursor"] is None or isinstance(body["next_cursor"], str))
+            )
+        else:
+            expected = "a memory object with string id, content, memory_type, created_at and updated_at fields"
+            valid = _is_memory_row(body)
+        if not valid:
+            raise TragsResponseError(
+                f"Invalid response from Trags at {resp.url} (HTTP {resp.status_code}): expected {expected}.",
+                outcome_unknown=outcome_unknown,
+                status_code=resp.status_code,
+            )
+        return body
 
     @staticmethod
     def _raise_for_status(resp: httpx.Response) -> None:
@@ -296,6 +334,13 @@ class TragsClient:
             if message is not None:
                 raise TragsQuotaError(message, status_code=resp.status_code)
         raise TragsError(f"{resp.status_code} {resp.text[:500]}", status_code=resp.status_code)
+
+
+def _is_memory_row(body: object) -> bool:
+    """Check the required fields shared by the memory endpoints and list items."""
+    return isinstance(body, dict) and all(
+        isinstance(body.get(key), str) for key in ("id", "content", "memory_type", "created_at", "updated_at")
+    )
 
 
 def _quota_message(resp: httpx.Response) -> str | None:
