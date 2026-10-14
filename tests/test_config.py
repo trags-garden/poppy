@@ -49,20 +49,20 @@ def test_locked_update_preserves_consent_after_a_stale_load(tmp_path):
     stale = load_config(tmp_path)
     telemetry.set_enabled(tmp_path, False)
     assert load_config(tmp_path).telemetry_enabled is False
-    stale.obsidian_vault = tmp_path / "vault"
+    stale.session_start_min_score = 0.5
     # The old load-mutate-save sequence loses B's answer, even with a save lock.
     save_config(stale)
     assert load_config(tmp_path).telemetry_enabled is None
-    assert load_config(tmp_path).obsidian_vault == tmp_path / "vault"
+    assert load_config(tmp_path).session_start_min_score == 0.5
 
     # Both writers now update only their key on the current, locked snapshot.
     stale = load_config(tmp_path)
     assert stale.telemetry_enabled is None
     telemetry.set_enabled(tmp_path, False)
-    update_config(tmp_path, lambda config: setattr(config, "obsidian_vault", tmp_path / "new-vault"))
+    update_config(tmp_path, lambda config: setattr(config, "session_start_min_score", 0.25))
     current = load_config(tmp_path)
     assert current.telemetry_enabled is False
-    assert current.obsidian_vault == tmp_path / "new-vault"
+    assert current.session_start_min_score == 0.25
 
 
 @pytest.mark.parametrize("writer", ["telemetry", "config-set"])
