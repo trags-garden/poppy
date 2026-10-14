@@ -9,10 +9,14 @@ only the tail the mid-session loop has not already captured.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from poppy.capture import lock
 from poppy.capture.watermark import get_watermark, set_watermark
 from poppy.consolidation import consolidate_stop_event
 from poppy.engine.seed import SeedEngine
@@ -97,6 +101,100 @@ def test_flushes_only_the_tail_after_watermark(
     assert "turn 9" in captured["prompt"]  # tail present
     assert "turn 0 " not in captured["prompt"]  # already-captured head excluded
     assert get_watermark(tmp_path, "s1") == 10
+
+
+@pytest.mark.skipif(lock.fcntl is None, reason="flock requires POSIX")
+@pytest.mark.parametrize("hook_name", ["SessionEnd", "sessionEnd"])
+def test_session_end_waits_for_capture_and_extracts_appended_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled_env: SeedEngine, hook_name: str
+) -> None:
+    prompts = []
+
+    def extract(prompt, **kwargs):
+        prompts.append(prompt)
+        return [{"type": "decision", "content": "Use a shared cache for rate limits."}]
+
+    monkeypatch.setattr("poppy.consolidation.call_llm", extract)
+    p = _transcript(tmp_path, 6)
+    ready = threading.Event()
+    contended = threading.Event()
+    errors = []
+    real_try_lock = lock._try_lock
+
+    def try_lock(fd):
+        acquired = real_try_lock(fd)
+        if acquired is False:
+            contended.set()
+        return acquired
+
+    monkeypatch.setattr(lock, "_try_lock", try_lock)
+
+    def capture_holder():
+        try:
+            with lock.single_flight(tmp_path, "s1") as acquired:
+                assert acquired
+                ready.set()
+                assert contended.wait(5)
+                # New turns arrive while the earlier capture is still processing its window.
+                with p.open("a") as transcript:
+                    for i in range(6, 10):
+                        role = "user" if i % 2 == 0 else "assistant"
+                        transcript.write(
+                            "\n" + json.dumps({"type": role, "message": {"role": role, "content": f"tail turn {i}"}})
+                        )
+                time.sleep(0.5)
+                set_watermark(tmp_path, "s1", 6)
+        except BaseException as exc:
+            errors.append(exc)
+            ready.set()
+
+    holder = threading.Thread(target=capture_holder)
+    holder.start()
+    try:
+        assert ready.wait(5)
+        assert not errors
+        n = consolidate_stop_event(
+            {"session_id": "s1", "transcript_path": str(p), "cwd": str(tmp_path), "hook_event_name": hook_name}
+        )
+    finally:
+        holder.join(timeout=5)
+    assert not holder.is_alive()
+    assert not errors
+    assert n == 1
+    assert len(prompts) == 1
+    assert "tail turn 6" in prompts[0] and "tail turn 9" in prompts[0]
+    assert "turn 0 " not in prompts[0] and "turn 5 " not in prompts[0]
+    assert get_watermark(tmp_path, "s1") == 10
+
+
+@pytest.mark.skipif(lock.fcntl is None, reason="flock requires POSIX")
+@pytest.mark.parametrize("hook_name", ["SessionEnd", "sessionEnd", "preCompact", "Stop"])
+def test_backstop_lock_wait_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled_env: SeedEngine, capsys, hook_name: str
+) -> None:
+    p = _transcript(tmp_path, 6)
+    sleeps = []
+
+    def unexpected_extraction(*args, **kwargs):
+        raise AssertionError("a contended capture must skip extraction")
+
+    monkeypatch.setattr("poppy.consolidation.call_llm", unexpected_extraction)
+    with lock.single_flight(tmp_path, "s1") as acquired:
+        assert acquired
+        monkeypatch.setattr(
+            lock, "time", SimpleNamespace(time=time.time, monotonic=lambda: sum(sleeps), sleep=sleeps.append)
+        )
+        assert (
+            consolidate_stop_event({"session_id": "s1", "transcript_path": str(p), "hook_event_name": hook_name}) == 0
+        )
+    session_end = hook_name in ("SessionEnd", "sessionEnd")
+    assert sum(sleeps) == pytest.approx(30 if session_end else 0.1)
+    assert max(sleeps) == pytest.approx(0.25 if session_end else 0.025)
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == (1 if session_end else 0)
+    if session_end:
+        assert "SessionEnd" in lines[0] and "30s" in lines[0] and "skipping" in lines[0]
+    assert get_watermark(tmp_path, "s1") == 0
 
 
 def test_tail_below_min_turns_is_skipped(

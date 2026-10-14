@@ -4,21 +4,21 @@ Never two capture workers for the same session at once: a fast typer can stack
 UserPromptSubmit fires, and overlapping extractions would double-read turns and
 race on the host CLI's auth/lock state (a known cause of silent 0-memory
 extractions). Each capture worker acquires a per-session lock for its whole run;
-a worker that cannot acquire it skips the fire — the watermark catches up next
-time.
+a worker that cannot acquire it skips the fire; the watermark catches up next
+time. SessionEnd waits longer to flush the final turns.
 
 The lock is an exclusive ``flock`` on a per-session ``.flock`` file under the
 Poppy directory, held for the whole run. The kernel releases it when the holder
 exits, so a crashed worker can never wedge capture, and a live worker can never
-lose it mid-run however long it takes. The file itself is never deleted:
-unlinking a locked file would let a second worker create and lock a fresh one
-alongside it. The holder writes its pid into the file while it runs, so
+lose it mid-run however long it takes. Only old, unlocked files for other
+sessions are pruned: unlinking a locked file would let a second worker create
+and lock a fresh one alongside it. The holder writes its pid while it runs, so
 ``poppy doctor`` can see a capture in flight without touching the lock.
 
 Older versions used a ``.lock`` file created exclusively and deleted on release,
 treated as abandoned after ``LEGACY_LOCK_TTL_S``. A worker started by an older
 version may still be running across an upgrade, so a fresh legacy file counts
-as held. New code never creates or deletes legacy files; the separate name
+as held. New code only prunes old, unlocked legacy files; the separate name
 keeps an older worker's delete from touching the ``.flock`` file.
 """
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 import errno
 import os
 import re
+import stat
 import sys
 import time
 from collections.abc import Iterator
@@ -42,14 +43,20 @@ except ImportError:  # pragma: no cover - non-POSIX (Windows)
 
 # Older versions stole a ``.lock`` file older than this (seconds).
 LEGACY_LOCK_TTL_S = 300
+PRUNE_AGE_S = 24 * 60 * 60
 
 _OPEN_FLAGS = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
 
 # A capture worker that stops early holds the lock only briefly, so a contended
-# lock is retried for this long (seconds, in steps) before the caller skips.
-# That keeps the SessionEnd backstop from skipping behind such a worker.
+# lock is retried briefly before the caller skips. SessionEnd has no later hook
+# to catch up, so it uses a longer, bounded wait.
 CONTENDED_RETRY_S = 0.1
-_CONTENDED_STEPS = 4
+CONTENDED_POLL_S = CONTENDED_RETRY_S / 4
+SESSION_END_RETRY_S = 30.0
+SESSION_END_POLL_S = 0.25
+# A pruner can unlink the file between a worker's open and its lock; the worker
+# then reopens, at most this many times.
+LOCK_ATTEMPTS = 5
 
 
 def _safe(session_id: str) -> str:
@@ -84,6 +91,51 @@ def _try_lock(fd: int) -> bool | None:
     return True
 
 
+def _same_file(fd: int, path: str | Path) -> bool:
+    """Whether ``fd`` is still the file at ``path`` (not unlinked or replaced)."""
+    try:
+        held = os.fstat(fd)
+        at_path = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (at_path.st_dev, at_path.st_ino)
+
+
+def _prune(poppy_dir: Path, session_id: str) -> None:
+    """Best-effort removal of old, unlocked files, once per capture run."""
+    if fcntl is None:
+        return
+    current = {_lock_path(poppy_dir, session_id).name, _legacy_lock_path(poppy_dir, session_id).name}
+    cutoff = time.time() - PRUNE_AGE_S
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        with os.scandir(poppy_dir) as entries:
+            for entry in entries:
+                if entry.name in current or not entry.name.startswith("capture-"):
+                    continue
+                if not entry.name.endswith((".flock", ".lock")):
+                    continue
+                try:
+                    candidate = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(candidate.st_mode) or candidate.st_mtime >= cutoff:
+                        continue
+                    fd = os.open(entry.path, flags)
+                    try:
+                        if _try_lock(fd) is not True:
+                            continue
+                        locked = os.fstat(fd)
+                        if not stat.S_ISREG(locked.st_mode) or locked.st_mtime >= cutoff:
+                            continue
+                        if _same_file(fd, entry.path):
+                            os.unlink(entry.path)
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+
 def _write_pid(fd: int, pid: int | None) -> None:
     """Record the holder's pid in the lock file, or clear it."""
     try:
@@ -106,10 +158,12 @@ def is_held(path: Path) -> bool:
         # instead of probing, so the pid check below must not run.
         return False
     try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except OSError:
         return False
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
         pid = int(os.read(fd, 32).strip() or 0)
     except (OSError, ValueError):
         return False
@@ -127,34 +181,56 @@ def is_held(path: Path) -> bool:
 
 
 @contextmanager
-def single_flight(poppy_dir: Path, session_id: str) -> Iterator[bool]:
+def single_flight(
+    poppy_dir: Path,
+    session_id: str,
+    *,
+    retry_s: float = CONTENDED_RETRY_S,
+    poll_s: float = CONTENDED_POLL_S,
+) -> Iterator[bool]:
     """Hold the per-session capture lock for the duration of the block.
 
     Yields ``True`` if the lock was acquired (caller should do the capture) or
-    ``False`` if another worker still holds it after ``CONTENDED_RETRY_S``
+    ``False`` if another worker still holds it after ``retry_s``
     (caller should skip). Always releases a lock it acquired, even on error.
     Where locking is unavailable (Windows, or a filesystem that refuses locks)
     it acquires without exclusion rather than skipping every capture.
     """
     ensure_poppy_dir(poppy_dir)
+    _prune(poppy_dir, session_id)
     if _legacy_held(poppy_dir, session_id):
         yield False
         return
     if fcntl is None:
         yield True
         return
-    try:
-        fd = os.open(str(_lock_path(poppy_dir, session_id)), _OPEN_FLAGS, 0o600)
-    except OSError:
+    path = _lock_path(poppy_dir, session_id)
+    deadline = time.monotonic() + retry_s
+    for _ in range(LOCK_ATTEMPTS):
+        try:
+            fd = os.open(str(path), _OPEN_FLAGS, 0o600)
+        except OSError:
+            yield False
+            return
+        try:
+            acquired = _try_lock(fd)
+            while acquired is False:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(poll_s, remaining))
+                acquired = _try_lock(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        if acquired is not True or _same_file(fd, path):
+            break
+        # Pruned between open and lock: this lock guards an unlinked file.
+        os.close(fd)
+    else:
         yield False
         return
     try:
-        acquired = _try_lock(fd)
-        for _ in range(_CONTENDED_STEPS):
-            if acquired is not False:
-                break
-            time.sleep(CONTENDED_RETRY_S / _CONTENDED_STEPS)
-            acquired = _try_lock(fd)
         if acquired is None:
             sys.stderr.write("poppy capture: file locking unavailable here; capturing without the session lock\n")
         if acquired:

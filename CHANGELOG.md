@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Automatic capture now cleans up old unused lock files and waits for an active capture at session end so the final turns are saved.
 - Automatic sync now starts correctly from Claude Desktop bundles and logs worker startup failures.
 - Sync now reports unexpected server response shapes as a clear error instead of a traceback.
 - Sync now sends later deletions after an unreadable successful upload reply and shows unreadable pull replies in `poppy sync status`.

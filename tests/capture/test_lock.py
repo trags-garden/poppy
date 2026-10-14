@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import os
 import subprocess
 import sys
@@ -11,15 +10,79 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import poppy.capture.lock as lock_module
 from poppy.capture.lock import (
     CONTENDED_RETRY_S,
     LEGACY_LOCK_TTL_S,
+    PRUNE_AGE_S,
     _legacy_lock_path,
     _lock_path,
     is_held,
     single_flight,
 )
+
+fcntl = pytest.importorskip("fcntl")
+
+
+@pytest.mark.parametrize("suffix", [".flock", ".lock"])
+def test_prunes_only_old_unlocked_files_for_other_sessions(tmp_path: Path, suffix: str) -> None:
+    stale, fresh, held, current = [tmp_path / f"capture-{name}{suffix}" for name in ("old", "fresh", "held", "s1")]
+    unrelated = tmp_path / "other.lock"
+    ancient = time.time() - PRUNE_AGE_S - 1
+    for path in (stale, fresh, held, current, unrelated):
+        path.touch()
+        if path != fresh:
+            os.utime(path, (ancient, ancient))
+    fd = os.open(held, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with single_flight(tmp_path, "s1") as acquired:
+            assert acquired is True
+            assert not stale.exists()
+            assert fresh.exists()
+            assert held.exists()
+            assert current.exists()
+            assert unrelated.exists()
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("suffix", [".flock", ".lock"])
+def test_pruning_keeps_a_file_replaced_after_locking(tmp_path: Path, monkeypatch, suffix: str) -> None:
+    stale = tmp_path / f"capture-old{suffix}"
+    stale.touch()
+    ancient = time.time() - PRUNE_AGE_S - 1
+    os.utime(stale, (ancient, ancient))
+    replacement = tmp_path / "replacement"
+    replacement.write_text("keep the replacement")
+    real_stat = os.stat
+    swapped = []
+
+    def swap_then_stat(path, *args, **kwargs):
+        if str(path) == str(stale) and not swapped:
+            replacement.replace(stale)
+            swapped.append(True)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(lock_module.os, "stat", swap_then_stat)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is True
+    assert swapped == [True]
+    assert stale.read_text() == "keep the replacement"
+
+
+def test_windows_does_not_prune(tmp_path: Path, monkeypatch) -> None:
+    for suffix in (".flock", ".lock"):
+        path = tmp_path / f"capture-old{suffix}"
+        path.touch()
+        ancient = time.time() - PRUNE_AGE_S - 1
+        os.utime(path, (ancient, ancient))
+    monkeypatch.setattr(lock_module, "fcntl", None)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is True
+    assert len(list(tmp_path.glob("capture-*"))) == 2
 
 
 def test_grants_then_releases(tmp_path: Path) -> None:
@@ -47,6 +110,46 @@ def test_every_other_acquirer_is_skipped_while_held(tmp_path: Path) -> None:
         # A skipped worker leaving does not release the holder's lock.
         with single_flight(tmp_path, "s1") as fourth:
             assert fourth is False
+
+
+def test_a_file_pruned_between_open_and_lock_is_reopened(tmp_path: Path, monkeypatch) -> None:
+    path = _lock_path(tmp_path, "s1")
+    real_try_lock = lock_module._try_lock
+    swapped = []
+
+    def prune_then_lock(fd: int):
+        if not swapped:
+            # Another session's pruner unlinks the file; a third worker recreates it.
+            path.unlink()
+            path.touch()
+            swapped.append(True)
+        return real_try_lock(fd)
+
+    monkeypatch.setattr(lock_module, "_try_lock", prune_then_lock)
+    with single_flight(tmp_path, "s1") as first:
+        assert first is True
+        assert swapped == [True]
+        # The holder's pid landed in the file at the path, so it locked that inode.
+        assert int(path.read_text()) == os.getpid()
+        with single_flight(tmp_path, "s1", retry_s=0) as second:
+            assert second is False
+
+
+def test_a_lock_file_pruned_on_every_attempt_skips(tmp_path: Path, monkeypatch) -> None:
+    path = _lock_path(tmp_path, "s1")
+    real_try_lock = lock_module._try_lock
+    attempts = []
+
+    def always_pruned(fd: int):
+        attempts.append(fd)
+        path.unlink()
+        path.touch()
+        return real_try_lock(fd)
+
+    monkeypatch.setattr(lock_module, "_try_lock", always_pruned)
+    with single_flight(tmp_path, "s1") as acquired:
+        assert acquired is False
+    assert len(attempts) == lock_module.LOCK_ATTEMPTS
 
 
 def test_holder_keeps_the_lock_however_old_the_file_is(tmp_path: Path) -> None:
@@ -87,7 +190,7 @@ def test_an_abandoned_older_version_lock_does_not_block(tmp_path: Path) -> None:
     legacy = _legacy_holder(tmp_path, age_s=LEGACY_LOCK_TTL_S + 1)
     with single_flight(tmp_path, "s1") as acquired:
         assert acquired is True
-    assert legacy.exists()  # never deleted by new code
+    assert legacy.exists()  # younger than the pruning threshold, and the current session
 
 
 def test_an_older_version_release_cannot_free_the_new_lock(tmp_path: Path) -> None:
@@ -144,7 +247,9 @@ def _probe(tmp_path: Path, monkeypatch, *, release_after: int | None) -> tuple[l
         if len(slept) == release_after:
             fcntl.flock(fd, fcntl.LOCK_UN)  # the probe finishes
 
-    monkeypatch.setattr("poppy.capture.lock.time", SimpleNamespace(time=time.time, sleep=sleep))
+    monkeypatch.setattr(
+        "poppy.capture.lock.time", SimpleNamespace(time=time.time, sleep=sleep, monotonic=lambda: sum(slept))
+    )
     return slept, fd
 
 
@@ -210,3 +315,32 @@ def test_a_huge_pid_is_not_a_capture_in_flight(tmp_path: Path) -> None:
     path.write_text(f"{10**30}\n")
 
     assert not is_held(path)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs require POSIX")
+def test_a_fifo_is_not_a_capture_in_flight(tmp_path: Path) -> None:
+    path = _lock_path(tmp_path, "fifo")
+    os.mkfifo(path)
+    # A subprocess timeout makes a blocking-open regression fail without hanging the suite.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; from poppy.capture.lock import is_held; "
+            "import sys; print(is_held(Path(sys.argv[1])))",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    assert result.stdout.strip() == "False"
+
+
+def test_a_nonregular_file_is_not_read(tmp_path: Path, monkeypatch) -> None:
+    def fail_if_read(*args):
+        raise AssertionError("nonregular lock file was read")
+
+    monkeypatch.setattr(lock_module.os, "read", fail_if_read)
+    assert not is_held(tmp_path)
