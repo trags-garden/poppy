@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy forget` now reports unknown memory IDs as errors, matching `poppy edit`.
+- `poppy sync run` now suggests `poppy setup trags` before manual API-key configuration when unpaired.
+
 ### Changed
 
 - Sync and `poppy setup trags` now default to `https://api.trags.ai` instead of
