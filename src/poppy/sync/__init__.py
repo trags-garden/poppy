@@ -61,6 +61,7 @@ from poppy.sync.state import (
     latest_iso,
     load,
     mutate_remote,
+    record_error,
     stamp_error,
 )
 from poppy.tombstones import Tombstone, TombstoneStore
@@ -462,6 +463,7 @@ def push(
                 last_soft_error = f"local read failed: {exc}"
                 continue
             if current is None or current.token != payload.token:
+                skipped += 1
                 continue
 
         try:
@@ -502,6 +504,8 @@ def push(
                 first_fail_iso = iso
             continue
         except TragsResponseError as exc:
+            # A 2xx proves the ID exists remotely even if its reply is unreadable.
+            accepted_ids.add(payload.id if kind == "live" else payload.memory.id)
             # Keep the row pending and surface the unusable reply after saving state.
             # A host that answers every request with a non-JSON page is as useless as
             # a dead one, so this counts toward the circuit breaker.
@@ -1017,10 +1021,11 @@ def pull(
         errors += 1
         watermark_locked = True
         auth_exc = exc
-    except TragsResponseError:
-        # A 2xx page we cannot read. Abort the whole sync before anything is applied
-        # or persisted, so no push runs and the caller (CLI or auto worker) treats it
-        # as a failed run and retries.
+    except TragsResponseError as exc:
+        # A 2xx page we cannot read. Persist the error, then abort before applying
+        # any rows so no push runs and the caller treats it as a failed run.
+        if not dry_run:
+            record_error(poppy_dir, client.base_url, str(exc), source="pull")
         raise
     except TragsTransportError as exc:
         # The host gave no usable answer, so this is not a row the server

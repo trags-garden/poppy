@@ -382,6 +382,31 @@ def test_forget(tmp_path):
     assert "Forgotten" in result.output
 
 
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["edit", "missing", "--content", "updated"], "Error: memory not found: missing\n"),
+        (["forget", "missing", "--yes"], "Error: memory not found: missing\n"),
+    ],
+)
+def test_unknown_memory_id_errors(tmp_path, args, expected):
+    result = CliRunner().invoke(cli, args, env={"POPPY_DIR": str(tmp_path), "POPPY_TELEMETRY_OFF": "1"})
+
+    assert result.exit_code == 1
+    assert result.output == expected
+
+
+def test_sync_run_without_a_key_suggests_setup_first(tmp_path):
+    result = CliRunner().invoke(
+        cli,
+        ["sync", "run"],
+        env={"POPPY_DIR": str(tmp_path), "POPPY_TELEMETRY_OFF": "1"},
+    )
+
+    assert result.exit_code == 1
+    assert result.output.splitlines()[1] == "  poppy setup trags"
+
+
 @pytest.mark.parametrize("ttl", [None, "1d"])
 def test_forget_then_restore(tmp_path, ttl):
     runner = CliRunner()

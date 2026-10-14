@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy forget` now reports unknown memory IDs as errors, matching `poppy edit`.
+- `poppy sync run` now suggests `poppy setup trags` before manual API-key configuration when unpaired.
+
 ### Changed
 
 - Removed the unused `obsidian-vault` setting; existing config files still load.
@@ -17,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no sync history is lost. An explicitly set `trags-api-url` is never changed.
   Downgrading to an older Poppy after syncing with `https://api.trags.ai` by
   default sends sync back to `https://trags.ai`, which it treats as a new server.
+
+### Fixed
+
+- Sync now sends later deletions after an unreadable successful upload reply and shows unreadable pull replies in `poppy sync status`.
 
 ## [0.3.3] - 2026-10-07
 
