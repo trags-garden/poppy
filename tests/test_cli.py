@@ -738,6 +738,32 @@ def test_doctor_running_executable_follows_renamed_launcher_symlink(tmp_path, mo
     assert ctx.ok
 
 
+def test_doctor_running_executable_follows_poppy_symlink_to_renamed_target(tmp_path, monkeypatch, capsys):
+    from poppy.cli.doctor import DoctorContext, check_executable
+
+    target = tmp_path / "new" / "bin" / "poppy-v2"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    launcher = tmp_path / "new" / "bin" / "poppy"
+    launcher.symlink_to(target)
+    old_bin = tmp_path / "old" / "bin" / "poppy"
+    old_bin.parent.mkdir(parents=True)
+    old_bin.touch()
+    monkeypatch.setattr("sys.argv", [str(launcher)])
+    monkeypatch.setattr("sys.executable", str(tmp_path / "python"))
+    monkeypatch.setattr("poppy.cli.doctor.shutil.which", lambda _name: str(old_bin))
+
+    ctx = DoctorContext()
+    check_executable(ctx)
+
+    assert capsys.readouterr().out == (
+        f"  [✓] poppy executable: OK, {target.resolve()}\n"
+        f"  [!] poppy on PATH: WARN, another `poppy` sits earlier on PATH at {old_bin}, "
+        "commands typed in a shell will use that one\n"
+    )
+    assert ctx.ok
+
+
 def test_doctor_reports_unresolved_executable(tmp_path, monkeypatch, capsys):
     from poppy.cli.doctor import DoctorContext, check_executable
 

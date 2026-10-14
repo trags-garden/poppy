@@ -244,8 +244,9 @@ def _running_executable() -> str | None:
     # The binary actually running, never a PATH lookup: a launcher symlink with
     # any name resolves to its target, else the `poppy` next to the interpreter
     # (pytest or `python -m poppy` put a non-poppy file in argv[0]).
-    argv0 = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
-    if os.path.basename(argv0) == "poppy" and os.path.isfile(argv0):
+    raw = sys.argv[0] if sys.argv else ""
+    argv0 = os.path.realpath(raw) if raw else ""
+    if "poppy" in (os.path.basename(raw), os.path.basename(argv0)) and os.path.isfile(argv0):
         return argv0
     sibling = os.path.join(os.path.dirname(os.path.realpath(sys.executable)), "poppy")
     return sibling if os.path.exists(sibling) else None
