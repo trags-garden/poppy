@@ -38,7 +38,13 @@ import httpx
 
 from poppy.capture import health
 from poppy.capture.cadence import soft_cap_reached
-from poppy.capture.lock import single_flight
+from poppy.capture.lock import (
+    CONTENDED_POLL_S,
+    CONTENDED_RETRY_S,
+    SESSION_END_POLL_S,
+    SESSION_END_RETRY_S,
+    single_flight,
+)
 from poppy.capture.orchestrator import CaptureOrchestrator, CapturePlan
 from poppy.capture.policy import is_capture_enabled
 from poppy.capture.transcript import detect_transcript_host
@@ -652,9 +658,10 @@ def _orchestrator(cfg: PoppyConfig, poppy_dir: Path, *, engine=None) -> CaptureO
 
 
 def consolidate_stop_event(payload: dict) -> int:
-    """Run consolidation for a Stop hook payload. Returns the number of memories stored.
+    """Flush a SessionEnd transcript tail. Returns the number of memories stored.
 
     No-op (returns 0) if disabled, transcript missing, or session already consolidated.
+    Cursor preCompact also uses this entry point, with the short lock retry.
     """
     cfg = load_config(get_poppy_dir())
     project = project_from_cwd(payload.get("cwd"))
@@ -668,8 +675,15 @@ def consolidate_stop_event(payload: dict) -> int:
 
     poppy_dir = get_poppy_dir()
 
-    with single_flight(poppy_dir, session_id) as acquired:
+    session_end = payload.get("hook_event_name", "SessionEnd") in ("SessionEnd", "sessionEnd")
+    retry_s = SESSION_END_RETRY_S if session_end else CONTENDED_RETRY_S
+    poll_s = SESSION_END_POLL_S if session_end else CONTENDED_POLL_S
+    with single_flight(poppy_dir, session_id, retry_s=retry_s, poll_s=poll_s) as acquired:
         if not acquired:
+            if session_end:
+                sys.stderr.write(
+                    f"poppy capture: SessionEnd could not acquire the session lock within {retry_s:g}s; skipping\n"
+                )
             return 0
 
         # Incremental capture: read only the window (watermark, end].
