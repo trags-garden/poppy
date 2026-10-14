@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import plistlib
+import socket
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -290,6 +291,19 @@ def test_start_timeout_points_to_active_backend_output(
 
     output_location = expected_output_location or str(tmp_path / "logs" / "daemon.log")
     assert str(raised.value) == f"Poppy daemon did not become reachable within 0 seconds. Check {output_location}."
+
+
+def test_wait_for_daemon_times_out_against_closed_loopback_port(tmp_path, monkeypatch):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+    except PermissionError:
+        pytest.skip("sandbox forbids loopback socket binds")
+
+    monkeypatch.setenv("POPPY_DAEMON_PORT", str(port))
+
+    assert lifecycle._wait_for_daemon(tmp_path, timeout=0.1) is False
 
 
 def test_wait_for_daemon_token_returns_the_settled_authenticated_token(tmp_path, monkeypatch):
