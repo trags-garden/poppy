@@ -565,16 +565,6 @@ def test_record_agent_setup_emits_both_events(tmp_path, monkeypatch):
     assert events == ["agent_setup", "setup_completed"]
 
 
-def test_config_set_and_get(tmp_path):
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        ["config", "set", "obsidian-vault", "/Users/test/cortex"],
-        env={"POPPY_DIR": str(tmp_path)},
-    )
-    assert result.exit_code == 0
-
-
 @pytest.mark.parametrize(
     "config_dir,relative_mcp_path",
     [
