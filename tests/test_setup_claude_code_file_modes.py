@@ -783,7 +783,6 @@ def test_in_place_token_write_says_what_cannot_be_taken_back(tmp_path, monkeypat
     assert "already had it open can still read the token" in err
 
     # No mode change or reported ACL removal: nothing to report or caveat.
-    monkeypatch.setattr(claude_code_module, "_clear_acl", lambda fd: False)
     claude_code_module.install_mcp_config(tmp_path / "claude", "cursor", daemon=True, daemon_token="test-token")
     assert capsys.readouterr().err == ""
 
@@ -839,7 +838,7 @@ def test_successful_acl_removal_is_reported(tmp_path, monkeypatch, acl_seen):
     monkeypatch.setattr(claude_code_module.subprocess, "run", chmod)
     fd = os.open(path, os.O_RDONLY)
     try:
-        assert claude_code_module._clear_acl(fd) is True
+        assert claude_code_module._clear_acl(fd) is (acl_seen is not False)
         assert len(calls) == 1
         args, kwargs = calls[0]
         assert args == [claude_code_module._MACOS_CHMOD, "-N", f"/dev/fd/{fd}"]
@@ -899,8 +898,6 @@ def test_backup_tightening_refuses_a_symlink_after_the_check(tmp_path, monkeypat
 
 
 def test_tightened_backup_is_not_described_as_private_all_along(tmp_path, monkeypatch, capsys):
-    # Isolate the warning for the old mode from any successful ACL removal.
-    monkeypatch.setattr(claude_code_module, "_clear_acl", lambda fd: False)
     path = _cursor_config_path(tmp_path, monkeypatch)
     path.write_text("{}\n")
     stale = path.with_name(path.name + claude_code_module.CONFIG_BACKUP_SUFFIX)

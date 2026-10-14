@@ -550,7 +550,7 @@ def _clear_acl(fd: int) -> bool:
     ``chmod`` narrows a POSIX ACL's mask, so mode 0600 already shuts out every
     other user.
 
-    Returns whether the removal command ran successfully. This only stops new opens: a
+    Returns whether an ACL was removed, or may have been (presence unknown). This only stops new opens: a
     descriptor another user already holds keeps working.
     """
     if sys.platform != "darwin":
@@ -573,7 +573,7 @@ def _clear_acl(fd: int) -> bool:
             return False
         detail = result.stderr.strip() or f"exit status {result.returncode}"
         raise OSError(f"could not remove its access control list: {detail}")
-    return True
+    return present is not False
 
 
 def _was_readable_by_others(mode: int, *, had_acl: bool) -> bool:
