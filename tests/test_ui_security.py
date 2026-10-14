@@ -123,9 +123,10 @@ def test_csp_disallows_inline_script_and_style(app_client: TestClient) -> None:
     # directive should ever regain 'unsafe-inline'.
     resp = app_client.get("/api/facets")
     csp = resp.headers.get("content-security-policy", "")
-    assert "'unsafe-inline'" not in csp
-    assert "script-src 'self'" in csp
-    assert "style-src 'self'" in csp
+    directives = {parts[0]: parts[1:] for directive in csp.split(";") if (parts := directive.split())}
+    assert directives["script-src"] == ["'self'"]
+    assert directives["style-src"] == ["'self'"]
+    assert directives["form-action"] == ["'self'"]
 
 
 # --- Host allowlist ---
@@ -218,6 +219,11 @@ def test_supersede_rejects_malformed_body_without_content_type(app_client: TestC
 def test_untrusted_host_post_rejected_by_host_check_first(app_client: TestClient) -> None:
     resp = app_client.post("/api/memories/old/restore", headers={"host": "attacker.example.com"})
     assert resp.status_code == 400
+
+
+def test_loopback_host_with_fragment_post_requires_json_content_type(app_client: TestClient) -> None:
+    resp = app_client.post("/api/memories/old/restore", headers={"host": "localhost:7800#"})
+    assert resp.status_code == 415
 
 
 def test_restore_accepts_json_content_type_without_body(app_client: TestClient, tmp_path: Path) -> None:
