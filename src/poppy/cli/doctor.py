@@ -9,6 +9,8 @@ from typing import Any
 
 import click
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
 
 @dataclass
 class _DaemonContext:
@@ -82,7 +84,7 @@ def _is_sendable_header_value(value: str) -> bool:
 
 
 def _client_daemon_problem(ctx: DoctorContext, client_id: str) -> tuple[str, str] | None:
-    # Per-client daemon health, memoised on (port, token). A registration is
+    # Per-client daemon health, memoised on (host, port, auth_header). A registration is
     # healthy only if its URL points at an EXACT loopback host (never a substring
     # like ``127.0.0.1.evil.com``, which would ship the client's token off-box),
     # that specific port answers, AND it accepts THAT
@@ -94,8 +96,6 @@ def _client_daemon_problem(ctx: DoctorContext, client_id: str) -> tuple[str, str
     from poppy.mcp_server.lifecycle import probe_status as _probe_status
 
     poppy_dir = ctx.poppy_dir
-    _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-    _daemon_probe_cache = ctx.daemon.probe_cache
     registration = ctx.daemon.clients.get(client_id)
     if registration is None:
         return None
@@ -153,10 +153,10 @@ def _client_daemon_problem(ctx: DoctorContext, client_id: str) -> tuple[str, str
     # key includes host AND the header. probe_status is TOTAL (any failure →
     # (None, error)), so a broken endpoint never aborts doctor.
     key = (host, port, auth_header)
-    if key not in _daemon_probe_cache:
+    if key not in ctx.daemon.probe_cache:
         payload, error = _probe_status(poppy_dir, port, host=host, token=None, auth_header=auth_header)
-        _daemon_probe_cache[key] = (payload is not None, error)
-    reachable, error = _daemon_probe_cache[key]
+        ctx.daemon.probe_cache[key] = (payload is not None, error)
+    reachable, error = ctx.daemon.probe_cache[key]
     if reachable:
         return None
     if error and "401" in error and auth_header is None:
@@ -240,10 +240,21 @@ def _poppy_registered(settings: dict) -> bool:
 
 
 def check_executable(ctx: DoctorContext) -> None:
+    from poppy.mcp_server.lifecycle import resolve_poppy_executable
+
     line = ctx.line
 
-    poppy_bin = shutil.which("poppy")
-    line("poppy executable", "OK" if poppy_bin else "FAIL", poppy_bin or "not on PATH")
+    poppy_bin = resolve_poppy_executable()
+    resolved = poppy_bin != "poppy"
+    line("poppy executable", "OK" if resolved else "FAIL", poppy_bin if resolved else "not on PATH")
+    path_bin = shutil.which("poppy")
+    if path_bin and os.path.realpath(path_bin) != os.path.realpath(poppy_bin):
+        line(
+            "poppy on PATH",
+            "WARN",
+            f"another `poppy` sits earlier on PATH at {path_bin}",
+            hint="commands typed in a shell will use that one",
+        )
 
 
 def check_storage(ctx: DoctorContext) -> None:
@@ -360,12 +371,10 @@ def check_custom_redaction(ctx: DoctorContext) -> None:
 
 
 def _prepare_daemon(ctx: DoctorContext) -> None:
-    from poppy.setup.claude_code import get_claude_config_dir
+    from poppy.mcp_server.lifecycle import inspect_daemon
+    from poppy.setup.claude_code import get_claude_config_dir, poppy_daemon_registration
 
     poppy_dir = ctx.poppy_dir
-
-    from poppy.mcp_server.lifecycle import inspect_daemon
-    from poppy.setup.claude_code import poppy_daemon_registration
 
     # Which clients are wired to the shared HTTP daemon (`poppy setup <client>
     # --daemon`), and the bearer token baked into each client's own config. A
@@ -407,7 +416,6 @@ def check_daemon(ctx: DoctorContext) -> None:
     from poppy.cli import main as _main
 
     line = ctx.line
-    _prepare_daemon(ctx)
     daemon_state = ctx.daemon.state
     daemon_clients = ctx.daemon.clients
     dead_daemon_clients = ctx.daemon.dead_clients
@@ -1220,6 +1228,7 @@ def run_doctor() -> None:
     check_storage(ctx)
     check_trags_key(ctx)
     check_custom_redaction(ctx)
+    _prepare_daemon(ctx)
     check_daemon(ctx)
     check_version(ctx)
     check_encryption(ctx)
