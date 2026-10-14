@@ -3847,8 +3847,11 @@ def test_client_wraps_invalid_json_response(operation, status, unknown_outcome):
     assert len(str(exc.value).splitlines()) == 1
 
 
-@pytest.mark.parametrize("operation", ["upsert", "get", "list_since", "replace"])
-@pytest.mark.parametrize("body", [None, [], "row", {}, {"id": "m1"}])
+@pytest.mark.parametrize(
+    "operation, body",
+    [(op, body) for op in ("upsert", "get", "list_since", "replace") for body in (None, [], "row", {"id": 1})]
+    + [(op, body) for op in ("get", "list_since") for body in ({}, {"id": "m1"})],
+)
 def test_client_rejects_wrong_shape_json(operation, body):
     import httpx
 
@@ -3870,6 +3873,39 @@ def test_client_rejects_wrong_shape_json(operation, body):
     assert "expected" in str(exc.value)
     assert exc.value.status_code == status
     assert exc.value.outcome_unknown == (operation in {"upsert", "replace"})
+
+
+def test_push_accepts_id_only_upsert_reply(tmp_path):
+    """The server answers a write it could not re-read with 200 {"id": ...}; that is a success."""
+    import httpx
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("m1", updated=_NOW))
+
+    def handler(request):
+        return httpx.Response(200, json={"id": json.loads(request.content)["id"]})
+
+    with _wired_client(handler) as client:
+        result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+
+    assert result.sent_live == 1
+    assert result.errors == 0
+    remote = load(tmp_path).remotes[client.base_url]
+    assert remote.last_pushed_at is not None
+    assert "push" not in remote.errors
+
+
+def test_client_rejects_non_object_upsert_reply():
+    import httpx
+
+    from poppy.sync.client import TragsResponseError
+
+    with _wired_client(lambda request: httpx.Response(200, json=[])) as client:
+        with pytest.raises(TragsResponseError) as exc:
+            client.upsert({"id": "m1"})
+
+    assert exc.value.outcome_unknown
+    assert len(str(exc.value).splitlines()) == 1
 
 
 @pytest.mark.parametrize("command", ["pull", "run"])

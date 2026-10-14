@@ -193,7 +193,7 @@ class TragsClient:
         """POST /api/memories. Returns (row, created) — True if HTTP 201."""
         resp = self._send("POST", f"{self.base_url}/api/memories", json=memory)
         self._raise_for_status(resp)
-        return self._response_json(resp, outcome_unknown=True), resp.status_code == 201
+        return self._response_json(resp, outcome_unknown=True, write=True), resp.status_code == 201
 
     def get(self, memory_id: str) -> dict | None:
         """GET /api/memories/{id}. Returns None on 404."""
@@ -260,7 +260,7 @@ class TragsClient:
         if resp.status_code == 409:
             raise TragsConflictError(resp.text, status_code=resp.status_code)
         self._raise_for_status(resp)
-        return self._response_json(resp, outcome_unknown=True)
+        return self._response_json(resp, outcome_unknown=True, write=True)
 
     def delete(self, memory_id: str) -> bool:
         """DELETE /api/memories/{id}. Returns False on 404."""
@@ -293,7 +293,9 @@ class TragsClient:
             ) from exc
 
     @staticmethod
-    def _response_json(resp: httpx.Response, *, outcome_unknown: bool = False, page: bool = False) -> dict:
+    def _response_json(
+        resp: httpx.Response, *, outcome_unknown: bool = False, page: bool = False, write: bool = False
+    ) -> dict:
         try:
             body = resp.json()
         except ValueError as exc:
@@ -312,6 +314,13 @@ class TragsClient:
                 and "next_cursor" in body
                 and (body["next_cursor"] is None or isinstance(body["next_cursor"], str))
             )
+        elif write:
+            # A write's reply is not read back, and the server may answer a
+            # successful write with just {"id": ...} when it cannot re-read the
+            # row. Demanding a full row here would turn that success into a
+            # failed push that freezes the watermark and retries for ever.
+            expected = "a JSON object whose id, if present, is a string"
+            valid = isinstance(body, dict) and ("id" not in body or isinstance(body["id"], str))
         else:
             expected = "a memory object with string id, content, memory_type, created_at and updated_at fields"
             valid = _is_memory_row(body)
