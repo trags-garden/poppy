@@ -40,5 +40,5 @@ qa-store*/
 :memory:.ses
 
 # Agent context files and local code-understanding caches; never committed
-AGENTS.md
-.ua/
+/AGENTS.md
+/.ua/
