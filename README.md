@@ -12,7 +12,7 @@ them when they're relevant. No cloud, no API keys, no per-query cost.
 pipx install poppy-memory
 ```
 
-Then wire up your agent:
+Then wire up your agent, and restart it:
 
 ```bash
 poppy setup claude-code   # or: claude-desktop, cursor, vscode, windsurf, codex,
@@ -20,9 +20,70 @@ poppy setup claude-code   # or: claude-desktop, cursor, vscode, windsurf, codex,
 ```
 
 The package on PyPI is `poppy-memory`; the command it installs is `poppy`.
-Prefer uv? Use `uv tool install poppy-memory`. Or run the one-line installer,
-`curl -fsSL https://trags.ai/install/poppy | sh`. It picks pipx or uv for you
-and falls back to its own virtualenv if neither is there.
+No pipx? See [Install](#install) for the other ways in, and for the one PATH
+check that saves most first-day trouble.
+
+## First ten minutes
+
+The order a new user walks, each step linking to its section:
+
+1. **Install** Poppy with pipx, uv, or the one-line installer. See
+   [Install](#install).
+2. **Check that `poppy` is on your PATH**: `command -v poppy` should print a
+   path. See [Check your PATH](#check-your-path).
+3. **Wire up your agent** with `poppy setup <client>`. See
+   [Supported clients](#supported-clients).
+4. **Restart the agent** so it loads the MCP server and hooks. See
+   [Restart the agent after setup](#restart-the-agent-after-setup).
+5. **Store and recall once** with `poppy remember` and `poppy recall`. See
+   [What it does](#what-it-does).
+6. **Pair with Trags** (optional) with `poppy setup trags`, and approve it in
+   the browser within five minutes. See
+   [Sync to Trags](#sync-to-trags-optional).
+7. **Install the daemon** (optional) with `poppy daemon install`. See
+   [MCP daemon](#mcp-daemon).
+8. **Run `poppy doctor`** to check engine, storage, MCP config, and hooks. See
+   [Commands](#commands).
+
+## Install
+
+Use the first option your machine already has:
+
+- **pipx**: `pipx install poppy-memory`. Needs pipx and Python 3.11 or newer.
+- **uv**: `uv tool install poppy-memory`. Needs only uv, which fetches its own
+  Python. A fresh Mac has neither pipx nor uv.
+- **One-line installer**: `curl -fsSL https://trags.ai/install/poppy | sh`.
+  Needs Python 3.11 or newer. It uses pipx or uv when it finds one and
+  otherwise installs into its own virtualenv.
+
+### Check your PATH
+
+pipx and uv put the `poppy` command in `~/.local/bin`. A fresh Mac often does
+not have that folder on its PATH, and the install still succeeds: uv only
+prints a warning. Check:
+
+```bash
+command -v poppy    # prints a path such as /Users/you/.local/bin/poppy
+```
+
+If it prints nothing, add the folder to your shell profile and open a new
+terminal (`pipx ensurepath` or `uv tool update-shell` do the same):
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+```
+
+This matters for your agent too. The hooks call `poppy` by name, so an agent
+that cannot find it fails every hook with `poppy: command not found`. An agent
+keeps the PATH it started with, so restart it after you fix PATH. `poppy doctor`
+checks only the PATH of the terminal you run it in, so it can report the hooks
+as fine while your agent still cannot find `poppy`.
+
+### Restart the agent after setup
+
+`poppy setup <client>` ends with `Restart <client> to activate.` Do that.
+Agents read their MCP servers and hooks only when they start, so a session
+that was already open does not see Poppy until you quit and reopen it.
 
 ## What it does
 
@@ -381,6 +442,12 @@ If you want your memories searchable across machines and inside the Trags
 web app, run `poppy setup trags` to onboard. Sync is opt-in and additive;
 your local store remains the source of truth.
 
+`poppy setup trags` opens a browser page and shows a one-time code. Approve it
+within five minutes: the code expires after that, and the command stops
+waiting at the same time. If you see `Setup code expired or already used` or
+`Timed out waiting for authorization`, run `poppy setup trags` again for a
+fresh code.
+
 Once your Trags key is set up, by default each local change (a new memory, an
 edit, a forget, a restore) starts a background sync: Poppy pulls changes from
 Trags, then pushes yours. `poppy sync run` does the same by hand. A push sends
@@ -423,19 +490,32 @@ Three limits apply:
   memories created after the upgrade, and stores that had no Trags remote at
   upgrade time.
 
-The Trags API key goes into your operating system's keychain only when Poppy can
-write it and read it back in the same process; otherwise it stays in plaintext
-in `config.json` (which stays `0600`). Keys are resolved in this order: the
-`POPPY_TRAGS_API_KEY` environment variable, then a plaintext key in `config.json`,
-then the OS keychain. An existing plaintext key is moved into the keychain
-automatically and scrubbed from the file the first time a Poppy process can
-write it and read it back from the keychain. On macOS, processes started outside
-a login session (launchd Background agents, cron, editor background jobs) can
-often write the login keychain but not read it, so set `POPPY_TRAGS_API_KEY`
-for those processes; captures they make are still pushed by the next sync a
-login-session process triggers, such as the daemon. This is
-local secret hygiene, not zero-knowledge: anything running as your user that
-can read the keychain can read the key.
+After pairing, the Trags API key normally lives in your operating system's
+keychain, and `config.json` holds no key. On macOS that is the login keychain,
+under the service `poppy-memory`, with an account name that starts with
+`trags-api-key:`. Check that it is there without printing the key:
+
+```bash
+security find-generic-password -s poppy-memory    # shows attributes only
+```
+
+The key goes into the keychain only when Poppy can write it and read it back
+in the same process; otherwise it stays in plaintext in `config.json` (which
+stays `0600`), and setup tells you which one happened. Keys are resolved in
+this order: the `POPPY_TRAGS_API_KEY` environment variable, then a plaintext
+key in `config.json`, then the OS keychain. An existing plaintext key is moved
+into the keychain automatically and scrubbed from the file the first time a
+Poppy process can write it and read it back from the keychain.
+
+On macOS, the daemon that `poppy daemon install` sets up is a LaunchAgent in
+`~/Library/LaunchAgents` that runs in your login session. It reads the key
+from the keychain, also after you log out and back in, so do not set
+`POPPY_TRAGS_API_KEY` for it. Processes started outside a login session, such
+as cron jobs, SSH sessions, and editor background jobs, can often write the
+login keychain but not read it. Set `POPPY_TRAGS_API_KEY` for those; captures
+they make are still pushed by the next sync a login-session process triggers,
+such as the daemon. This is local secret hygiene, not zero-knowledge: anything
+running as your user that can read the keychain can read the key.
 
 ## Browse memories
 
@@ -486,6 +566,12 @@ sign of a coding agent or a CI runner driving that terminal. Hooks, the MCP
 server (`poppy serve`), daemon commands, detached workers, `--json` output,
 `--help` and any piped or redirected run are never interrupted by it, and
 nothing is sent from any of them while the question is unanswered.
+
+So if you only ever run Poppy through a coding agent, you never see the
+question: the agent's terminal counts as a program, not a person. Telemetry
+then stays off, and `poppy telemetry status` shows `off (not answered yet)`.
+Run a command such as `poppy stats` in a plain terminal to be asked, or answer
+directly with `poppy telemetry on` or `poppy telemetry off`.
 
 Your answer persists in `~/.poppy/config.json`, and either answer counts, so
 you are asked once. Change your mind at any time, or answer without waiting
