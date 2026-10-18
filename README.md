@@ -51,7 +51,7 @@ Use the first option your machine already has:
 
 - **pipx**: `pipx install poppy-memory`. Needs pipx and Python 3.11 or newer.
 - **uv**: `uv tool install poppy-memory`. Needs only uv, which fetches its own
-  Python. A fresh Mac has neither pipx nor uv, and uv is the quicker one to add.
+  Python. A fresh Mac has neither pipx nor uv.
 - **One-line installer**: `curl -fsSL https://trags.ai/install/poppy | sh`.
   Needs Python 3.11 or newer. It uses pipx or uv when it finds one and
   otherwise installs into its own virtualenv.
@@ -446,8 +446,7 @@ your local store remains the source of truth.
 within five minutes: the code expires after that, and the command stops
 waiting at the same time. If you see `Setup code expired or already used` or
 `Timed out waiting for authorization`, run `poppy setup trags` again for a
-fresh code. Creating your Trags account first leaves the five minutes for the
-approval itself.
+fresh code.
 
 Once your Trags key is set up, by default each local change (a new memory, an
 edit, a forget, a restore) starts a background sync: Poppy pulls changes from
