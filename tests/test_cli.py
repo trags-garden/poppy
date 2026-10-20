@@ -1360,6 +1360,31 @@ def test_doctor_fails_when_hook_command_cannot_resolve(tmp_path, client):
     assert doctor.exit_code != 0
 
 
+def test_doctor_warns_when_hooks_use_bare_poppy_that_resolves_here(tmp_path):
+    """Doctor's PATH is the terminal's, so a bare `poppy` that resolves for doctor
+    may still be missing for the client: WARN and point at setup."""
+    runner = CliRunner()
+    env = _fresh_setup_env(tmp_path)
+    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    assert runner.invoke(cli, ["setup", "claude-code"], env=env).exit_code == 0
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "poppy").write_text("#!/bin/sh\n")
+    (bin_dir / "poppy").chmod(0o755)
+    settings_path = tmp_path / "claude" / "settings.json"
+    settings = json.loads(settings_path.read_text())
+    for groups in settings["hooks"].values():
+        for group in groups:
+            for h in group["hooks"]:
+                h["command"] = "poppy hook " + h["command"].split(" hook ", 1)[1]
+    settings_path.write_text(json.dumps(settings))
+
+    doctor = runner.invoke(cli, ["doctor"], env={**env, "PATH": str(bin_dir)})
+    assert "hook command: WARN" in doctor.output, doctor.output
+    assert "hooks still use a bare `poppy`; run `poppy setup claude-code` to pin the full path" in doctor.output
+
+
 def test_hook_command_problem_checks_absolute_paths(tmp_path):
     from poppy.cli.doctor import hook_command_problem
 

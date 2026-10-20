@@ -212,10 +212,61 @@ def test_install_pre_tool_use_hook_only_rewrites_poppy_command_in_mixed_group(tm
     install_pre_tool_use_hook(tmp_path)
 
     # The group may be user-owned, so its matcher and the user's hook stay as
-    # written; only Poppy's own command moves to the resolved executable.
+    # written; only Poppy's own command moves to the resolved executable. Poppy
+    # has no group of its own with the current matcher, so one is added.
     group = settings["hooks"]["PreToolUse"][0]
     group["hooks"][0]["command"] = hook_cmd(tmp_path, "pre-tool-use")
+    settings["hooks"]["PreToolUse"].append(
+        {
+            "matcher": "Edit|Write|NotebookEdit",
+            "hooks": [{"type": "command", "command": hook_cmd(tmp_path, "pre-tool-use")}],
+        }
+    )
     assert json.loads(settings_path.read_text()) == settings
+
+
+@pytest.mark.parametrize(
+    "user_group",
+    [
+        {"matcher": "Read", "hooks": ["poppy", "user"]},
+        {"matcher": "Bash", "hooks": ["user", "poppy"]},
+    ],
+    ids=["poppy-first", "user-first"],
+)
+def test_install_pre_tool_use_hook_keeps_user_group_and_poppy_group(tmp_path, user_group):
+    """A user's group that also runs Poppy, next to Poppy's own group: both stay,
+    with their matchers, and both point at the resolved executable."""
+    settings_path = tmp_path / "settings.json"
+
+    def hooks(names, command):
+        return [{"type": "command", "command": command if n == "poppy" else "user's hook"} for n in names]
+
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": user_group["matcher"],
+                            "hooks": hooks(user_group["hooks"], "poppy hook pre-tool-use"),
+                        },
+                        {"matcher": "Edit|Write|NotebookEdit", "hooks": hooks(["poppy"], "poppy hook pre-tool-use")},
+                    ]
+                }
+            }
+        )
+    )
+
+    install_pre_tool_use_hook(tmp_path)
+    first = settings_path.read_text()
+    install_pre_tool_use_hook(tmp_path)
+    assert settings_path.read_text() == first
+
+    resolved = hook_cmd(tmp_path, "pre-tool-use")
+    assert json.loads(first)["hooks"]["PreToolUse"] == [
+        {"matcher": user_group["matcher"], "hooks": hooks(user_group["hooks"], resolved)},
+        {"matcher": "Edit|Write|NotebookEdit", "hooks": hooks(["poppy"], resolved)},
+    ]
 
 
 def test_rerun_setup_replaces_bare_hook_entries_with_one_absolute_entry(tmp_path):
@@ -229,13 +280,20 @@ def test_rerun_setup_replaces_bare_hook_entries_with_one_absolute_entry(tmp_path
         "SessionEnd": "session-end",
         "PostCompact": "post-compact",
     }
+    matchers = {"PreToolUse": "Edit|Write|NotebookEdit"}
     settings_path.write_text(
         json.dumps(
             {
                 "hooks": {
                     event: [
-                        {"matcher": "", "hooks": [{"type": "command", "command": f"poppy hook {sub}"}]},
-                        {"matcher": "", "hooks": [{"type": "command", "command": f"poppy hook {sub}"}]},
+                        {
+                            "matcher": matchers.get(event, ""),
+                            "hooks": [{"type": "command", "command": f"poppy hook {sub}"}],
+                        },
+                        {
+                            "matcher": matchers.get(event, ""),
+                            "hooks": [{"type": "command", "command": f"poppy hook {sub}"}],
+                        },
                     ]
                     for event, sub in bare.items()
                 }
@@ -252,6 +310,86 @@ def test_rerun_setup_replaces_bare_hook_entries_with_one_absolute_entry(tmp_path
     for event, sub in bare.items():
         commands = [h["command"] for group in hooks[event] for h in group["hooks"]]
         assert commands == [hook_cmd(tmp_path, sub)], event
+
+
+def test_rerun_codex_hooks_replaces_bare_entries_with_one_absolute_entry(tmp_path):
+    hooks_path = tmp_path / "hooks.json"
+    events = {"SessionStart": "session-start", "UserPromptSubmit": "user-prompt-submit", "Stop": "stop"}
+    bare_group = {
+        "PreToolUse": {"matcher": "apply_patch", "hooks": [{"type": "command", "command": "poppy hook pre-tool-use"}]}
+    }
+    for event, sub in events.items():
+        bare_group[event] = {"matcher": "", "hooks": [{"type": "command", "command": f"poppy hook {sub}"}]}
+    hooks_path.write_text(json.dumps({"hooks": {event: [group, group] for event, group in bare_group.items()}}))
+
+    install_codex_hooks(tmp_path)
+    first = hooks_path.read_text()
+    install_codex_hooks(tmp_path)
+    assert hooks_path.read_text() == first
+
+    hooks = json.loads(first)["hooks"]
+    for event, sub in {**events, "PreToolUse": "pre-tool-use"}.items():
+        assert [h["command"] for g in hooks[event] for h in g["hooks"]] == [hook_cmd(tmp_path, sub)], event
+    assert is_codex_hooks_installed(tmp_path)
+
+
+def test_rerun_cursor_hooks_replaces_bare_entries_with_one_absolute_entry(tmp_path):
+    hooks_path = tmp_path / "hooks.json"
+    events = {
+        "sessionStart": "session-start",
+        "beforeSubmitPrompt": "user-prompt-submit",
+        "preToolUse": "pre-tool-use",
+        "sessionEnd": "session-end",
+        "preCompact": "post-compact",
+    }
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "hooks": {
+                    e: [{"command": f"poppy hook {sub}"}, {"command": f"poppy hook {sub}"}] for e, sub in events.items()
+                },
+            }
+        )
+    )
+
+    install_cursor_hooks(tmp_path)
+    first = hooks_path.read_text()
+    install_cursor_hooks(tmp_path)
+    assert hooks_path.read_text() == first
+
+    hooks = json.loads(first)["hooks"]
+    for event, sub in events.items():
+        assert [entry["command"] for entry in hooks[event]] == [hook_cmd(tmp_path, sub)], event
+    assert is_cursor_hooks_installed(tmp_path)
+
+
+def test_hooks_pin_the_path_shim_and_recognise_versioned_targets(tmp_path, monkeypatch):
+    """`~/.local/bin/poppy` is often a symlink to a versioned file. Hooks pin the
+    shim, and an entry naming the versioned target is still recognised, so
+    repeated setups never pile up extra entries."""
+    target = tmp_path / "opt" / "poppy-0.3.3"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    shim = tmp_path / "bin" / "poppy"
+    shim.parent.mkdir()
+    shim.symlink_to(target)
+    config = tmp_path / "claude"
+    config.mkdir()
+
+    # An older setup pinned the symlink target; then setup runs three times.
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: str(target))
+    install_for_client(client="claude-code", claude_config_dir=config)
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: str(shim))
+    for _ in range(3):
+        install_for_client(client="claude-code", claude_config_dir=config)
+
+    hooks = json.loads((config / "settings.json").read_text())["hooks"]
+    for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd", "PostCompact"):
+        commands = [h["command"] for g in hooks[event] for h in g["hooks"]]
+        assert len(commands) == 1, event
+        assert shlex.split(commands[0])[0] == str(shim)
 
 
 def test_hooks_and_mcp_entry_use_the_same_quoted_executable(tmp_path, monkeypatch):

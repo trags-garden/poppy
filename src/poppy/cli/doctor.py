@@ -241,7 +241,7 @@ def hook_command_problem(command: str) -> str | None:
 
 def check_hook_commands(ctx: DoctorContext, hooks_path: Path, setup_cmd: str) -> None:
     """FAIL when a Poppy hook in ``hooks_path`` names an executable the shell cannot find."""
-    from poppy.setup.claude_code import poppy_hook_commands_in, split_hook_command
+    from poppy.setup.claude_code import get_poppy_executable, poppy_hook_commands_in, split_hook_command
 
     if not hooks_path.exists():
         return
@@ -253,6 +253,15 @@ def check_hook_commands(ctx: DoctorContext, hooks_path: Path, setup_cmd: str) ->
         if problem:
             ctx.line("hook command", "FAIL", problem, hint=f"run `{setup_cmd}` to rewrite the hooks with the full path")
             return
+    # Doctor's PATH is the terminal's, not the client's, so a bare `poppy` that
+    # resolves here can still be missing when the client runs the hook.
+    if get_poppy_executable() != "poppy" and any((split_hook_command(c) or [""])[0] == "poppy" for c in commands):
+        ctx.line(
+            "hook command",
+            "WARN",
+            f"hooks still use a bare `poppy`; run `{setup_cmd}` to pin the full path",
+        )
+        return
     first = split_hook_command(commands[0]) or [commands[0]]
     ctx.line("hook command", "OK", first[0])
 

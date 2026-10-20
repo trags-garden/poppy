@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Setup no longer changes another file's permissions when a backup is replaced by a symlink while setup runs.
 - `poppy forget` now reports unknown memory IDs as errors, matching `poppy edit`.
 - `poppy sync run` now suggests `poppy setup trags` before manual API-key configuration when unpaired.
-- Setup now writes hooks with the full path to `poppy`, like the MCP entry, so they work when `poppy` is not on the agent's PATH. Re-running setup replaces older hook entries, and `poppy doctor` fails when a hook's command cannot be found.
+- Setup now writes hooks with the full path to `poppy`, like the MCP entry, so they work when `poppy` is not on the agent's PATH. Re-running setup replaces older hook entries, and `poppy doctor` fails when a hook's command cannot be found. Codex asks once to approve the rewritten hooks after setup is re-run.
 - `poppy doctor` now reports the running executable and warns when shell commands would use a different Poppy install on PATH.
 - Concurrent settings changes no longer overwrite each other or erase a telemetry consent answer.
 - Automatic capture now cleans up old unused lock files and waits for an active capture at session end so the final turns are saved.

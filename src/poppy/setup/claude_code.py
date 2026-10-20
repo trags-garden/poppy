@@ -115,10 +115,11 @@ def get_claude_config_dir() -> Path:
     return Path.home() / ".claude"
 
 
-def get_poppy_executable() -> str:
+def get_poppy_executable(*, resolve_symlinks: bool = True) -> str:
     found = shutil.which("poppy")
     if found:
-        return str(Path(found).resolve())
+        path = Path(found)
+        return str(path.resolve() if resolve_symlinks else path.absolute())
 
     sibling = Path(sys.executable).parent / "poppy"
     if sibling.is_file():
@@ -1293,8 +1294,9 @@ def _hook_tail(command: object) -> tuple[str, ...] | None:
     argv = split_hook_command(command)
     if not argv or len(argv) < 3 or argv[1] != "hook":
         return None
-    name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
-    if name not in ("poppy", "poppy.exe"):
+    name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    # A pinned path can point at a versioned install such as `poppy-0.3.3`.
+    if name != "poppy" and not name.startswith("poppy-"):
         return None
     return tuple(argv[1:])
 
@@ -1315,9 +1317,11 @@ def poppy_hook_command(canonical: str) -> str:
     Clients run hooks through a shell with their own PATH, which on a fresh
     account often lacks the directory poppy was installed into. Using the same
     resolved executable as the MCP entry keeps hooks working there too. The
-    path is quoted so install locations with spaces survive the shell.
+    path is quoted so install locations with spaces survive the shell. The
+    PATH hit is kept unresolved: it is usually a stable shim, while its symlink
+    target changes name on every upgrade.
     """
-    executable = get_poppy_executable()
+    executable = get_poppy_executable(resolve_symlinks=False)
     quoted = subprocess.list2cmdline([executable]) if os.name == "nt" else shlex.quote(executable)
     return " ".join([quoted, *canonical.split()[1:]])
 
@@ -1626,36 +1630,45 @@ def _install_hook(claude_dir: Path, event: str) -> Path:
     matcher, canonical = _HOOK_DEFS[event]
     command = poppy_hook_command(canonical)
 
-    # Keep the first Poppy entry for this event (bare or absolute form), point
-    # it at the current command, and drop any later copies. A single-command
-    # group is Poppy-owned, so its matcher is migrated too; a mixed group may be
-    # user-owned, so only the Poppy command inside it changes.
-    found = False
+    groups = settings["hooks"][event]
     changed = False
-    groups: list[dict] = []
-    for group in settings["hooks"][event]:
-        commands = group.get("hooks", [])
-        kept: list[dict] = []
-        for h in commands:
-            if not _is_poppy_hook(h.get("command"), canonical):
-                kept.append(h)
-            elif found:
-                changed = True
-            else:
-                found = True
-                if h.get("command") != command:
-                    h = {**h, "command": command}
-                    changed = True
-                kept.append(h)
-                if len(commands) == 1 and group.get("matcher") != matcher:
-                    group = {**group, "matcher": matcher}
-                    changed = True
-        if kept or not commands:
-            groups.append(group if kept == commands else {**group, "hooks": kept})
-    settings["hooks"][event] = groups
 
-    if not found:
-        groups.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
+    # Point every Poppy command at the current executable wherever it appears,
+    # including groups that also hold the user's hooks. Matchers stay as written.
+    for group in groups:
+        commands = group.get("hooks", [])
+        for index, h in enumerate(commands):
+            if _is_poppy_hook(h.get("command"), canonical) and h.get("command") != command:
+                commands[index] = {**h, "command": command}
+                changed = True
+
+    def owned(group: dict) -> bool:
+        commands = group.get("hooks", [])
+        return len(commands) == 1 and _is_poppy_hook(commands[0].get("command"), canonical)
+
+    # A single-command group is Poppy's own. If none uses the current matcher,
+    # move an older one to it rather than adding a second Poppy group.
+    if not any(owned(g) and g.get("matcher") == matcher for g in groups):
+        stale = next((g for g in groups if owned(g)), None)
+        if stale is not None:
+            stale["matcher"] = matcher
+            changed = True
+
+    # Drop exact copies of Poppy's own groups, which older setups could leave.
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for group in groups:
+        if owned(group):
+            key = json.dumps(group, sort_keys=True)
+            if key in seen:
+                changed = True
+                continue
+            seen.add(key)
+        deduped.append(group)
+    settings["hooks"][event] = deduped
+
+    if not any(owned(g) and g.get("matcher") == matcher for g in deduped):
+        deduped.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
         changed = True
     if changed:
         _write_json(settings_path, settings, target=target)
