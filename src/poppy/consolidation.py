@@ -205,8 +205,11 @@ def call_host_cli(
     elif cli == "cursor-agent":
         cmd = ["cursor-agent", "-p"]
     elif cli == "codex":
-        # codex exec takes a prompt arg; output is plain text.
-        cmd = ["codex", "exec", prompt]
+        # codex exec takes a prompt arg; output is plain text. The extraction only
+        # needs to read the prompt and print JSON, so it never gets write access,
+        # whatever the user's Codex config says. Codex also refuses to run outside
+        # a git repository unless told this is fine.
+        cmd = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt]
     elif cli == "gemini":
         cmd = ["gemini", "-p"]
     else:
@@ -216,7 +219,18 @@ def call_host_cli(
     child_env = {**os.environ, "POPPY_SUPPRESS_HOOKS": "1"}
     try:
         if cli == "codex":
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=child_env)
+            # Codex also reads extra prompt text from stdin when it is open, so
+            # close it. The working directory is left alone: moving it would make
+            # Poppy's data folder Codex's writable root under some configs and
+            # break codex binaries found through relative PATH entries.
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                env=child_env,
+            )
         else:
             proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout_s, env=child_env)
     except subprocess.TimeoutExpired:
