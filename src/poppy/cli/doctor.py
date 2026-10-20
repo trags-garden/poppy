@@ -255,7 +255,9 @@ def check_hook_commands(ctx: DoctorContext, hooks_path: Path, setup_cmd: str) ->
             return
     # Doctor's PATH is the terminal's, not the client's, so a bare `poppy` that
     # resolves here can still be missing when the client runs the hook.
-    if get_poppy_executable() != "poppy" and any((split_hook_command(c) or [""])[0] == "poppy" for c in commands):
+    if get_poppy_executable() != "poppy" and any(
+        (split_hook_command(c) or [""])[0].lower() in ("poppy", "poppy.exe") for c in commands
+    ):
         ctx.line(
             "hook command",
             "WARN",

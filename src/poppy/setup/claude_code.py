@@ -19,6 +19,7 @@ import functools
 import json
 import locale
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -123,7 +124,7 @@ def get_poppy_executable(*, resolve_symlinks: bool = True) -> str:
 
     sibling = Path(sys.executable).parent / "poppy"
     if sibling.is_file():
-        return str(sibling.resolve())
+        return str(sibling.resolve() if resolve_symlinks else sibling.absolute())
 
     return "poppy"
 
@@ -812,7 +813,7 @@ def _mcp_entry(source: str = "mcp", *, daemon: bool = False, port: int = 7679, t
     # Tag memories from this server with the client name (e.g. "claude-code")
     # rather than the generic "mcp", so the source is meaningful when browsing.
     entry = {
-        "command": get_poppy_executable(),
+        "command": get_poppy_executable(resolve_symlinks=False),
         "args": ["serve", "--source", source],
     }
     if source != "gemini":
@@ -1023,7 +1024,7 @@ def _install_codex_mcp_config(
         headers["Authorization"] = f"Bearer {daemon_token}"
         poppy["http_headers"] = headers
     else:
-        poppy["command"] = get_poppy_executable()
+        poppy["command"] = get_poppy_executable(resolve_symlinks=False)
         poppy["args"] = ["serve", "--source", "codex"]
     mcp_servers["poppy"] = poppy
 
@@ -1271,6 +1272,9 @@ assert _CURSOR_HOOK_DEFS.keys() <= CURSOR_DOCUMENTED_HOOK_EVENTS
 _ALL_POPPY_HOOK_COMMANDS = {command for _matcher, command in (*_HOOK_DEFS.values(), *_CODEX_HOOK_DEFS.values())}
 
 
+_VERSIONED_POPPY_NAME = re.compile(r"poppy[-_.]v?\d")
+
+
 def split_hook_command(command: object) -> list[str] | None:
     """Split a hook command into argv the way the client's shell would, or None."""
     if not isinstance(command, str):
@@ -1295,8 +1299,9 @@ def _hook_tail(command: object) -> tuple[str, ...] | None:
     if not argv or len(argv) < 3 or argv[1] != "hook":
         return None
     name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
-    # A pinned path can point at a versioned install such as `poppy-0.3.3`.
-    if name != "poppy" and not name.startswith("poppy-"):
+    # A pinned path can point at a versioned build such as `poppy-0.3.3` or
+    # `poppy_v0.3.3`. Other names, like a user's `poppy-debug` wrapper, are not ours.
+    if name != "poppy" and not _VERSIONED_POPPY_NAME.match(name):
         return None
     return tuple(argv[1:])
 

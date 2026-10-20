@@ -192,7 +192,7 @@ def test_install_pre_tool_use_hook_migrates_owned_stale_matcher(tmp_path):
     assert settings_path.read_text() == after_migration
 
 
-def test_install_pre_tool_use_hook_only_rewrites_poppy_command_in_mixed_group(tmp_path):
+def test_install_pre_tool_use_hook_rewrites_mixed_group_command_and_adds_poppy_group(tmp_path):
     settings_path = tmp_path / "settings.json"
     settings = {
         "hooks": {
@@ -390,6 +390,67 @@ def test_hooks_pin_the_path_shim_and_recognise_versioned_targets(tmp_path, monke
         commands = [h["command"] for g in hooks[event] for h in g["hooks"]]
         assert len(commands) == 1, event
         assert shlex.split(commands[0])[0] == str(shim)
+
+
+def test_hooks_pin_the_python_sibling_shim_when_poppy_is_not_on_path(tmp_path, monkeypatch):
+    """With poppy off PATH, setup falls back to the file next to the running
+    Python. That file can be a symlink to a versioned build; hooks and the MCP
+    entry pin the symlink itself, so repeated setups keep one hook per event."""
+    from poppy.setup.claude_code import poppy_hook_commands_in
+
+    target = tmp_path / "opt" / "bin" / "poppy_v0.3.3"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "poppy").symlink_to(target)
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: None)
+    monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(venv_bin / "python"))
+    config = tmp_path / "claude"
+    config.mkdir()
+
+    for _ in range(3):
+        install_for_client(client="claude-code", claude_config_dir=config)
+
+    settings = json.loads((config / "settings.json").read_text())
+    events = ("SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd", "PostCompact")
+    for event in events:
+        commands = [h["command"] for g in settings["hooks"][event] for h in g["hooks"]]
+        assert len(commands) == 1, event
+        assert shlex.split(commands[0])[0] == str(venv_bin / "poppy")
+        assert is_hook_installed(config, event)
+    assert len(poppy_hook_commands_in(settings)) == len(events)
+    mcp = json.loads((config / ".claude.json").read_text())["mcpServers"]["poppy"]
+    assert mcp["command"] == str(venv_bin / "poppy")
+
+
+def test_hook_recognition_accepts_versioned_builds_but_not_other_poppy_named_tools(tmp_path):
+    settings_path = tmp_path / "settings.json"
+    versioned = {"type": "command", "command": "/opt/bin/poppy_v0.3.3 hook session-start"}
+    wrapper = {"type": "command", "command": "/usr/local/bin/poppy-debug hook session-start"}
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"matcher": "", "hooks": [wrapper]},
+                        {"matcher": "", "hooks": [versioned]},
+                    ]
+                }
+            }
+        )
+    )
+
+    install_session_start_hook(tmp_path)
+
+    groups = json.loads(settings_path.read_text())["hooks"]["SessionStart"]
+    # The user's wrapper is left exactly as written; the versioned build is
+    # recognised as Poppy's and moved to the current executable.
+    assert groups == [
+        {"matcher": "", "hooks": [wrapper]},
+        {"matcher": "", "hooks": [{"type": "command", "command": hook_cmd(tmp_path, "session-start")}]},
+    ]
 
 
 def test_hooks_and_mcp_entry_use_the_same_quoted_executable(tmp_path, monkeypatch):
