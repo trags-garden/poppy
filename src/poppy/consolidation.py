@@ -205,9 +205,11 @@ def call_host_cli(
     elif cli == "cursor-agent":
         cmd = ["cursor-agent", "-p"]
     elif cli == "codex":
-        # codex exec takes a prompt arg; output is plain text. It refuses to run
-        # outside a git repository unless told this is fine.
-        cmd = ["codex", "exec", "--skip-git-repo-check", prompt]
+        # codex exec takes a prompt arg; output is plain text. The extraction only
+        # needs to read the prompt and print JSON, so it never gets write access,
+        # whatever the user's Codex config says. Codex also refuses to run outside
+        # a git repository unless told this is fine.
+        cmd = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt]
     elif cli == "gemini":
         cmd = ["gemini", "-p"]
     else:
@@ -218,14 +220,12 @@ def call_host_cli(
     try:
         if cli == "codex":
             # Codex also reads extra prompt text from stdin when it is open, so
-            # close it. Run from Poppy's own directory, when it exists, so the
-            # extraction never happens inside the user's repository or picks up
-            # that repository's agent instructions.
-            poppy_dir = get_poppy_dir()
+            # close it. The working directory is left alone: moving it would make
+            # Poppy's data folder Codex's writable root under some configs and
+            # break codex binaries found through relative PATH entries.
             proc = subprocess.run(
                 cmd,
                 stdin=subprocess.DEVNULL,
-                cwd=poppy_dir if poppy_dir.is_dir() else None,
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,

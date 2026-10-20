@@ -704,19 +704,12 @@ def _capture_host_cli_run(monkeypatch, cli_name):
     return calls[0]
 
 
-def test_call_host_cli_codex_skips_git_check_and_closes_stdin(monkeypatch, tmp_path):
-    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+def test_call_host_cli_codex_is_read_only_skips_git_check_and_closes_stdin(monkeypatch):
     cmd, kwargs = _capture_host_cli_run(monkeypatch, "codex")
-    assert cmd == ["codex", "exec", "--skip-git-repo-check", "extract"]
+    assert cmd == ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "extract"]
     assert kwargs["stdin"] == subprocess.DEVNULL
-    assert kwargs["cwd"] == tmp_path
+    assert "cwd" not in kwargs
     assert "input" not in kwargs
-
-
-def test_call_host_cli_codex_without_poppy_dir_keeps_current_directory(monkeypatch, tmp_path):
-    monkeypatch.setenv("POPPY_DIR", str(tmp_path / "missing"))
-    _, kwargs = _capture_host_cli_run(monkeypatch, "codex")
-    assert kwargs["cwd"] is None
 
 
 def test_call_host_cli_claude_still_passes_prompt_on_stdin(monkeypatch):
