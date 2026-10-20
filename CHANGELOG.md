@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-21
+
 ### Fixed
 
 - Automatic capture through Codex now works in folders that are not git repositories and runs with a read-only sandbox.
