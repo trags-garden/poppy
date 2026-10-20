@@ -19,6 +19,8 @@ import functools
 import json
 import locale
 import os
+import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -114,14 +116,15 @@ def get_claude_config_dir() -> Path:
     return Path.home() / ".claude"
 
 
-def get_poppy_executable() -> str:
+def get_poppy_executable(*, resolve_symlinks: bool = True) -> str:
     found = shutil.which("poppy")
     if found:
-        return str(Path(found).resolve())
+        path = Path(found)
+        return str(path.resolve() if resolve_symlinks else path.absolute())
 
     sibling = Path(sys.executable).parent / "poppy"
     if sibling.is_file():
-        return str(sibling.resolve())
+        return str(sibling.resolve() if resolve_symlinks else sibling.absolute())
 
     return "poppy"
 
@@ -810,7 +813,7 @@ def _mcp_entry(source: str = "mcp", *, daemon: bool = False, port: int = 7679, t
     # Tag memories from this server with the client name (e.g. "claude-code")
     # rather than the generic "mcp", so the source is meaningful when browsing.
     entry = {
-        "command": get_poppy_executable(),
+        "command": get_poppy_executable(resolve_symlinks=False),
         "args": ["serve", "--source", source],
     }
     if source != "gemini":
@@ -1021,7 +1024,7 @@ def _install_codex_mcp_config(
         headers["Authorization"] = f"Bearer {daemon_token}"
         poppy["http_headers"] = headers
     else:
-        poppy["command"] = get_poppy_executable()
+        poppy["command"] = get_poppy_executable(resolve_symlinks=False)
         poppy["args"] = ["serve", "--source", "codex"]
     mcp_servers["poppy"] = poppy
 
@@ -1269,6 +1272,86 @@ assert _CURSOR_HOOK_DEFS.keys() <= CURSOR_DOCUMENTED_HOOK_EVENTS
 _ALL_POPPY_HOOK_COMMANDS = {command for _matcher, command in (*_HOOK_DEFS.values(), *_CODEX_HOOK_DEFS.values())}
 
 
+_VERSIONED_POPPY_NAME = re.compile(r"poppy[-_.]v?\d")
+
+
+def split_hook_command(command: object) -> list[str] | None:
+    """Split a hook command into argv the way the client's shell would, or None."""
+    if not isinstance(command, str):
+        return None
+    try:
+        if os.name == "nt":
+            return [part.strip('"') for part in shlex.split(command, posix=False)]
+        return shlex.split(command)
+    except ValueError:
+        return None
+
+
+def _hook_tail(command: object) -> tuple[str, ...] | None:
+    """Return the argv after the executable when ``command`` runs a Poppy hook.
+
+    The definitions above hold the bare ``poppy hook <event>`` form, while setup
+    writes the resolved executable in front. Comparing only the tail means both
+    forms are recognised, so re-running setup over an older config replaces its
+    bare entries instead of adding a second copy next to them.
+    """
+    argv = split_hook_command(command)
+    if not argv or len(argv) < 3 or argv[1] != "hook":
+        return None
+    name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+    # A pinned path can point at a versioned build such as `poppy-0.3.3` or
+    # `poppy_v0.3.3`. Other names, like a user's `poppy-debug` wrapper, are not ours.
+    if name != "poppy" and not _VERSIONED_POPPY_NAME.match(name):
+        return None
+    return tuple(argv[1:])
+
+
+def _is_poppy_hook(command: object, canonical: str) -> bool:
+    """True when ``command`` runs the same Poppy hook as ``canonical``, in any form."""
+    tail = _hook_tail(command)
+    return tail is not None and tail == tuple(canonical.split()[1:])
+
+
+def _is_any_poppy_hook(command: object, canonicals: set[str] | frozenset[str]) -> bool:
+    return any(_is_poppy_hook(command, canonical) for canonical in canonicals)
+
+
+def poppy_hook_command(canonical: str) -> str:
+    """The hook command setup writes for a ``poppy hook <event>`` definition.
+
+    Clients run hooks through a shell with their own PATH, which on a fresh
+    account often lacks the directory poppy was installed into. Using the same
+    resolved executable as the MCP entry keeps hooks working there too. The
+    path is quoted so install locations with spaces survive the shell. The
+    PATH hit is kept unresolved: it is usually a stable shim, while its symlink
+    target changes name on every upgrade.
+    """
+    executable = get_poppy_executable(resolve_symlinks=False)
+    quoted = subprocess.list2cmdline([executable]) if os.name == "nt" else shlex.quote(executable)
+    return " ".join([quoted, *canonical.split()[1:]])
+
+
+def poppy_hook_commands_in(settings: object) -> list[str]:
+    """Every Poppy hook command in a Claude Code, Codex or Cursor hooks config."""
+    hooks = settings.get("hooks") if isinstance(settings, MutableMapping) else None
+    if not isinstance(hooks, MutableMapping):
+        return []
+    found: list[str] = []
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, MutableMapping):
+                continue
+            # Claude Code and Codex nest commands in groups; Cursor lists them flat.
+            commands = entry.get("hooks") if isinstance(entry.get("hooks"), list) else [entry]
+            for h in commands:
+                command = h.get("command") if isinstance(h, MutableMapping) else None
+                if _hook_tail(command) is not None and command not in found:
+                    found.append(command)
+    return found
+
+
 def _invalid_hooks_config(path: Path, reason: str) -> CorruptConfigError:
     return CorruptConfigError(
         f"Refusing to overwrite invalid hooks config at {path}: {reason}. Fix or remove it, then re-run `poppy setup`."
@@ -1362,7 +1445,9 @@ def install_cursor_hooks(cursor_home: Path | None = None) -> Path:
             kept: list[object] = []
         elif isinstance(entries, list):
             kept = [
-                entry for entry in entries if not (isinstance(entry, dict) and entry.get("command") in poppy_commands)
+                entry
+                for entry in entries
+                if not (isinstance(entry, dict) and _is_any_poppy_hook(entry.get("command"), poppy_commands))
             ]
         else:
             sys.stderr.write(
@@ -1370,7 +1455,7 @@ def install_cursor_hooks(cursor_home: Path | None = None) -> Path:
                 "skipped installing the Poppy hook there\n"
             )
             continue
-        merged[event] = [*kept, {"command": command}]
+        merged[event] = [*kept, {"command": poppy_hook_command(command)}]
 
     settings["version"] = 1
     settings["hooks"] = merged
@@ -1399,7 +1484,9 @@ def is_cursor_hooks_installed(cursor_home: Path | None = None) -> bool:
         entries = hooks.get(event, [])
         if not isinstance(entries, list):
             return False
-        matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("command") == command]
+        matches = [
+            entry for entry in entries if isinstance(entry, dict) and _is_poppy_hook(entry.get("command"), command)
+        ]
         if len(matches) != 1:
             return False
     return True
@@ -1436,7 +1523,11 @@ def install_codex_hooks(codex_home: Path | None = None) -> Path:
                 kept_groups.append(group)
                 continue
             commands = group["hooks"]
-            kept = [h for h in commands if not isinstance(h, dict) or h.get("command") not in _ALL_POPPY_HOOK_COMMANDS]
+            kept = [
+                h
+                for h in commands
+                if not isinstance(h, dict) or not _is_any_poppy_hook(h.get("command"), _ALL_POPPY_HOOK_COMMANDS)
+            ]
             if len(kept) == len(commands):
                 kept_groups.append(group)  # no poppy commands here — preserve as authored
             elif kept:
@@ -1446,7 +1537,7 @@ def install_codex_hooks(codex_home: Path | None = None) -> Path:
             merged[event] = kept_groups
 
     for event, (matcher, command) in _CODEX_HOOK_DEFS.items():
-        poppy_group = {"matcher": matcher, "hooks": [{"type": "command", "command": command}]}
+        poppy_group = {"matcher": matcher, "hooks": [{"type": "command", "command": poppy_hook_command(command)}]}
         existing = merged.get(event)
         if existing is None:
             merged[event] = [poppy_group]
@@ -1484,7 +1575,7 @@ def is_codex_hooks_installed(codex_home: Path | None = None) -> bool:
             if isinstance(group, dict)
             and group.get("matcher") == matcher
             and isinstance(group.get("hooks"), list)
-            and any(isinstance(h, dict) and h.get("command") == command for h in group["hooks"])
+            and any(isinstance(h, dict) and _is_poppy_hook(h.get("command"), command) for h in group["hooks"])
         ]
         if len(matches) != 1:
             return False
@@ -1504,7 +1595,7 @@ def has_any_cursor_poppy_hook(cursor_home: Path | None = None) -> bool:
     for event, command in _CURSOR_HOOK_DEFS.items():
         entries = hooks.get(event, [])
         if isinstance(entries, list) and any(
-            isinstance(entry, dict) and entry.get("command") == command for entry in entries
+            isinstance(entry, dict) and _is_poppy_hook(entry.get("command"), command) for entry in entries
         ):
             return True
     return False
@@ -1527,7 +1618,7 @@ def has_any_codex_poppy_hook(codex_home: Path | None = None) -> bool:
             if (
                 isinstance(group, dict)
                 and isinstance(group.get("hooks"), list)
-                and any(isinstance(h, dict) and h.get("command") == command for h in group["hooks"])
+                and any(isinstance(h, dict) and _is_poppy_hook(h.get("command"), command) for h in group["hooks"])
             ):
                 return True
     return False
@@ -1541,31 +1632,51 @@ def _install_hook(claude_dir: Path, event: str) -> Path:
     settings.setdefault("hooks", {})
     settings["hooks"].setdefault(event, [])
 
-    matcher, command = _HOOK_DEFS[event]
-    poppy_hooks = [{"type": "command", "command": command}]
+    matcher, canonical = _HOOK_DEFS[event]
+    command = poppy_hook_command(canonical)
 
-    # Exact single-command groups are Poppy-owned and safe to migrate in place.
-    for group in settings["hooks"][event]:
-        if group.get("hooks") == poppy_hooks:
-            if group.get("matcher") != matcher:
-                group["matcher"] = matcher
-                _write_json(settings_path, settings, target=target)
-            return settings_path
+    groups = settings["hooks"][event]
+    changed = False
 
-    # A mixed group may be user-owned. Treat the command as installed without
-    # changing the group or adding a duplicate Poppy hook.
-    for group in settings["hooks"][event]:
-        for h in group.get("hooks", []):
-            if h.get("command") == command:
-                return settings_path
+    # Point every Poppy command at the current executable wherever it appears,
+    # including groups that also hold the user's hooks. Matchers stay as written.
+    for group in groups:
+        commands = group.get("hooks", [])
+        for index, h in enumerate(commands):
+            if _is_poppy_hook(h.get("command"), canonical) and h.get("command") != command:
+                commands[index] = {**h, "command": command}
+                changed = True
 
-    settings["hooks"][event].append(
-        {
-            "matcher": matcher,
-            "hooks": poppy_hooks,
-        }
-    )
-    _write_json(settings_path, settings, target=target)
+    def owned(group: dict) -> bool:
+        commands = group.get("hooks", [])
+        return len(commands) == 1 and _is_poppy_hook(commands[0].get("command"), canonical)
+
+    # A single-command group is Poppy's own. If none uses the current matcher,
+    # move an older one to it rather than adding a second Poppy group.
+    if not any(owned(g) and g.get("matcher") == matcher for g in groups):
+        stale = next((g for g in groups if owned(g)), None)
+        if stale is not None:
+            stale["matcher"] = matcher
+            changed = True
+
+    # Drop exact copies of Poppy's own groups, which older setups could leave.
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for group in groups:
+        if owned(group):
+            key = json.dumps(group, sort_keys=True)
+            if key in seen:
+                changed = True
+                continue
+            seen.add(key)
+        deduped.append(group)
+    settings["hooks"][event] = deduped
+
+    if not any(owned(g) and g.get("matcher") == matcher for g in deduped):
+        deduped.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
+        changed = True
+    if changed:
+        _write_json(settings_path, settings, target=target)
     return settings_path
 
 
@@ -1608,9 +1719,9 @@ def remove_legacy_hooks(claude_config_dir: Path | None = None) -> list[str]:
             continue
         new_groups: list[dict] = []
         for group in hooks[event]:
-            kept = [h for h in group.get("hooks", []) if h.get("command") not in legacy_commands]
+            kept = [h for h in group.get("hooks", []) if not _is_any_poppy_hook(h.get("command"), set(legacy_commands))]
             for h in group.get("hooks", []):
-                if h.get("command") in legacy_commands:
+                if _is_any_poppy_hook(h.get("command"), set(legacy_commands)):
                     removed.append(f"{event}:{h.get('command')}")
             if kept:
                 new_groups.append({**group, "hooks": kept})
@@ -1641,7 +1752,7 @@ def is_hook_installed(claude_config_dir: Path | None = None, event: str = "Sessi
         if not isinstance(group, MutableMapping):
             continue
         for h in group.get("hooks", []) if isinstance(group.get("hooks"), list) else []:
-            if isinstance(h, MutableMapping) and h.get("command") == command:
+            if isinstance(h, MutableMapping) and _is_poppy_hook(h.get("command"), command):
                 return True
     return False
 

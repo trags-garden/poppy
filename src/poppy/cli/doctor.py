@@ -217,6 +217,57 @@ def _client_components(client_id: str) -> tuple:
     return tuple(checks)
 
 
+def hook_command_problem(command: str) -> str | None:
+    """Why the client's shell could not start this hook command, or None if it can.
+
+    Hooks run through ``/bin/sh -c`` with the client's PATH, so a bare ``poppy``
+    that is not on PATH fails with "command not found" on every event even
+    though the hook entry itself is present.
+    """
+    from poppy.setup.claude_code import split_hook_command
+
+    argv = split_hook_command(command)
+    if not argv:
+        return f"could not parse hook command `{command}`"
+    executable = argv[0]
+    if "/" in executable or os.sep in executable:
+        if os.path.isfile(executable) and os.access(executable, os.X_OK):
+            return None
+        return f"`{executable}` does not exist or is not executable"
+    if shutil.which(executable):
+        return None
+    return f"`{executable}` is not on PATH, so `{command}` fails with command not found"
+
+
+def check_hook_commands(ctx: DoctorContext, hooks_path: Path, setup_cmd: str) -> None:
+    """FAIL when a Poppy hook in ``hooks_path`` names an executable the shell cannot find."""
+    from poppy.setup.claude_code import get_poppy_executable, poppy_hook_commands_in, split_hook_command
+
+    if not hooks_path.exists():
+        return
+    commands = safe_read(lambda: poppy_hook_commands_in(json.loads(hooks_path.read_text())), [])
+    if not commands:
+        return
+    for command in commands:
+        problem = hook_command_problem(command)
+        if problem:
+            ctx.line("hook command", "FAIL", problem, hint=f"run `{setup_cmd}` to rewrite the hooks with the full path")
+            return
+    # Doctor's PATH is the terminal's, not the client's, so a bare `poppy` that
+    # resolves here can still be missing when the client runs the hook.
+    if get_poppy_executable() != "poppy" and any(
+        (split_hook_command(c) or [""])[0].lower() in ("poppy", "poppy.exe") for c in commands
+    ):
+        ctx.line(
+            "hook command",
+            "WARN",
+            f"hooks still use a bare `poppy`; run `{setup_cmd}` to pin the full path",
+        )
+        return
+    first = split_hook_command(commands[0]) or [commands[0]]
+    ctx.line("hook command", "OK", first[0])
+
+
 def _client_has_poppy(client_id: str) -> bool:
     return _any_present(*_client_components(client_id))
 
@@ -692,6 +743,7 @@ def check_claude_code(ctx: DoctorContext) -> None:
                 "OK" if safe_read(lambda e=event: is_hook_installed(claude_dir, e), False) else "WARN",
                 hint="run `poppy setup claude-code` to install",
             )
+        check_hook_commands(ctx, claude_dir / "settings.json", "poppy setup claude-code")
         line(
             "CLAUDE.md block",
             "OK" if claude_md_present else "WARN",
@@ -907,6 +959,8 @@ def check_cursor(ctx: DoctorContext) -> None:
                 hint="run `poppy setup cursor --hooks` to install missing Poppy hooks",
             )
 
+        check_hook_commands(ctx, cursor_hooks_path, "poppy setup cursor --hooks")
+
         cursor_last_capture = _cursor_journal.read_last(poppy_dir, source="cursor")
         if cursor_last_capture is not None:
             cursor_line(
@@ -964,6 +1018,7 @@ def check_codex(ctx: DoctorContext) -> None:
             str(codex_hooks_path) if codex_hooks_path.exists() else f"not found at {codex_hooks_path}",
             hint="run `poppy setup codex --hooks` to install",
         )
+        check_hook_commands(ctx, codex_hooks_path, "poppy setup codex --hooks")
         # Only Codex-host records prove Codex capture is alive; a Claude Code
         # capture must not make this line read OK while the Codex hooks are dead.
         codex_last_capture = _codex_journal.read_last(poppy_dir, source="codex")
