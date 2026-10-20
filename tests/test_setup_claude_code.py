@@ -1,6 +1,7 @@
 import errno
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -54,6 +55,10 @@ def expected_poppy_path(tmp_path):
     return str((tmp_path / "resolved-bin" / "poppy").resolve())
 
 
+def hook_cmd(tmp_path, subcommand):
+    return f"{shlex.quote(expected_poppy_path(tmp_path))} hook {subcommand}"
+
+
 def test_get_poppy_executable_prefers_path_hit(tmp_path, monkeypatch):
     executable = tmp_path / "path-bin" / "poppy"
     monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: str(executable))
@@ -94,7 +99,9 @@ def test_install_session_start_hook(tmp_path):
     install_session_start_hook(claude_config_dir=tmp_path)
     settings = json.loads((tmp_path / "settings.json").read_text())
     hooks = settings["hooks"]["SessionStart"]
-    assert any(h.get("command") == "poppy hook session-start" for group in hooks for h in group.get("hooks", []))
+    assert any(
+        h.get("command") == hook_cmd(tmp_path, "session-start") for group in hooks for h in group.get("hooks", [])
+    )
     assert is_hook_installed(tmp_path, "SessionStart")
 
 
@@ -103,7 +110,7 @@ def test_install_session_end_hook(tmp_path):
     assert is_hook_installed(tmp_path, "SessionEnd")
     settings = json.loads((tmp_path / "settings.json").read_text())
     hooks = settings["hooks"]["SessionEnd"]
-    assert any(h.get("command") == "poppy hook session-end" for group in hooks for h in group.get("hooks", []))
+    assert any(h.get("command") == hook_cmd(tmp_path, "session-end") for group in hooks for h in group.get("hooks", []))
 
 
 def test_install_post_compact_hook(tmp_path):
@@ -111,7 +118,9 @@ def test_install_post_compact_hook(tmp_path):
     assert is_hook_installed(tmp_path, "PostCompact")
     settings = json.loads((tmp_path / "settings.json").read_text())
     hooks = settings["hooks"]["PostCompact"]
-    assert any(h.get("command") == "poppy hook post-compact" for group in hooks for h in group.get("hooks", []))
+    assert any(
+        h.get("command") == hook_cmd(tmp_path, "post-compact") for group in hooks for h in group.get("hooks", [])
+    )
 
 
 def test_remove_legacy_stop_hook_preserves_user_hooks(tmp_path):
@@ -146,7 +155,7 @@ def test_install_hook_idempotent(tmp_path):
         h
         for group in settings["hooks"]["SessionStart"]
         for h in group.get("hooks", [])
-        if h.get("command") == "poppy hook session-start"
+        if h.get("command") == hook_cmd(tmp_path, "session-start")
     ]
     assert len(matching) == 1
 
@@ -183,7 +192,7 @@ def test_install_pre_tool_use_hook_migrates_owned_stale_matcher(tmp_path):
     assert settings_path.read_text() == after_migration
 
 
-def test_install_pre_tool_use_hook_leaves_mixed_user_group_untouched(tmp_path):
+def test_install_pre_tool_use_hook_only_rewrites_poppy_command_in_mixed_group(tmp_path):
     settings_path = tmp_path / "settings.json"
     settings = {
         "hooks": {
@@ -202,7 +211,73 @@ def test_install_pre_tool_use_hook_leaves_mixed_user_group_untouched(tmp_path):
 
     install_pre_tool_use_hook(tmp_path)
 
+    # The group may be user-owned, so its matcher and the user's hook stay as
+    # written; only Poppy's own command moves to the resolved executable.
+    group = settings["hooks"]["PreToolUse"][0]
+    group["hooks"][0]["command"] = hook_cmd(tmp_path, "pre-tool-use")
     assert json.loads(settings_path.read_text()) == settings
+
+
+def test_rerun_setup_replaces_bare_hook_entries_with_one_absolute_entry(tmp_path):
+    """Configs written by older versions hold bare `poppy hook ...` commands.
+    Re-running setup must swap each for the resolved path, not add a second copy."""
+    settings_path = tmp_path / "settings.json"
+    bare = {
+        "SessionStart": "session-start",
+        "UserPromptSubmit": "user-prompt-submit",
+        "PreToolUse": "pre-tool-use",
+        "SessionEnd": "session-end",
+        "PostCompact": "post-compact",
+    }
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    event: [
+                        {"matcher": "", "hooks": [{"type": "command", "command": f"poppy hook {sub}"}]},
+                        {"matcher": "", "hooks": [{"type": "command", "command": f"poppy hook {sub}"}]},
+                    ]
+                    for event, sub in bare.items()
+                }
+            }
+        )
+    )
+
+    install_for_client(client="claude-code", claude_config_dir=tmp_path)
+    first = settings_path.read_text()
+    install_for_client(client="claude-code", claude_config_dir=tmp_path)
+    assert settings_path.read_text() == first
+
+    hooks = json.loads(first)["hooks"]
+    for event, sub in bare.items():
+        commands = [h["command"] for group in hooks[event] for h in group["hooks"]]
+        assert commands == [hook_cmd(tmp_path, sub)], event
+
+
+def test_hooks_and_mcp_entry_use_the_same_quoted_executable(tmp_path, monkeypatch):
+    executable = tmp_path / "Application Support" / "bin" / "poppy"
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: str(executable))
+
+    install_for_client(client="claude-code", claude_config_dir=tmp_path)
+
+    mcp_command = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["poppy"]["command"]
+    hooks = json.loads((tmp_path / "settings.json").read_text())["hooks"]
+    commands = [h["command"] for groups in hooks.values() for group in groups for h in group["hooks"]]
+    assert commands
+    for command in commands:
+        argv = shlex.split(command)
+        assert argv[0] == mcp_command == str(executable.resolve())
+        assert argv[1] == "hook"
+
+
+def test_hooks_fall_back_to_bare_poppy_when_unresolved(tmp_path, monkeypatch):
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: None)
+    monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(tmp_path / "nowhere" / "python"))
+
+    install_session_start_hook(tmp_path)
+
+    hooks = json.loads((tmp_path / "settings.json").read_text())["hooks"]["SessionStart"]
+    assert hooks[0]["hooks"][0]["command"] == "poppy hook session-start"
 
 
 def test_install_claude_md_block_creates_file(tmp_path):
@@ -249,7 +324,9 @@ def test_install_user_prompt_submit_hook(tmp_path):
     install_user_prompt_submit_hook(claude_config_dir=tmp_path)
     settings = json.loads((tmp_path / "settings.json").read_text())
     hooks = settings["hooks"]["UserPromptSubmit"]
-    assert any(h.get("command") == "poppy hook user-prompt-submit" for group in hooks for h in group.get("hooks", []))
+    assert any(
+        h.get("command") == hook_cmd(tmp_path, "user-prompt-submit") for group in hooks for h in group.get("hooks", [])
+    )
     assert is_hook_installed(tmp_path, "UserPromptSubmit")
 
 
@@ -259,7 +336,9 @@ def test_install_pre_tool_use_hook_has_matcher(tmp_path):
     groups = settings["hooks"]["PreToolUse"]
     # The PreToolUse hook must scope to write-capable tools, not fire on every tool call.
     matcher_for_poppy = next(
-        g.get("matcher") for g in groups if any(h.get("command") == "poppy hook pre-tool-use" for h in g["hooks"])
+        g.get("matcher")
+        for g in groups
+        if any(h.get("command") == hook_cmd(tmp_path, "pre-tool-use") for h in g["hooks"])
     )
     assert matcher_for_poppy == "Edit|Write|NotebookEdit"
     assert is_hook_installed(tmp_path, "PreToolUse")
@@ -329,7 +408,7 @@ def test_install_cursor_hooks_merge_preserves_user_content_and_is_idempotent(tmp
     assert merged["userTopLevel"] == {"keep": True}
     assert merged["hooks"]["futureEvent"] == unknown_user_value
     assert original_user_entry in merged["hooks"]["preToolUse"]
-    assert [entry["command"] for entry in merged["hooks"]["preToolUse"]].count("poppy hook pre-tool-use") == 1
+    assert [entry["command"] for entry in merged["hooks"]["preToolUse"]].count(hook_cmd(tmp_path, "pre-tool-use")) == 1
 
 
 def test_install_cursor_hooks_backs_up_malformed_json_and_writes_fresh(tmp_path):
@@ -451,17 +530,17 @@ def test_install_codex_hooks_merges_migrates_and_is_idempotent(tmp_path):
         event: [h["command"] for group in groups for h in group.get("hooks", [])]
         for event, groups in settings["hooks"].items()
     }
-    assert commands["SessionStart"].count("poppy hook session-start") == 1
+    assert commands["SessionStart"].count(hook_cmd(tmp_path, "session-start")) == 1
     assert "user start hook" in commands["SessionStart"]
-    assert "poppy hook session-end" not in commands["SessionEnd"]
+    assert not any("hook session-end" in c for c in commands["SessionEnd"])
     assert "user end hook" in commands["SessionEnd"]
     poppy_patch_group = next(
         group
         for group in settings["hooks"]["PreToolUse"]
-        if any(h.get("command") == "poppy hook pre-tool-use" for h in group["hooks"])
+        if any(h.get("command") == hook_cmd(tmp_path, "pre-tool-use") for h in group["hooks"])
     )
     assert poppy_patch_group["matcher"] == "apply_patch"
-    assert commands["Stop"] == ["poppy hook stop"]
+    assert commands["Stop"] == [hook_cmd(tmp_path, "stop")]
 
 
 def test_install_codex_no_hooks(tmp_path, monkeypatch):
@@ -1509,7 +1588,7 @@ def test_install_codex_hooks_preserves_group_without_hooks_key(tmp_path):
     settings = json.loads(hooks_path.read_text())
     groups = settings["hooks"]["UserPromptSubmit"]
     assert {"matcher": "custom", "disabled": True} in groups
-    assert any(h.get("command") == "poppy hook user-prompt-submit" for g in groups for h in g.get("hooks", []))
+    assert any(h.get("command") == hook_cmd(tmp_path, "user-prompt-submit") for g in groups for h in g.get("hooks", []))
     assert is_codex_hooks_installed(tmp_path)
 
 
@@ -1523,7 +1602,7 @@ def test_install_codex_hooks_preserves_non_list_event_value(tmp_path):
     assert settings["hooks"]["Stop"] == "poppy hook stop"  # user value untouched
     # Other events still got their poppy hooks installed.
     assert any(
-        h.get("command") == "poppy hook session-start"
+        h.get("command") == hook_cmd(tmp_path, "session-start")
         for g in settings["hooks"]["SessionStart"]
         for h in g.get("hooks", [])
     )

@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import re
+import shlex
 from pathlib import Path
 
 import click
@@ -619,18 +620,21 @@ def test_setup_claude_code(tmp_path, config_dir, relative_mcp_path):
     settings_path = claude_dir / "settings.json"
     assert settings_path.exists()
     settings_data = json.loads(settings_path.read_text())
+    # Hooks run the same executable as the MCP entry, so they keep working when
+    # the client's PATH does not include poppy's install directory.
+    poppy_cmd = shlex.quote(mcp_data["mcpServers"]["poppy"]["command"])
     assert any(
-        h.get("command") == "poppy hook session-start"
+        h.get("command") == f"{poppy_cmd} hook session-start"
         for group in settings_data.get("hooks", {}).get("SessionStart", [])
         for h in group.get("hooks", [])
     )
     assert any(
-        h.get("command") == "poppy hook session-end"
+        h.get("command") == f"{poppy_cmd} hook session-end"
         for group in settings_data.get("hooks", {}).get("SessionEnd", [])
         for h in group.get("hooks", [])
     )
     assert any(
-        h.get("command") == "poppy hook post-compact"
+        h.get("command") == f"{poppy_cmd} hook post-compact"
         for group in settings_data.get("hooks", {}).get("PostCompact", [])
         for h in group.get("hooks", [])
     )
@@ -1320,6 +1324,52 @@ def test_doctor_clean_after_fresh_claude_code_setup(tmp_path):
     assert "WARN" not in doctor.output, doctor.output
     assert "PostCompact hook: OK" in doctor.output
     assert "daemon installed" not in doctor.output
+
+
+@pytest.mark.parametrize("client", ["claude-code", "codex", "cursor"])
+def test_doctor_fails_when_hook_command_cannot_resolve(tmp_path, client):
+    """A hook entry that exists but names a poppy the shell cannot find must FAIL,
+    since every event then dies with "command not found"."""
+    runner = CliRunner()
+    env = _fresh_setup_env(tmp_path)
+    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    setup = runner.invoke(cli, ["setup", client], env=env)
+    assert setup.exit_code == 0, setup.output
+
+    hooks_path = {
+        "claude-code": tmp_path / "claude" / "settings.json",
+        "codex": tmp_path / "codex" / "hooks.json",
+        "cursor": tmp_path / "cursor" / "hooks.json",
+    }[client]
+    # Rewrite the hooks to the bare form older versions wrote, then run doctor
+    # with a PATH that does not contain poppy.
+    settings = json.loads(hooks_path.read_text())
+    for entries in settings["hooks"].values():
+        for entry in entries if isinstance(entries, list) else []:
+            for h in entry.get("hooks", [entry]):
+                if " hook " in h.get("command", ""):
+                    h["command"] = "poppy hook " + h["command"].split(" hook ", 1)[1]
+    hooks_path.write_text(json.dumps(settings))
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+
+    doctor = runner.invoke(cli, ["doctor"], env={**env, "PATH": str(empty_bin)})
+    assert "hook command: FAIL" in doctor.output, doctor.output
+    assert "`poppy` is not on PATH" in doctor.output
+    assert f"poppy setup {client}" in doctor.output
+    assert doctor.exit_code != 0
+
+
+def test_hook_command_problem_checks_absolute_paths(tmp_path):
+    from poppy.cli.doctor import hook_command_problem
+
+    executable = tmp_path / "with space" / "poppy"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n")
+    assert "does not exist or is not executable" in hook_command_problem(f"{shlex.quote(str(executable))} hook stop")
+    executable.chmod(0o755)
+    assert hook_command_problem(f"{shlex.quote(str(executable))} hook stop") is None
+    assert "does not exist" in hook_command_problem(f"{tmp_path / 'missing' / 'poppy'} hook stop")
 
 
 def test_doctor_daemon_section_silent_without_daemon(tmp_path):

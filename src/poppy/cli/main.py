@@ -1693,7 +1693,8 @@ def _warn_if_poppy_unresolved() -> None:
 
     if get_poppy_executable() == "poppy":
         click.echo(
-            "Warning: poppy could not be resolved to an absolute path; the client may not find poppy on its PATH.",
+            "Warning: poppy could not be resolved to an absolute path, so the MCP entry and hooks use the bare "
+            "`poppy` command; the client may not find poppy on its PATH.",
             err=True,
         )
 
