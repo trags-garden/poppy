@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Automatic capture through Codex now works in folders that are not git repositories.
 - Setup no longer changes another file's permissions when a backup is replaced by a symlink while setup runs.
 - `poppy forget` now reports unknown memory IDs as errors, matching `poppy edit`.
 - `poppy sync run` now suggests `poppy setup trags` before manual API-key configuration when unpaired.

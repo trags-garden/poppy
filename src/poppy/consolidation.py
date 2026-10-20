@@ -205,8 +205,9 @@ def call_host_cli(
     elif cli == "cursor-agent":
         cmd = ["cursor-agent", "-p"]
     elif cli == "codex":
-        # codex exec takes a prompt arg; output is plain text.
-        cmd = ["codex", "exec", prompt]
+        # codex exec takes a prompt arg; output is plain text. It refuses to run
+        # outside a git repository unless told this is fine.
+        cmd = ["codex", "exec", "--skip-git-repo-check", prompt]
     elif cli == "gemini":
         cmd = ["gemini", "-p"]
     else:
@@ -216,7 +217,20 @@ def call_host_cli(
     child_env = {**os.environ, "POPPY_SUPPRESS_HOOKS": "1"}
     try:
         if cli == "codex":
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=child_env)
+            # Codex also reads extra prompt text from stdin when it is open, so
+            # close it. Run from Poppy's own directory, when it exists, so the
+            # extraction never happens inside the user's repository or picks up
+            # that repository's agent instructions.
+            poppy_dir = get_poppy_dir()
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                cwd=poppy_dir if poppy_dir.is_dir() else None,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                env=child_env,
+            )
         else:
             proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout_s, env=child_env)
     except subprocess.TimeoutExpired:

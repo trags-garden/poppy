@@ -687,6 +687,44 @@ def test_call_host_cli_suppresses_hooks_in_child_environment(monkeypatch, cli_na
     assert calls[0]["env"]["POPPY_SUPPRESS_HOOKS"] == "1"
 
 
+def _capture_host_cli_run(monkeypatch, cli_name):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return Result()
+
+    monkeypatch.setattr("poppy.consolidation.subprocess.run", fake_run)
+    assert call_host_cli("extract", cli=cli_name) == "[]"
+    return calls[0]
+
+
+def test_call_host_cli_codex_skips_git_check_and_closes_stdin(monkeypatch, tmp_path):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    cmd, kwargs = _capture_host_cli_run(monkeypatch, "codex")
+    assert cmd == ["codex", "exec", "--skip-git-repo-check", "extract"]
+    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert kwargs["cwd"] == tmp_path
+    assert "input" not in kwargs
+
+
+def test_call_host_cli_codex_without_poppy_dir_keeps_current_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path / "missing"))
+    _, kwargs = _capture_host_cli_run(monkeypatch, "codex")
+    assert kwargs["cwd"] is None
+
+
+def test_call_host_cli_claude_still_passes_prompt_on_stdin(monkeypatch):
+    cmd, kwargs = _capture_host_cli_run(monkeypatch, "claude")
+    assert "--skip-git-repo-check" not in cmd
+    assert kwargs["input"] == "extract"
+
+
 def _host_cli_stub(monkeypatch, stdout: str, *, returncode: int = 0):
     """Make `claude` the detected host CLI and hand its process the given output.
 
