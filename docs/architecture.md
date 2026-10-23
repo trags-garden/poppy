@@ -26,7 +26,7 @@ details, which this page does not repeat.
 | [`ui/`](../src/poppy/ui/) | The local web dashboard (`server.py` plus `static/`). |
 | [`setup/`](../src/poppy/setup/) | Writing Poppy into other tools' config. `claude_code.py` serves most clients despite its name; `goose.py`; `hermes.py` installs the plugin file `hermes_plugin.py.txt`; `trags.py` is cloud onboarding. |
 | [`integrations/`](../src/poppy/integrations/) | One-off importers for Claude Code auto-memory files and Hermes memories. |
-| Core helpers | `models.py` (memory dataclasses), `errors.py` (`PoppyError` and its families, cheap to import), `paths.py` (data directory creation and `write_text_atomic`, stdlib only), `db.py` (SQLite connections, gates, `write_txn`), `config.py` (`config.json` through a key registry), `keychain.py` and `encryption.py` (optional encryption at rest), `writers.py` (live writer registry), `telemetry.py`, `update_check.py`, `sources.py` (which client wrote a memory), `project.py` (project name from a directory), `relevance.py` (score floor for recall), `build_mcpb.py` (Claude Desktop bundle). |
+| Core helpers | `models.py` (memory dataclasses), `errors.py` (`PoppyError` and its families, cheap to import), `paths.py` (data directory creation and `write_text_atomic`, stdlib only), `db.py` (SQLite connections, gates, `write_txn`), `config.py` (`config.json` through a key registry), `keychain.py` and `encryption.py` (optional encryption at rest), `writers.py` (live writer registry), `telemetry.py`, `update_check.py`, `sources.py` (which client wrote a memory), `project.py` (project name from a directory), `relevance.py` (score floor for recall). |
 
 ## Main paths
 
@@ -92,7 +92,6 @@ same data directory (`~/.poppy`, or `POPPY_DIR`):
 | Daemon: shared MCP over HTTP on loopback, plus model inference for other processes | a launchd or systemd service, or `poppy daemon start` (`mcp_server/lifecycle.py:start_daemon`) | `cli/main.py:serve` with HTTP transport, `mcp_server/daemon.py:create_http_app` |
 | stdio MCP server: a forwarder to the daemon, or an in-process server when no daemon answers | each MCP client running `poppy serve` | `cli/main.py:serve`, `mcp_server/forwarder.py:run_forwarder`, `mcp_server/server.py:create_mcp_server` |
 | Dashboard | `poppy ui` | `ui/server.py:create_app` |
-| Claude Desktop bundle | Claude Desktop | [`mcpb/server/main.py`](../mcpb/server/main.py) at the repo root, which builds the same server with `create_mcp_server` |
 | Hermes plugin | Hermes Agent, inside its own Python; it runs `poppy` commands rather than importing Poppy | `setup/hermes_plugin.py.txt`, installed by `setup/hermes.py:install_for_hermes` |
 
 Background processes are started in two styles today: `sys.argv[0]` in
@@ -150,7 +149,7 @@ layer below it.
 7. `sync` / `mcp_server`
 8. `ui`
 9. `setup` (with `integrations`)
-10. `cli` (with `build_mcpb`)
+10. `cli`
 
 Lower layers do not import higher ones; the remaining exceptions are being
 removed. Today they are:

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The `poppy build mcpb` command and the `.mcpb` bundle source were removed. The bundle was never published. Claude Desktop users run `poppy setup claude-desktop`.
+
 ## [0.3.4] - 2026-10-21
 
 ### Fixed

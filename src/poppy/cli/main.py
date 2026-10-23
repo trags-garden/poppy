@@ -2025,48 +2025,6 @@ from poppy.cli.hooks import hook as _hook_group  # noqa: E402
 cli.add_command(_hook_group)
 
 
-@cli.group("build")
-def build_group():
-    """Build distributable artifacts."""
-    pass
-
-
-@build_group.command(
-    "mcpb",
-    short_help="Build a .mcpb bundle. Needs a source checkout.",
-)
-@click.option(
-    "--output-dir",
-    type=click.Path(file_okay=False, path_type=Path),
-    default=Path("dist"),
-    help="Where to write the .mcpb file (default: ./dist).",
-)
-def build_mcpb_cmd(output_dir: Path):
-    """Build a Claude Desktop Extension bundle (.mcpb) from a source checkout.
-
-    This is a maintainer tool, not a supported way to install Poppy. It reads
-    `pyproject.toml` and `mcpb/` from the repository, so it cannot run from a
-    Poppy installed with pipx or pip. To use Poppy with the Claude desktop app,
-    run `poppy setup claude-desktop` instead.
-    """
-    from poppy.build_mcpb import build_mcpb
-
-    repo_root = Path(__file__).resolve().parents[3]
-    if not (repo_root / "pyproject.toml").is_file() or not (repo_root / "mcpb" / "manifest.json").is_file():
-        raise click.ClickException(
-            "poppy build mcpb only works from a source checkout. Use `poppy setup claude-desktop` instead."
-        )
-    try:
-        produced = build_mcpb(repo_root=repo_root, output_dir=output_dir)
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    size_kb = produced.stat().st_size / 1024
-    click.echo(f"  built: {produced}")
-    click.echo(f"  size:  {size_kb:.1f} KB")
-    click.echo("\nDouble-click the .mcpb file to install it in Claude Desktop.")
-
-
 @cli.group("import")
 def import_group():
     """Import memories from external sources."""

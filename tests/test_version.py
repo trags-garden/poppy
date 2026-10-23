@@ -2,13 +2,12 @@
 
 pyproject.toml is the canonical version. poppy.__version__ resolves it via
 importlib.metadata when installed, with a pyproject.toml fallback for bare
-source checkouts. The mcpb manifest keeps a placeholder that the build stamps.
+source checkouts.
 """
 
 from __future__ import annotations
 
 import importlib.metadata
-import json
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -56,10 +55,3 @@ def test_cli_version_short_alias(tmp_path: Path) -> None:
     result = runner.invoke(cli, ["-v"], env={"POPPY_DIR": str(tmp_path)})
     assert result.exit_code == 0
     assert f"poppy, version {poppy.__version__}" in result.output
-
-
-def test_repo_manifest_version_is_placeholder() -> None:
-    """The checked-in mcpb manifest must not hardcode a release version; the
-    build stamps the pyproject version via _sync_manifest_version()."""
-    manifest = json.loads((REPO_ROOT / "mcpb" / "manifest.json").read_text())
-    assert manifest["version"] == "0.0.0-dev"
