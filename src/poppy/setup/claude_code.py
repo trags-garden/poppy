@@ -1758,6 +1758,36 @@ def is_hook_installed(claude_config_dir: Path | None = None, event: str = "Sessi
 
 
 # ---------------------------------------------------------------------------
+# Claude Code plugin
+# ---------------------------------------------------------------------------
+
+# The plugin in plugins/poppy, installed from this repo's marketplace. It ships
+# the same MCP server, hooks and primer that setup writes.
+CLAUDE_CODE_PLUGIN_ID = "poppy@trags-garden"
+
+
+def is_claude_code_plugin_installed(claude_config_dir: Path | None = None) -> bool:
+    """True when the Poppy plugin is installed for the user and not disabled.
+
+    Claude Code records installs in ``plugins/installed_plugins.json`` and the
+    on/off switch in ``enabledPlugins`` in ``settings.json``, both under the
+    config directory. Only a user-scope install counts: a project or local
+    install covers one folder, not every session the way setup does.
+    """
+    claude_dir = claude_config_dir or get_claude_config_dir()
+    installed = _read_json(claude_dir / "plugins" / "installed_plugins.json")
+    plugins = installed.get("plugins") if isinstance(installed, MutableMapping) else None
+    entries = plugins.get(CLAUDE_CODE_PLUGIN_ID) if isinstance(plugins, MutableMapping) else None
+    if not isinstance(entries, list):
+        return False
+    if not any(isinstance(entry, MutableMapping) and entry.get("scope") == "user" for entry in entries):
+        return False
+    settings = _read_json(claude_dir / "settings.json")
+    enabled = settings.get("enabledPlugins") if isinstance(settings, MutableMapping) else None
+    return not (isinstance(enabled, MutableMapping) and enabled.get(CLAUDE_CODE_PLUGIN_ID) is False)
+
+
+# ---------------------------------------------------------------------------
 # Managed CLAUDE.md block
 # ---------------------------------------------------------------------------
 

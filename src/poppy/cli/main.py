@@ -1790,7 +1790,17 @@ def _install_simple_client(client: str, *, daemon_mode: bool = False) -> None:
 @click.option("--daemon", "daemon_mode", is_flag=True, help="Use the shared authenticated HTTP daemon.")
 def setup_claude_code(hooks: bool, claude_md: bool, yes: bool, daemon_mode: bool):
     """Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer)."""
+    from poppy.setup.claude_code import is_claude_code_plugin_installed
+
     claude_dir = Path(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else None
+
+    if is_claude_code_plugin_installed(claude_dir):
+        click.echo(
+            "The Poppy plugin for Claude Code is installed and already provides the MCP server, hooks "
+            "and memory primer, so setup changed nothing."
+        )
+        _maybe_prompt_consent(load_config(_get_poppy_dir()), assume_yes=yes)
+        return
 
     paths = _install_or_abort(
         client="claude-code",

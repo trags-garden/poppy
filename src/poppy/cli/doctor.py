@@ -703,7 +703,13 @@ def _prepare_capture(ctx: DoctorContext) -> None:
 
 
 def check_claude_code(ctx: DoctorContext) -> None:
-    from poppy.setup.claude_code import is_hook_installed, is_mcp_installed, managed_claude_md_present
+    from poppy.setup.claude_code import (
+        CLAUDE_CODE_PLUGIN_ID,
+        is_claude_code_plugin_installed,
+        is_hook_installed,
+        is_mcp_installed,
+        managed_claude_md_present,
+    )
 
     line = ctx.line
     claude_dir = ctx.daemon.claude_dir
@@ -723,6 +729,21 @@ def check_claude_code(ctx: DoctorContext) -> None:
         or safe_read(lambda: any(is_hook_installed(claude_dir, event) for event in claude_events), False)
         or claude_md_present
     )
+    if safe_read(lambda: is_claude_code_plugin_installed(claude_dir), False):
+        # The plugin carries the MCP server, hooks and primer itself, so the
+        # settings-file checks below do not apply. Setup's own MCP entry or
+        # hooks next to it would run every hook twice.
+        line("Claude Code plugin", "OK", CLAUDE_CODE_PLUGIN_ID)
+        if claude_mcp_installed or safe_read(
+            lambda: any(is_hook_installed(claude_dir, event) for event in claude_events), False
+        ):
+            line(
+                "Claude Code plugin",
+                "WARN",
+                "`poppy setup claude-code` entries are also installed, so Poppy's hooks run twice",
+                hint=f"remove Poppy's MCP entry and hooks from {claude_dir}, or uninstall the plugin",
+            )
+        return
     if claude_poppy_present:
         line("claude config dir", "OK" if claude_dir.exists() else "WARN", str(claude_dir))
         # A daemon-mode registration is only healthy if the daemon answers on the
