@@ -131,6 +131,38 @@ than something that holds the next release back.
 
 `poppy doctor` checks the integrations installed on your machine.
 
+### Claude Code plugin
+
+Claude Code can also load Poppy as a plugin, in place of
+`poppy setup claude-code`. Install `poppy-memory` first, as above. The plugin
+only connects Claude Code to the `poppy` command you already have.
+
+```bash
+claude plugin marketplace add trags-garden/poppy
+claude plugin install poppy@trags-garden
+```
+
+Restart Claude Code afterwards.
+
+The plugin gives Claude Code the same MCP server and the same five hooks that
+setup writes. It looks for `poppy` on the PATH and then in the folders pipx,
+uv and `pip install --user` install into, so it works when `~/.local/bin` is
+not on Claude Code's PATH. In place of the CLAUDE.md block it ships a `memory`
+skill with the same text. Claude loads the skill when memory is relevant, and
+you can run it yourself with `/poppy:memory`. The plugin needs macOS or Linux.
+On Windows, use `poppy setup claude-code`.
+
+Use the plugin or setup, not both. With the plugin installed, `poppy setup
+claude-code` does not add the MCP server or hooks and says so. Pass
+`--claude-md` to add the CLAUDE.md block next to the skill, so the primer loads
+in every session. If you ran setup before installing the plugin, remove
+Poppy's MCP entry and hooks from your Claude Code settings, or every hook runs
+twice. `poppy doctor` warns when it finds both, and fails when the plugin
+cannot find `poppy`.
+
+The plugin does not ask for capture consent the way setup does. Answer the
+notice at session start, or run `poppy autocapture on --global`.
+
 ## Zero-touch capture
 
 With the Claude Code, Cursor, or Codex hooks installed, Poppy can also extract durable
@@ -311,7 +343,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy serve` | | Start the Poppy MCP server (stdio). |
 | `poppy daemon` | `status`, `install`, `uninstall`, `start`, `stop`, `restart`, `run` | Manage the shared MCP daemon that `poppy setup --daemon` connects clients to. See [MCP daemon](#mcp-daemon). |
 | `poppy ui` | `--host`, `--port`, `--no-open`, `--allow-remote` | Browse and manage memories in a local web UI. `--allow-remote` permits a non-loopback `--host`; the UI has no authentication, so this exposes its delete and edit API to your network. |
-| `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). |
+| `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). Adds only the CLAUDE.md block, and only with an explicit `--claude-md`, when the [Claude Code plugin](#claude-code-plugin) is installed. |
 | `poppy setup claude-desktop` | `--print-instructions`, `--print-import-prompt` | Register the Poppy MCP server in the Claude desktop app. |
 | `poppy setup cursor` | `--hooks/--no-hooks`, `--daemon` | Install Poppy into Cursor (MCP + zero-touch capture hooks). Honors `$CURSOR_HOME`. |
 | `poppy setup vscode` | `--daemon` | Install Poppy into VS Code (MCP only). |
@@ -330,7 +362,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy import claude-memories` | `--dry-run`, `--projects-dir` | Import auto-memory files from `~/.claude/projects/<slug>/memory/`. |
 | `poppy import hermes-memories` | `--dry-run`, `--memories-dir` | Import paragraphs from `~/.hermes/memories/{MEMORY,USER}.md`. |
 | `poppy hook ...` | | Claude Code, Cursor, and Codex hook entrypoints (`session-start`, `user-prompt-submit`, `pre-tool-use`, `post-compact`, `session-end`, `stop`, `replay-compact`, `replay-session-end`). Invoked by Poppy-installed hooks. |
-| `poppy doctor` | | Verify the installation: engine, storage, MCP config, hooks. |
+| `poppy doctor` | | Verify the installation: engine, storage, MCP config, hooks, and the Claude Code plugin. |
 
 Cursor hooks are installed globally at `~/.cursor/hooks.json` by
 `poppy setup cursor`. Capture starts immediately once automatic capture is
@@ -543,8 +575,8 @@ Poppy can emit is in this table; there are no others.
 | `cli_install` | once, before the first event from a machine | `version` (Poppy version), `python_version`, `platform` (`darwin`, `linux`, `win32`) |
 | `memory_write` | each memory stored by `poppy remember` or the MCP `remember` and `consolidate` tools; automatic capture, imports, and memories edited or superseded in `poppy ui` do not send it | `memory_type` (`fact`, `decision`, `preference`, `lesson`, `summary`, `context`), `has_project` (true/false, never the project name), `source` (`manual` for `poppy remember`, `agent` for an MCP client that does not name itself, a known client such as `claude-code` or `cursor`, or `other` for any client Poppy does not know; the connecting client's own name is slugified before comparison, so `Claude Memory` becomes `claude-memory`; `ui`, `claude-memory` and `hermes-memory` appear only when the MCP server's `--source` setting or the connecting client's own name is one of them; a `--source` or `POPPY_MCP_SOURCE` value is only trimmed and lowercased, so `Claude Memory` there becomes `claude memory` and is reported as `other`; `POPPY_MCP_SOURCE` sets the same value as `--source`, and both apply only when the MCP server runs in process, so a `poppy serve` that forwards to the daemon ignores them) |
 | `recall_call` | `poppy recall` | `query_length` (character count, never the query text), `result_count`, `engine` (engine name) |
-| `agent_setup` | every `poppy setup <client>` | `agent` (client name, for example `claude-code`) |
-| `setup_completed` | once per machine, on the first `poppy setup <client>` | `agent` (client name) |
+| `agent_setup` | every `poppy setup <client>` | `agent` (client name, for example `claude-code`), and `via` (`plugin`) when the Claude Code plugin was already installed |
+| `setup_completed` | once per machine, on the first `poppy setup <client>` | `agent` (client name), and `via` (`plugin`) when the Claude Code plugin was already installed |
 | `consent_granted` | once per machine, when you turn automatic capture on | `via` (`consent_cmd`, `setup_yes`, or `setup_prompt`) |
 | `consent_pending_shown` | once per machine, when the consent nudge is first shown | `channel` (`session_start` or `setup`) |
 | `first_autocapture_stored` | once per machine, the first time automatic capture stores a memory | `trigger` (`mid_session`, `post_compact`, or `session_end`) |

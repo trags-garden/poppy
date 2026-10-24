@@ -8,6 +8,7 @@ source checkouts.
 from __future__ import annotations
 
 import importlib.metadata
+import json
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -55,3 +56,8 @@ def test_cli_version_short_alias(tmp_path: Path) -> None:
     result = runner.invoke(cli, ["-v"], env={"POPPY_DIR": str(tmp_path)})
     assert result.exit_code == 0
     assert f"poppy, version {poppy.__version__}" in result.output
+
+
+def test_claude_code_plugin_version_matches_pyproject() -> None:
+    manifest = json.loads((REPO_ROOT / "plugins" / "poppy" / ".claude-plugin" / "plugin.json").read_text())
+    assert manifest["version"] == _pyproject_version()

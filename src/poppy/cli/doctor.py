@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -702,8 +703,66 @@ def _prepare_capture(ctx: DoctorContext) -> None:
     ctx.capture = _CaptureContext(capture_cfg, backend_health, cap_status, capture_expected)
 
 
+# A client started outside a shell, such as from the Dock, gets about this PATH.
+_MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _shim_runs(shim: Path, path_value: str) -> bool:
+    env = {**os.environ, "PATH": path_value}
+    try:
+        result = subprocess.run([str(shim), "--version"], env=env, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def check_plugin_shim(ctx: DoctorContext, install: dict) -> None:
+    """Report the plugin, FAILing when its launcher cannot find poppy."""
+    from poppy.setup.claude_code import CLAUDE_CODE_PLUGIN_ID
+
+    line = ctx.line
+    if os.name == "nt":
+        line("Claude Code plugin", "OK", CLAUDE_CODE_PLUGIN_ID)
+        return
+    install_path = install.get("installPath")
+    shim = Path(install_path) / "scripts" / "poppy-run" if isinstance(install_path, str) else None
+    if shim is None or not shim.is_file():
+        line(
+            "Claude Code plugin",
+            "WARN",
+            f"{CLAUDE_CODE_PLUGIN_ID} is installed but its files are missing at {install_path}",
+            hint="reinstall it with `claude plugin install poppy@trags-garden`",
+        )
+        return
+    # Without the shell's PATH first, the way a client opened from the Dock
+    # starts it; then with it, to tell "not installed" from "only on PATH".
+    if _shim_runs(shim, _MINIMAL_PATH):
+        line("Claude Code plugin", "OK", CLAUDE_CODE_PLUGIN_ID)
+    elif _shim_runs(shim, os.environ.get("PATH", "")):
+        line(
+            "Claude Code plugin",
+            "WARN",
+            "the plugin finds poppy only through this shell's PATH, so Claude Code started outside a shell "
+            "cannot run it",
+            hint="install poppy with pipx or uv, which put it in a folder the plugin searches",
+        )
+    else:
+        line(
+            "Claude Code plugin",
+            "FAIL",
+            f"{shim} cannot find poppy, so the plugin's MCP server and hooks fail",
+            hint="install poppy with `pipx install poppy-memory` or `uv tool install poppy-memory`",
+        )
+
+
 def check_claude_code(ctx: DoctorContext) -> None:
-    from poppy.setup.claude_code import is_hook_installed, is_mcp_installed, managed_claude_md_present
+    from poppy.setup.claude_code import (
+        _client_settings_path,
+        claude_code_plugin_install,
+        is_hook_installed,
+        is_mcp_installed,
+        managed_claude_md_present,
+    )
 
     line = ctx.line
     claude_dir = ctx.daemon.claude_dir
@@ -723,6 +782,36 @@ def check_claude_code(ctx: DoctorContext) -> None:
         or safe_read(lambda: any(is_hook_installed(claude_dir, event) for event in claude_events), False)
         or claude_md_present
     )
+    plugin_install = safe_read(lambda: claude_code_plugin_install(claude_dir), None)
+    if plugin_install is not None:
+        # The plugin carries the MCP server, hooks and primer itself, so setup's
+        # per-entry checks below do not apply. Setup entries left next to it
+        # still get their health checks, plus a warning that they duplicate it.
+        check_plugin_shim(ctx, plugin_install)
+        claude_hooks_installed = safe_read(
+            lambda: any(is_hook_installed(claude_dir, event) for event in claude_events), False
+        )
+        if claude_mcp_installed:
+            mcp_path = _client_settings_path("claude-code", claude_dir)
+            line(
+                "Claude Code plugin",
+                "WARN",
+                f"`poppy setup claude-code` also registered a second Poppy MCP server in {mcp_path}",
+                hint="run `claude mcp remove poppy -s user`, or uninstall the plugin",
+            )
+            claude_daemon_problem = _client_daemon_problem(ctx, "claude-code")
+            if claude_daemon_problem:
+                line("MCP server registered", "WARN", claude_daemon_problem[0], hint=claude_daemon_problem[1])
+        if claude_hooks_installed:
+            line(
+                "Claude Code plugin",
+                "WARN",
+                f"`poppy setup claude-code` hooks in {claude_dir / 'settings.json'} run next to the plugin's, "
+                "so Poppy's hooks run twice",
+                hint="remove Poppy's hooks from that file, or uninstall the plugin",
+            )
+            check_hook_commands(ctx, claude_dir / "settings.json", "poppy setup claude-code")
+        return
     if claude_poppy_present:
         line("claude config dir", "OK" if claude_dir.exists() else "WARN", str(claude_dir))
         # A daemon-mode registration is only healthy if the daemon answers on the

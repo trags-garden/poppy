@@ -1,0 +1,14 @@
+{
+  "name": "poppy",
+  "displayName": "Poppy",
+  "version": "0.3.4",
+  "description": "Local developer memory for Claude Code: the Poppy MCP tools, capture hooks and a memory primer. Needs the poppy-memory package installed.",
+  "author": {
+    "name": "Trags",
+    "url": "https://github.com/trags-garden"
+  },
+  "homepage": "https://github.com/trags-garden/poppy",
+  "repository": "https://github.com/trags-garden/poppy",
+  "license": "Apache-2.0",
+  "keywords": ["memory", "mcp", "local-first", "developer-tools"]
+}
