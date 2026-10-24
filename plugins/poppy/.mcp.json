@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "poppy": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/poppy-run",
+      "args": ["serve", "--source", "claude-code"]
+    }
+  }
+}

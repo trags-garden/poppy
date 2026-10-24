@@ -131,6 +131,37 @@ than something that holds the next release back.
 
 `poppy doctor` checks the integrations installed on your machine.
 
+### Claude Code plugin
+
+Claude Code can also load Poppy as a plugin, in place of
+`poppy setup claude-code`. Install `poppy-memory` first, as above. The plugin
+only connects Claude Code to the `poppy` command you already have.
+
+```bash
+claude plugin marketplace add trags-garden/poppy
+claude plugin install poppy@trags-garden
+```
+
+On Claude Code 2.1.275 or later, `/plugin install poppy --marketplace
+trags-garden/poppy` inside a session does both steps at once. Restart Claude
+Code afterwards.
+
+The plugin gives Claude Code the same MCP server and the same five hooks that
+setup writes. It looks for `poppy` on the PATH and then in the folders pipx and
+uv install into, so it works when `~/.local/bin` is not on Claude Code's PATH.
+In place of the CLAUDE.md block it ships a `memory` skill with the same text.
+Claude loads the skill when memory is relevant, and you can run it yourself
+with `/poppy:memory`. The plugin needs macOS or Linux. On Windows, use
+`poppy setup claude-code`.
+
+Use the plugin or setup, not both. With the plugin installed, `poppy setup
+claude-code` changes nothing and says so. If you ran setup before installing
+the plugin, remove Poppy's MCP entry and hooks from your Claude Code settings,
+or every hook runs twice. `poppy doctor` warns when it finds both.
+
+The plugin does not ask for capture consent the way setup does. Answer the
+notice at session start, or run `poppy autocapture on --global`.
+
 ## Zero-touch capture
 
 With the Claude Code, Cursor, or Codex hooks installed, Poppy can also extract durable
@@ -311,7 +342,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy serve` | | Start the Poppy MCP server (stdio). |
 | `poppy daemon` | `status`, `install`, `uninstall`, `start`, `stop`, `restart`, `run` | Manage the shared MCP daemon that `poppy setup --daemon` connects clients to. See [MCP daemon](#mcp-daemon). |
 | `poppy ui` | `--host`, `--port`, `--no-open`, `--allow-remote` | Browse and manage memories in a local web UI. `--allow-remote` permits a non-loopback `--host`; the UI has no authentication, so this exposes its delete and edit API to your network. |
-| `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). |
+| `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). Changes nothing when the [Claude Code plugin](#claude-code-plugin) is installed. |
 | `poppy setup claude-desktop` | `--print-instructions`, `--print-import-prompt` | Register the Poppy MCP server in the Claude desktop app. |
 | `poppy setup cursor` | `--hooks/--no-hooks`, `--daemon` | Install Poppy into Cursor (MCP + zero-touch capture hooks). Honors `$CURSOR_HOME`. |
 | `poppy setup vscode` | `--daemon` | Install Poppy into VS Code (MCP only). |
@@ -330,7 +361,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy import claude-memories` | `--dry-run`, `--projects-dir` | Import auto-memory files from `~/.claude/projects/<slug>/memory/`. |
 | `poppy import hermes-memories` | `--dry-run`, `--memories-dir` | Import paragraphs from `~/.hermes/memories/{MEMORY,USER}.md`. |
 | `poppy hook ...` | | Claude Code, Cursor, and Codex hook entrypoints (`session-start`, `user-prompt-submit`, `pre-tool-use`, `post-compact`, `session-end`, `stop`, `replay-compact`, `replay-session-end`). Invoked by Poppy-installed hooks. |
-| `poppy doctor` | | Verify the installation: engine, storage, MCP config, hooks. |
+| `poppy doctor` | | Verify the installation: engine, storage, MCP config, hooks, and the Claude Code plugin. |
 
 Cursor hooks are installed globally at `~/.cursor/hooks.json` by
 `poppy setup cursor`. Capture starts immediately once automatic capture is

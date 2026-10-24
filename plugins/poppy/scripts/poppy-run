@@ -1,0 +1,26 @@
+#!/bin/sh
+# Run the installed poppy CLI for the Claude Code plugin.
+#
+# Claude Code starts hooks and MCP servers with its own PATH, which often lacks
+# the directory pipx or uv put poppy in. Try PATH first, then the places those
+# installers use by default. Exit 127 with a fix when poppy is not installed,
+# never 2, which would block the prompt or tool call that fired the hook.
+if command -v poppy >/dev/null 2>&1; then
+  exec poppy "$@"
+fi
+for candidate in \
+  "${PIPX_BIN_DIR:+$PIPX_BIN_DIR/poppy}" \
+  "${UV_TOOL_BIN_DIR:+$UV_TOOL_BIN_DIR/poppy}" \
+  "${XDG_BIN_HOME:+$XDG_BIN_HOME/poppy}" \
+  "$HOME/.local/bin/poppy" \
+  "${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/poppy-memory/bin/poppy" \
+  "$HOME/.local/pipx/venvs/poppy-memory/bin/poppy" \
+  "${UV_TOOL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools}/poppy-memory/bin/poppy" \
+  /opt/homebrew/bin/poppy \
+  /usr/local/bin/poppy; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    exec "$candidate" "$@"
+  fi
+done
+echo "Poppy plugin: the poppy command was not found. Install it with \`pipx install poppy-memory\` or \`uv tool install poppy-memory\`, then restart Claude Code." >&2
+exit 127
