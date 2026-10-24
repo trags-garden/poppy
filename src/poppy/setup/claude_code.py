@@ -1766,25 +1766,46 @@ def is_hook_installed(claude_config_dir: Path | None = None, event: str = "Sessi
 CLAUDE_CODE_PLUGIN_ID = "poppy@trags-garden"
 
 
-def is_claude_code_plugin_installed(claude_config_dir: Path | None = None) -> bool:
-    """True when the Poppy plugin is installed for the user and not disabled.
+def claude_code_plugins_root(claude_config_dir: Path | None = None) -> Path:
+    """Where Claude Code keeps plugin files and install records.
 
-    Claude Code records installs in ``plugins/installed_plugins.json`` and the
-    on/off switch in ``enabledPlugins`` in ``settings.json``, both under the
-    config directory. Only a user-scope install counts: a project or local
-    install covers one folder, not every session the way setup does.
+    ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` moves the whole plugins root, records
+    included; otherwise it is ``plugins`` inside the config directory.
+    """
+    env_dir = os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser()
+    return (claude_config_dir or get_claude_config_dir()) / "plugins"
+
+
+def claude_code_plugin_install(claude_config_dir: Path | None = None) -> dict | None:
+    """The user-scope install record of the Poppy plugin, or None.
+
+    Claude Code records installs in ``installed_plugins.json`` under the
+    plugins root and the on/off switch in ``enabledPlugins`` in
+    ``settings.json``. Only an enabled user-scope install counts: a project or
+    local install covers one folder, not every session the way setup does.
+    An unreadable file raises OSError, like the rest of this module.
     """
     claude_dir = claude_config_dir or get_claude_config_dir()
-    installed = _read_json(claude_dir / "plugins" / "installed_plugins.json")
+    installed = _read_json(claude_code_plugins_root(claude_dir) / "installed_plugins.json")
     plugins = installed.get("plugins") if isinstance(installed, MutableMapping) else None
     entries = plugins.get(CLAUDE_CODE_PLUGIN_ID) if isinstance(plugins, MutableMapping) else None
     if not isinstance(entries, list):
-        return False
-    if not any(isinstance(entry, MutableMapping) and entry.get("scope") == "user" for entry in entries):
-        return False
+        return None
+    entry = next((e for e in entries if isinstance(e, MutableMapping) and e.get("scope") == "user"), None)
+    if entry is None:
+        return None
     settings = _read_json(claude_dir / "settings.json")
     enabled = settings.get("enabledPlugins") if isinstance(settings, MutableMapping) else None
-    return not (isinstance(enabled, MutableMapping) and enabled.get(CLAUDE_CODE_PLUGIN_ID) is False)
+    if isinstance(enabled, MutableMapping) and enabled.get(CLAUDE_CODE_PLUGIN_ID) is False:
+        return None
+    return dict(entry)
+
+
+def is_claude_code_plugin_installed(claude_config_dir: Path | None = None) -> bool:
+    """True when the Poppy plugin is installed for the user and not disabled."""
+    return claude_code_plugin_install(claude_config_dir) is not None
 
 
 # ---------------------------------------------------------------------------

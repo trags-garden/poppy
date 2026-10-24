@@ -2,25 +2,45 @@
 # Run the installed poppy CLI for the Claude Code plugin.
 #
 # Claude Code starts hooks and MCP servers with its own PATH, which often lacks
-# the directory pipx or uv put poppy in. Try PATH first, then the places those
-# installers use by default. Exit 127 with a fix when poppy is not installed,
-# never 2, which would block the prompt or tool call that fired the hook.
+# the directory pipx, uv or pip put poppy in. Try PATH first, then the places
+# those installers use by default. Exit 127 with a fix when poppy is not
+# installed.
+#
+# Exit 2 from a hook blocks the prompt or tool call that fired it, and Click
+# also exits 2 on a usage error, such as an older poppy that lacks a hook this
+# plugin calls. So a hook's exit 2 becomes 1, which Claude Code reports
+# without blocking.
+poppy_bin=""
 if command -v poppy >/dev/null 2>&1; then
-  exec poppy "$@"
+  poppy_bin=poppy
+else
+  for candidate in \
+    "${PIPX_BIN_DIR:+$PIPX_BIN_DIR/poppy}" \
+    "${UV_TOOL_BIN_DIR:+$UV_TOOL_BIN_DIR/poppy}" \
+    "${XDG_BIN_HOME:+$XDG_BIN_HOME/poppy}" \
+    "$HOME/.local/bin/poppy" \
+    "${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/poppy-memory/bin/poppy" \
+    "$HOME/.local/pipx/venvs/poppy-memory/bin/poppy" \
+    "${UV_TOOL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools}/poppy-memory/bin/poppy" \
+    "$HOME"/Library/Python/*/bin/poppy \
+    /opt/homebrew/bin/poppy \
+    /usr/local/bin/poppy; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      poppy_bin=$candidate
+      break
+    fi
+  done
 fi
-for candidate in \
-  "${PIPX_BIN_DIR:+$PIPX_BIN_DIR/poppy}" \
-  "${UV_TOOL_BIN_DIR:+$UV_TOOL_BIN_DIR/poppy}" \
-  "${XDG_BIN_HOME:+$XDG_BIN_HOME/poppy}" \
-  "$HOME/.local/bin/poppy" \
-  "${PIPX_HOME:-$HOME/.local/share/pipx}/venvs/poppy-memory/bin/poppy" \
-  "$HOME/.local/pipx/venvs/poppy-memory/bin/poppy" \
-  "${UV_TOOL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools}/poppy-memory/bin/poppy" \
-  /opt/homebrew/bin/poppy \
-  /usr/local/bin/poppy; do
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    exec "$candidate" "$@"
-  fi
-done
-echo "Poppy plugin: the poppy command was not found. Install it with \`pipx install poppy-memory\` or \`uv tool install poppy-memory\`, then restart Claude Code." >&2
-exit 127
+if [ -z "$poppy_bin" ]; then
+  echo "Poppy plugin: the poppy command was not found. Install it with \`pipx install poppy-memory\` or \`uv tool install poppy-memory\`, then restart Claude Code." >&2
+  exit 127
+fi
+if [ "${1:-}" != hook ]; then
+  exec "$poppy_bin" "$@"
+fi
+"$poppy_bin" "$@"
+status=$?
+if [ "$status" -eq 2 ]; then
+  exit 1
+fi
+exit "$status"

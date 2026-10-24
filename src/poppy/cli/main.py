@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import click
+from click.core import ParameterSource
 
 from poppy import __version__, telemetry, update_check
 from poppy.config import PoppyConfig, config_key, load_config, parse_setting, update_config
@@ -1716,12 +1717,14 @@ def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
         raise click.ClickException(str(exc)) from exc
 
 
-def _record_agent_setup(client: str) -> None:
+def _record_agent_setup(client: str, *, via: str | None = None) -> None:
     """Emit setup telemetry: the per-install ``agent_setup`` event plus the
-    once-per-device ``setup_completed`` funnel milestone. Content-free."""
+    once-per-device ``setup_completed`` funnel milestone. Content-free.
+    ``via="plugin"`` marks a Claude Code setup the plugin already covered."""
     poppy_dir = _get_poppy_dir()
-    telemetry.capture(poppy_dir, "agent_setup", {"agent": client})
-    telemetry.capture_once(poppy_dir, "setup_completed", {"agent": client})
+    properties = {"agent": client} if via is None else {"agent": client, "via": via}
+    telemetry.capture(poppy_dir, "agent_setup", properties)
+    telemetry.capture_once(poppy_dir, "setup_completed", properties)
 
 
 def _daemon_setup_kwargs() -> dict:
@@ -1775,6 +1778,25 @@ def _install_simple_client(client: str, *, daemon_mode: bool = False) -> None:
         )
 
 
+def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: bool, daemon_mode: bool) -> None:
+    """Leave the plugin's wiring alone; add only the CLAUDE.md block when asked by flag."""
+    from poppy.setup.claude_code import install_claude_md_block
+
+    click.echo(
+        "The Poppy plugin for Claude Code is installed and already provides the MCP server, hooks "
+        "and memory primer, so setup did not add them."
+    )
+    if daemon_mode:
+        click.echo(
+            "--daemon was ignored: the plugin's MCP server runs `poppy serve`, which uses the daemon when one answers."
+        )
+    # The flag defaults to on, so only an explicit --claude-md writes the
+    # always-loaded block next to the plugin's skill.
+    if claude_md and click.get_current_context().get_parameter_source("claude_md") == ParameterSource.COMMANDLINE:
+        click.echo(f"  CLAUDE.md block: {install_claude_md_block(claude_dir)}")
+    _record_agent_setup("claude-code", via="plugin")
+
+
 @setup.command("claude-code")
 @click.option(
     "--hooks/--no-hooks",
@@ -1794,11 +1816,13 @@ def setup_claude_code(hooks: bool, claude_md: bool, yes: bool, daemon_mode: bool
 
     claude_dir = Path(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else None
 
-    if is_claude_code_plugin_installed(claude_dir):
-        click.echo(
-            "The Poppy plugin for Claude Code is installed and already provides the MCP server, hooks "
-            "and memory primer, so setup changed nothing."
-        )
+    try:
+        plugin_installed = is_claude_code_plugin_installed(claude_dir)
+    except OSError as exc:
+        click.echo(f"Warning: could not read Claude Code's plugin records ({exc}); continuing with setup.", err=True)
+        plugin_installed = False
+    if plugin_installed:
+        _setup_alongside_claude_code_plugin(claude_dir, claude_md=claude_md, daemon_mode=daemon_mode)
         _maybe_prompt_consent(load_config(_get_poppy_dir()), assume_yes=yes)
         return
 

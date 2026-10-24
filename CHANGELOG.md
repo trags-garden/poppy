@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Poppy ships a Claude Code plugin and a marketplace in this repository. `claude plugin marketplace add trags-garden/poppy` and `claude plugin install poppy@trags-garden` give Claude Code the MCP server, the capture hooks and the memory primer without `poppy setup claude-code`. With the plugin installed, `poppy setup claude-code` changes nothing, and `poppy doctor` accepts the plugin and warns when setup's entries are also present.
+- Poppy ships a Claude Code plugin and a marketplace in this repository. `claude plugin marketplace add trags-garden/poppy` and `claude plugin install poppy@trags-garden` give Claude Code the MCP server, the capture hooks and the memory primer without `poppy setup claude-code`. With the plugin installed, `poppy setup claude-code` adds no MCP server or hooks, and adds the CLAUDE.md block only when `--claude-md` is passed. `poppy doctor` accepts the plugin, fails when the plugin cannot find `poppy`, and warns when setup's entries are also present.
 
 ### Removed
 

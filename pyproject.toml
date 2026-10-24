@@ -97,6 +97,8 @@ include = [
     "CONTRIBUTING.md",
     "pyproject.toml",
     "docs/",
+    ".claude-plugin/",
+    "plugins/poppy/",
 ]
 
 [tool.pytest.ini_options]
