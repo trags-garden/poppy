@@ -963,7 +963,13 @@ def encrypt_status(deep: bool):
     if st.inconsistent:
         click.echo(f"  warning: inconsistent state ({st.state}); run `poppy encrypt repair`")
     if st.state == "corrupt":
-        click.echo("  warning: the store file is not plaintext and does not open under the key (corrupt or foreign)")
+        click.echo(
+            "  warning: the store file is not plaintext and does not open under the key (wrong key, corrupt or foreign)"
+        )
+    elif st.state == "wrong-key":
+        click.echo(
+            "  warning: the active key cannot open the store; another stored key works. Fix or unset POPPY_DB_KEY."
+        )
     elif st.state == "unreadable":
         click.echo("  warning: the store could not be read (permission or read-only filesystem), not corruption")
     elif st.state == "unknown":

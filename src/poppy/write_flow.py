@@ -214,9 +214,11 @@ def forget(
     fast FTS-only engine while deleting through the heavy write engine.
     ``tombstones`` lets a caller reuse an already-open store.
     """
+    from poppy.capture.journal import strip_previews
     from poppy.db import write_gate
     from poppy.tombstones import TombstoneStore
 
+    strip_previews(poppy_dir)
     reader = reader if reader is not None else engine
     store = tombstones if tombstones is not None else TombstoneStore(poppy_dir / "memories.db")
 

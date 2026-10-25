@@ -89,14 +89,26 @@ def announce_first_run_download(model_names: Sequence[str]) -> None:
         )
 
 
-def _load_fastembed(kind: str, model_name: str, cache_dir: Path):
+def _model_unavailable(model_name: str, exc: Exception) -> ModelUnavailableError:
+    return ModelUnavailableError(
+        f"Couldn't load ONNX retrieval model {model_name!r} ({type(exc).__name__}: {exc}). "
+        "Connect to the internet for the one-time model download, or run "
+        "`poppy engines use seed` for offline keyword-only search."
+    )
+
+
+def _load_fastembed(kind: str, model_name: str, cache_dir: Path, *, local_files_only: bool = False):
     """Construct one fastembed model with offline-safe semantics.
 
     ``kind`` is ``'bi'`` (TextEmbedding) or ``'cross'`` (TextCrossEncoder). A
     cached model loads with ``local_files_only=True`` (no network); an uncached
-    model downloads. On a cold cache with no network, raise ModelUnavailableError
-    with an actionable message rather than a raw traceback.
+    model downloads unless ``local_files_only`` is requested. On a cold cache
+    with no network, raise ModelUnavailableError with an actionable message
+    rather than a raw traceback.
     """
+    cached = is_fastembed_model_cached(model_name, cache_dir)
+    if local_files_only and not cached:
+        raise _model_unavailable(model_name, FileNotFoundError("model is missing from the local cache"))
     try:
         from fastembed import TextEmbedding
         from fastembed.rerank.cross_encoder import TextCrossEncoder
@@ -109,17 +121,12 @@ def _load_fastembed(kind: str, model_name: str, cache_dir: Path):
     _silence_fastembed_logs()
     ctor = TextEmbedding if kind == "bi" else TextCrossEncoder
     cache = str(cache_dir)
-    cached = is_fastembed_model_cached(model_name, cache_dir)
     try:
-        return ctor(model_name, cache_dir=cache, providers=_PROVIDERS, local_files_only=cached)
+        return ctor(model_name, cache_dir=cache, providers=_PROVIDERS, local_files_only=local_files_only or cached)
     except Exception as exc:  # noqa: BLE001 - re-raised as an actionable error below
-        if cached:
+        if cached and not local_files_only:
             raise  # present locally; a different failure — surface it as-is
-        raise ModelUnavailableError(
-            f"Couldn't load ONNX retrieval model {model_name!r} ({type(exc).__name__}: {exc}). "
-            "Connect to the internet for the one-time model download, or run "
-            "`poppy engines use seed` for offline keyword-only search."
-        ) from exc
+        raise _model_unavailable(model_name, exc) from exc
 
 
 class FastembedModels(IdleUnloadingModels):
@@ -165,6 +172,16 @@ class FastembedModels(IdleUnloadingModels):
         return _load_fastembed(kind, model_name, self._cache_dir)
 
     # --- inference ---------------------------------------------------------
+
+    def check_available(self) -> None:
+        """Load each missing encoder locally, keeping it resident for subsequent use."""
+        with self._lock:
+            for attr, kind, name in (("_bi", "bi", BI_ENCODER), ("_cross", "cross", CROSS_ENCODER)):
+                if getattr(self, attr) is None:
+                    model = _load_fastembed(kind, name, self._cache_dir, local_files_only=True)
+                    setattr(self, attr, model)
+                    self._last_use = self._clock()
+                    self._start_timer_locked()
 
     def embed(self, text: str) -> np.ndarray:
         """Return a normalized float32 embedding for ``text``."""

@@ -573,15 +573,29 @@ def check_encryption(ctx: DoctorContext) -> None:
 
     from poppy import encryption
 
-    enc = encryption.status(poppy_dir)
+    enc = encryption.status(poppy_dir, deep=True)
     if enc.inconsistent:
         line("encryption at rest", "FAIL", f"inconsistent state ({enc.state})", hint="run `poppy encrypt repair`")
+    elif enc.enabled and enc.deps_installed and enc.env_key_malformed:
+        line(
+            "encryption at rest",
+            "FAIL",
+            "on, but POPPY_DB_KEY is malformed (not 64 hex) and shadows the keychain",
+            hint="fix or unset POPPY_DB_KEY",
+        )
     elif enc.state == "corrupt":
         line(
             "encryption at rest",
             "FAIL",
-            "store file is not plaintext and does not open under the key (corrupt or foreign)",
+            "store file is not plaintext and does not open under the key (wrong key, corrupt or foreign)",
             hint="restore a good backup; see `poppy encrypt status`",
+        )
+    elif enc.state == "wrong-key":
+        line(
+            "encryption at rest",
+            "FAIL",
+            "on, but the active key cannot open the store; another stored key works",
+            hint="fix or unset POPPY_DB_KEY",
         )
     elif enc.state == "unreadable":
         line(
@@ -605,13 +619,6 @@ def check_encryption(ctx: DoctorContext) -> None:
             "FAIL",
             "on, but the encryption extra is not installed",
             hint="pipx inject poppy-memory sqlcipher3",
-        )
-    elif enc.env_key_malformed:
-        line(
-            "encryption at rest",
-            "FAIL",
-            "on, but POPPY_DB_KEY is malformed (not 64 hex) and shadows the keychain",
-            hint="fix or unset POPPY_DB_KEY",
         )
     elif enc.key_present:
         where = f"{encryption.ENV_KEY} env var" if enc.env_key_active else "OS keychain"
@@ -645,6 +652,7 @@ def check_engine(ctx: DoctorContext) -> None:
     try:
         engine = _main._get_engine()
         s = engine.stats()
+        engine.check_models()
         # Surface two drift signals:
         #   1. Configured engine != active engine, get_engine fell back due to
         #      missing deps or an unknown name.

@@ -239,15 +239,11 @@ def test_reconciler_stores_the_masked_form(tmp_path: Path, monkeypatch: pytest.M
     assert MASK in stored[0].content
 
 
-def test_capture_journal_preview_is_masked(tmp_path: Path) -> None:
-    """Regression: the journal records an 80-char preview of each candidate in
-    plaintext (not SQLCipher-encrypted) BEFORE the reconciler runs. Because the
-    candidate is built already-masked, that preview carries no raw secret."""
-    candidates = _build_memories([_SECRET_ITEM], source_type="claude-code", session_id="sess", project="poppy")
+def test_capture_journal_omits_content(tmp_path: Path) -> None:
+    candidates = _build_memories([_SECRET_ITEM], source_type="codex", session_id="sess", project="poppy")
     journal.record(tmp_path, session_id="sess", project="poppy", count=len(candidates), items=candidates)
 
     raw_journal = (tmp_path / journal.JOURNAL_FILENAME).read_text()
-    assert "hunter2" not in raw_journal  # the leak this fix closes
-    preview = journal.read_all(tmp_path)[0]["items"][0]["preview"]
-    assert "hunter2" not in preview
-    assert MASK in preview
+    assert "hunter2" not in raw_journal
+    assert MASK not in raw_journal
+    assert journal.read_all(tmp_path)[0]["items"] == [{"type": candidates[0].memory_type}]

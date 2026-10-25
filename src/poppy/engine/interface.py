@@ -34,6 +34,9 @@ class RetrievalEngine(ABC):
     # rather than feeding meaningless cross-model cosine scores into RRF.
     model_id: str | None = None
 
+    def check_models(self) -> None:
+        """Verify required local models without downloading. Model-free engines do nothing."""
+
     @abstractmethod
     def ingest(self, memory: Memory) -> str:
         """Store a memory, return its ID."""

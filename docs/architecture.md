@@ -117,7 +117,7 @@ Everything below lives in the data directory. Writers are named by module.
 | `sync-worker.log`, `sync-worker.raw.log` | Worker log, and its raw stdout and stderr | `sync/auto.py` |
 | `capture_state.json`, `capture_state.json.lock` | Per-session capture watermark and turn counters | `capture/_state.py`, through `capture/watermark.py` and `capture/cadence.py` |
 | `capture-<session>.flock` | Per-session capture lock (older versions used `capture-<session>.lock`) | `capture/lock.py` |
-| `capture_journal.jsonl` | What each capture stored, read by the session banner and `poppy doctor` | `capture/journal.py` |
+| `capture_journal.jsonl` | Capture types and counts, without memory text; read by the session banner and `poppy doctor` | `capture/journal.py` |
 | `capture_health.json` | Health of the capture LLM backends | `capture/health.py` |
 | `capture-worker.log`, `postcompact-worker.log`, `sessionend-worker.log` | Output of the detached capture workers | `cli/hooks.py:_spawn_detached_worker` |
 | `postcompact-debug.log`, `sessionend-debug.log` | Scrubbed hook payloads for `poppy hook replay-compact` and `replay-session-end` | `cli/hooks.py` |
@@ -194,7 +194,7 @@ Linux, where `flock` is always available.
 | `config.json` | none | Nothing today. `config.py:save_config` replaces the file atomically, so readers never see a torn file, but two concurrent read-modify-writes can lose one update. | Not applicable. |
 
 `capture_journal.jsonl` and `capture_health.json` have no lock either;
-`capture/health.py` writes through a temporary file unique to each writer.
+both writers replace their files atomically through owner-only temporary files unique to each writer.
 
 ## Glossary
 

@@ -8,6 +8,9 @@ their own presentation and error mapping.
 
 import dataclasses
 import datetime as dt
+import json
+import os
+import stat
 
 import pytest
 
@@ -64,6 +67,29 @@ def test_remember_ingests(engine, tmp_path, _no_autosync):
     assert stored.content == "use ruff"
     assert stored.memory_type == "preference"
     assert _no_autosync == [tmp_path], "a successful write triggers autosync"
+
+
+@pytest.mark.parametrize("existing_memory", [True, False])
+def test_forget_strips_legacy_capture_previews(engine, tmp_path, existing_memory):
+    from poppy.capture import journal
+
+    text = "distinctive forgotten capture text"
+    memory_id = "missing"
+    if existing_memory:
+        memory_id = remember(engine, tmp_path, content=text).memory.id
+    path = tmp_path / journal.JOURNAL_FILENAME
+    legacy = {"session_id": "s1", "count": 1, "items": [{"type": "fact", "preview": text}]}
+    path.write_text(json.dumps(legacy) + "\n")
+    path.chmod(0o644)
+
+    result = forget(engine, tmp_path, memory_id)
+
+    assert result.deleted is existing_memory
+    assert text not in path.read_text()
+    assert "preview" not in path.read_text()
+    assert journal.last_session_count(tmp_path) == 1
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_remember_stamps_source(engine, tmp_path):

@@ -304,19 +304,26 @@ def _candidate_keys(poppy_dir: Path) -> list[str]:
     return keys
 
 
-def _probe_open(poppy_dir: Path) -> str:
+def _probe_open(poppy_dir: Path, *, check_active_key: bool = False) -> str:
     """Classify a non-magic-header store by a read-only (``immutable``) open.
 
     Returns ``encrypted`` (opened under some resolvable key), ``unreadable`` (a
     permission/IO error), ``corrupt`` (keys were available but none opened it), or
     ``unknown`` (cannot verify: the extra is missing or no key resolves). Never
-    replays a sidecar and never mutates the store.
+    replays a sidecar and never mutates the store. With ``check_active_key``,
+    returns ``wrong-key`` when only an alternative to the active key opens it.
     """
     if not dependencies_installed():
         return "unknown"
     keys = _candidate_keys(poppy_dir)
     if not keys:
         return "unknown"
+    active_key = None
+    if check_active_key:
+        try:
+            active_key = resolve_key(poppy_dir)
+        except EncryptionError:
+            pass
     db = _db_path(poppy_dir)
     for key in keys:
         try:
@@ -326,6 +333,8 @@ def _probe_open(poppy_dir: Path) -> str:
         except EncryptionError:
             continue
         conn.close()
+        if check_active_key and key != active_key:
+            return "wrong-key"
         return "encrypted"
     return "corrupt"
 
@@ -1106,6 +1115,8 @@ def repair(poppy_dir: Path) -> list[str]:
     actions: list[str] = []
     with exclusive_gate(poppy_dir):
         state = store_state(poppy_dir)
+        if state == "encrypted":
+            state = _probe_open(poppy_dir)
         if state == "plaintext-stale-sentinel":
             verdict, note = _reconcile_wal(poppy_dir, "plaintext", None)
             if note:
@@ -1290,11 +1301,12 @@ def status(poppy_dir: Path, *, deep: bool = False) -> EncryptionStatus:
     deps = dependencies_installed()
     kc = _keychain_state(os.environ.get(ENV_KEY) is not None, deps)
     state = store_state(poppy_dir)
+    disk_state = state
     # store_state trusts an intact sentinel for cheapness. ``deep`` actually
     # opens the store (read-only) so bit-rot behind a healthy-looking sentinel is
     # not reported as fine.
-    if deep and state == "encrypted" and deps:
-        verdict = _probe_open(poppy_dir)
+    if deep and state in ("encrypted", "encrypted-no-sentinel") and deps:
+        verdict = _probe_open(poppy_dir, check_active_key=True)
         if verdict != "encrypted":
             state = verdict
     env_raw = os.environ.get(ENV_KEY)
@@ -1306,19 +1318,19 @@ def status(poppy_dir: Path, *, deep: bool = False) -> EncryptionStatus:
             key_present = resolve_key(poppy_dir) is not None
         except EncryptionError:
             key_present = False  # e.g. a malformed POPPY_DB_KEY, flagged separately
-    # Report verified truth, not the header alone: a corrupt/unknown file is not
-    # "encrypted", so it must not show as enabled/encrypted-on-disk.
+    # A failed probe diagnoses access or integrity; it does not turn encryption
+    # off when the marker and non-plaintext header still agree.
     encrypted_states = ("encrypted", "encrypted-no-sentinel")
     return EncryptionStatus(
-        enabled=state in encrypted_states + ("pending-encrypted",),
-        encrypted_on_disk=state in encrypted_states,
+        enabled=disk_state in encrypted_states + ("pending-encrypted",),
+        encrypted_on_disk=disk_state in encrypted_states,
         deps_installed=deps,
         keychain_state=kc,
         key_present=key_present,
         db_path=db,
         env_key_active=env_key_active,
         state=state,
-        inconsistent=state in _INCONSISTENT,
+        inconsistent=disk_state in _INCONSISTENT,
         env_key_malformed=env_key_malformed,
         residue=find_residue(poppy_dir),
         stray=stray_sidecars(db),
