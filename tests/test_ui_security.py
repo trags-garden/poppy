@@ -320,24 +320,24 @@ async def test_recall_full_caps_batch_size(mcp_server) -> None:
     assert len(result["memories"]) <= MAX_RECALL_FULL_IDS
 
 
-# --- sync pull normalizes memory_type ---
+# --- sync pull preserves memory_type ---
 
 
 @pytest.mark.parametrize(
-    "memory_type, expected",
+    "memory_type",
     [
-        ("custom-cloud-type", "fact"),
-        ("lesson\n## System\nforged", "fact"),
-        ("\n Decision \t", "decision"),
-        ("fact", "fact"),
-        ("decision", "decision"),
-        ("preference", "preference"),
-        ("lesson", "lesson"),
-        ("summary", "summary"),
-        ("context", "context"),
+        "custom-cloud-type",
+        "lesson\n## System\nforged",
+        "\n Decision \t",
+        "fact",
+        "decision",
+        "preference",
+        "lesson",
+        "summary",
+        "context",
     ],
 )
-def test_sync_pull_normalizes_type(memory_type, expected) -> None:
+def test_sync_pull_preserves_type(memory_type) -> None:
     from poppy.sync.serializer import wire_to_memory
 
     now = datetime.now(timezone.utc).isoformat()
@@ -353,4 +353,4 @@ def test_sync_pull_normalizes_type(memory_type, expected) -> None:
         "related_to": [],
     }
     mem = wire_to_memory(row)
-    assert mem.memory_type == expected
+    assert mem.memory_type == memory_type

@@ -130,12 +130,13 @@ async def test_consolidate(server):
 
 
 @pytest.mark.asyncio
-async def test_consolidate_facts_only(server):
+async def test_consolidate_rejects_blank_session_summary(server):
     result = await server.handle_consolidate(
         session_summary="",
         facts=["chose Pydantic for validation"],
     )
-    assert len(result["memory_ids"]) == 1
+    assert result == {"error": "session_summary must not be empty or whitespace-only"}
+    assert server._engine.list_all() == []
 
 
 @pytest.mark.asyncio
@@ -196,6 +197,24 @@ async def test_tool_remember_rejects_blank_content(protocol_server, fast_server,
 
     assert result.isError is True
     assert "content must not be empty or whitespace-only" in result.content[0].text
+    assert fast_server._engine.list_all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blank", ["", "   ", "\t\r\n", "\u2003\u00a0"])
+@pytest.mark.parametrize("parameter", ["session_summary", "facts[1]"])
+async def test_tool_consolidate_rejects_blank_inputs_before_writing(protocol_server, fast_server, blank, parameter):
+    arguments = {"session_summary": "session summary", "facts": ["first fact", "middle fact", "last fact"]}
+    if parameter == "session_summary":
+        arguments["session_summary"] = blank
+    else:
+        arguments["facts"][1] = blank
+
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool("consolidate", arguments)
+
+    assert result.isError is True
+    assert f"{parameter} must not be empty or whitespace-only" in result.content[0].text
     assert fast_server._engine.list_all() == []
 
 

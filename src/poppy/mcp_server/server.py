@@ -355,6 +355,11 @@ class PoppyMcpServer:
         project: str | None = None,
         source: str | None = None,
     ) -> dict:
+        if not session_summary.strip():
+            return {"error": "session_summary must not be empty or whitespace-only"}
+        for index, fact in enumerate(facts):
+            if not fact.strip():
+                return {"error": f"facts[{index}] must not be empty or whitespace-only"}
         memory_ids = []
         if session_summary:
             r = await self.handle_remember(
@@ -615,6 +620,8 @@ def create_mcp_server(
         result = await handler.handle_consolidate(
             session_summary, facts, project=project, source=handler.resolve_source(ctx)
         )
+        if "error" in result:
+            raise ToolError(result["error"])
         return f"Stored {len(result['memory_ids'])} memories from session."
 
     @mcp.tool()
