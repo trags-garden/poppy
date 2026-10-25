@@ -111,8 +111,8 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     # open, and an unconditional UPDATE would take a write lock every time.
     if conn.execute("SELECT 1 FROM ui_tombstones WHERE token IS NULL LIMIT 1").fetchone() is not None:
         # randomblob gives each row its own token in one statement.
-        conn.execute("UPDATE ui_tombstones SET token = lower(hex(randomblob(16))) WHERE token IS NULL")
-        conn.commit()
+        with write_txn(conn):
+            conn.execute("UPDATE ui_tombstones SET token = lower(hex(randomblob(16))) WHERE token IS NULL")
 
 
 @dataclass
@@ -134,18 +134,23 @@ class Tombstone:
 class TombstoneStore:
     """Manages the `ui_tombstones` sidecar table in the Poppy SQLite DB."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, connection: sqlite3.Connection | None = None) -> None:
+        """Pass an engine connection to initialize and write within its transaction."""
         self._db_path = db_path
         self._lock = threading.RLock()
-        self._conn = connect_db(db_path, check_same_thread=False)
+        self._conn = connection if connection is not None else connect_db(db_path, check_same_thread=False)
         apply_row_factory(self._conn)
-        self._conn.executescript(SCHEMA)
-        _migrate_columns(self._conn)
-        self._migrate_sync_provenance()
-        # The engine owns `memories`. A store opened before it exists has no live
-        # rows to clear yet; the next open adds the trigger.
-        if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories'").fetchone():
-            with self._conn:
+        with self._lock, write_txn(self._conn):
+            # executescript commits an open transaction, so execute the schema
+            # statements separately when joining an engine's supersede.
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    self._conn.execute(statement)
+            _migrate_columns(self._conn)
+            self._migrate_sync_provenance()
+            # The engine owns `memories`. A store opened before it exists has no live
+            # rows to clear yet; the next open adds the trigger.
+            if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories'").fetchone():
                 self._conn.execute(SUPPRESSION_TRIGGER)
 
     def _migrate_sync_provenance(self) -> None:
@@ -169,8 +174,7 @@ class TombstoneStore:
 
         if "sent_remotes" in columns("ui_tombstones"):
             return
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
+        with write_txn(self._conn):
             cols = columns("ui_tombstones")
             if "sent_remotes" in cols:  # Another opener completed the migration.
                 return

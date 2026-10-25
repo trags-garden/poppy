@@ -43,7 +43,7 @@ def _mem(content: str, mid: str = "m1", expires_at: datetime | None = None) -> M
 
 @pytest.fixture
 def engine(tmp_path: Path) -> SeedEngine:
-    return SeedEngine(db_path=tmp_path / "memories.db")
+    return SeedEngine(db_path=tmp_path / "mem.db")
 
 
 # -------- parse_ttl ----------------------------------------------------------
@@ -308,7 +308,7 @@ def test_supersede_tombstones_old_and_links_new(engine: SeedEngine, tmp_path: Pa
 
     from poppy.ui.tombstones import TombstoneStore
 
-    ts = TombstoneStore(tmp_path / "memories.db")
+    ts = TombstoneStore(tmp_path / "mem.db")
     assert ts.get(old.id) is not None
 
 

@@ -325,6 +325,8 @@ def test_supersede_embed_failure_preserves_live_memory(tmp_path, monkeypatch):
     engine = _bloom(db)
     old = _memory("old", OLD_TEXT)
     engine.ingest(old)
+    trash = TombstoneStore(db)
+    trash._conn.close()
     before = _rows(db, "SELECT * FROM memories")
     vectors = _rows(db, "SELECT * FROM memory_embeddings")
     index = _rows(db, "SELECT * FROM memory_fts")
@@ -387,8 +389,9 @@ def test_supersede_database_failure_rolls_back_everything(tmp_path, engine_kind,
 
 
 @pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
-def test_supersede_commits_memory_index_and_archive(tmp_path, engine_kind):
-    db = tmp_path / "memories.db"
+@pytest.mark.parametrize("filename", ["memories.db", "mem.db"])
+def test_supersede_commits_memory_index_and_archive(tmp_path, engine_kind, filename):
+    db = tmp_path / filename
     engine = _bloom(db) if engine_kind == "bloom" else SeedEngine(db)
     old = _memory("old", OLD_TEXT)
     new = _memory("new", NEW_TEXT)
@@ -403,4 +406,35 @@ def test_supersede_commits_memory_index_and_archive(tmp_path, engine_kind):
     assert _rows(db, "SELECT id, superseded_by FROM ui_tombstones") == [(old.id, new.id)]
     if engine_kind == "bloom":
         assert _rows(db, "SELECT id FROM memory_embeddings") == [(new.id,)]
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_supersede_rolls_back_archive_initialization_on_failure(tmp_path, engine_kind):
+    db = tmp_path / "mem.db"
+    engine = _bloom(db) if engine_kind == "bloom" else SeedEngine(db)
+    old = _memory("old", OLD_TEXT)
+    engine.ingest(old)
+    tables = ["memories", "memory_fts"]
+    if engine_kind == "bloom":
+        tables.append("memory_embeddings")
+    before = {table: _rows(db, f"SELECT * FROM {table}") for table in tables}
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_supersede AFTER INSERT ON memories WHEN new.id = 'new' "
+            "BEGIN SELECT RAISE(ABORT, 'write failed'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="write failed"):
+        supersede_memory(engine, _memory("new", NEW_TEXT), old.id, poppy_dir=tmp_path)
+
+    assert engine.get(old.id) == old
+    assert engine.get("new") is None
+    for table in tables:
+        assert _rows(db, f"SELECT * FROM {table}") == before[table]
+    assert _rows(db, "SELECT name FROM sqlite_master WHERE name = 'ui_tombstones'") == []
+    assert engine._conn.in_transaction is False
+    with sqlite3.connect(db, timeout=1) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
     engine._conn.close()
