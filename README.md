@@ -1,3 +1,5 @@
+<!-- mcp-name: ai.trags/poppy -->
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://trags.ai/images/poppy/readme-header-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="https://trags.ai/images/poppy/readme-header-light.svg">
@@ -424,11 +426,15 @@ journal: run `journalctl --user -u poppy-daemon.service`. If
 `poppy daemon start` reports the daemon did not become reachable, check the
 log.
 
-The installed service does not read your shell's environment, so
-`POPPY_DAEMON_PORT` and `POPPY_DIR` only apply to `poppy daemon run` and to a
-daemon started without a service.
+The installed service saves `POPPY_DAEMON_PORT` and `POPPY_DIR` overrides set
+when you run `poppy daemon install`. Reinstall and restart the service to change them.
 
 ## Storage
+
+Client setup saves an explicit `POPPY_DIR` override in MCP registrations and
+prefixes installed hook commands with a shell-quoted `POPPY_DIR` assignment on
+macOS and Linux so clients launched outside your shell use the same store. Run
+setup again to change or remove that saved override.
 
 Memories live at `~/.poppy/memories.db` (set `POPPY_DIR` to override). The
 schema is a single SQLite file with FTS5 plus an embeddings table; back it

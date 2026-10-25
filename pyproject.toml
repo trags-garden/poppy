@@ -58,6 +58,7 @@ dependencies = [
 # cold-cache ModelUnavailableError renders as one actionable line, not a
 # raw HuggingFace traceback.
 poppy = "poppy.cli.main:main"
+poppy-memory = "poppy.cli.main:main"
 
 [project.urls]
 Homepage = "https://trags.ai/poppy"
@@ -96,6 +97,7 @@ include = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "pyproject.toml",
+    "server.json",
     "docs/",
     ".claude-plugin/",
     "plugins/poppy/",

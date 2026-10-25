@@ -749,6 +749,8 @@ def config_set(key: str, value: str):
     try:
         parsed = parse_setting(key, value)
     except ValueError as exc:
+        if key == "trags-api-url":
+            raise click.ClickException(str(exc)) from exc
         raise click.BadParameter(str(exc)) from exc
     entry = config_key(key)
     # A self-persisting key applies its own write (telemetry -> telemetry.set_enabled,
@@ -1309,6 +1311,10 @@ def daemon_status():
     click.echo(f"HTTP reachable: {'yes' if state.reachable else 'no'}")
     if state.status:
         click.echo(f"Daemon version: {state.status.get('version', 'unknown')}")
+        if "port" in state.status:
+            click.echo(f"Daemon port: {state.status['port']}")
+        if "store_path" in state.status:
+            click.echo(f"Store: {state.status['store_path']}")
 
 
 @daemon_group.command("install")
@@ -2052,7 +2058,7 @@ def setup_trags(api_url: str | None):
     """One-command device-code onboarding for Trags cloud sync.
 
     Opens your browser to authorize this machine, then writes the returned
-    API key to ~/.poppy/config.json. After this you can run `poppy sync push`.
+    API key to ~/.poppy/config.json. After this you can run `poppy sync run`.
     """
     from poppy.setup.trags import run_device_code_flow
 

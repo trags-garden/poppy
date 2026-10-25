@@ -34,6 +34,40 @@ def test_dunder_version_matches_pyproject() -> None:
     assert poppy.__version__ == _pyproject_version()
 
 
+def test_registry_versions_match_pyproject() -> None:
+    server = json.loads((REPO_ROOT / "server.json").read_text())
+    version = _pyproject_version()
+    assert server["version"] == version
+    assert server["packages"][0]["version"] == version
+
+
+def test_registry_package_starts_stdio_server() -> None:
+    server = json.loads((REPO_ROOT / "server.json").read_text())
+    package = server["packages"][0]
+    assert server["name"] == "ai.trags/poppy"
+    assert package["registryType"] == "pypi"
+    assert package["identifier"] == "poppy-memory"
+    assert package["transport"] == {"type": "stdio"}
+    command = [package["runtimeHint"]]
+    for arg in package.get("runtimeArguments", []):
+        if arg["type"] == "named":
+            command.append(arg["name"])
+        command.append(arg["value"])
+    command.append(f"{package['identifier']}@{package['version']}")
+    for arg in package["packageArguments"]:
+        if arg["type"] == "named":
+            command.append(arg["name"])
+        command.append(arg["value"])
+    assert command == ["uvx", f"poppy-memory@{_pyproject_version()}", "serve"]
+    with (REPO_ROOT / "pyproject.toml").open("rb") as f:
+        scripts = tomllib.load(f)["project"]["scripts"]
+    assert scripts[package["identifier"]] == scripts["poppy"] == "poppy.cli.main:main"
+    result = CliRunner().invoke(cli, [*command[2:], "--help"], prog_name=package["identifier"])
+    assert result.exit_code == 0
+    assert "Usage: poppy-memory serve" in result.output
+    assert "<!-- mcp-name: ai.trags/poppy -->" in (REPO_ROOT / "README.md").read_text().splitlines()
+
+
 def test_resolve_version_falls_back_to_pyproject_when_not_installed() -> None:
     with patch.object(
         poppy._metadata,

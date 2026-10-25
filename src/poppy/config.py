@@ -7,6 +7,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 from poppy.paths import ensure_poppy_dir
 
@@ -291,6 +292,26 @@ def _choice_parser(name: str, values: set[str]) -> Callable[[str, str], str]:
 
 
 def _parse_str(value: str, key: str) -> str:
+    return value
+
+
+def _parse_trags_api_url(value: str, key: str) -> str:
+    message = f"{key} must use HTTPS, or HTTP with localhost, 127.0.0.1 or ::1."
+    try:
+        url = urlsplit(value)
+        valid = (
+            bool(url.hostname)
+            and not url.username
+            and not url.password
+            and not any(char.isspace() or ord(char) < 32 for char in value)
+            and "\\" not in value
+            and (url.scheme == "https" or (url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}))
+        )
+        url.port  # Validate a supplied port too.
+    except ValueError:
+        raise ValueError(message) from None
+    if not valid:
+        raise ValueError(message)
     return value
 
 
@@ -585,7 +606,7 @@ _REGISTRY: tuple[ConfigKey, ...] = (
         "trags_api_url",
         settings_name="trags-api-url",
         default=DEFAULT_TRAGS_API_URL,
-        parse=_parse_str,
+        parse=_parse_trags_api_url,
         apply=_apply_trags_api_url,
         save=_save_trags_api_url,
     ),
