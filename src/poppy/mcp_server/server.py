@@ -7,7 +7,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 from poppy import __version__
 from poppy.engine.interface import RetrievalEngine
-from poppy.models import MEMORY_TYPES, Filters
+from poppy.models import MEMORY_TYPES, Filters, renderable_memory_fields
 from poppy.paths import ensure_poppy_dir
 from poppy.runtime import get_engine
 from poppy.sources import client_name_from_context
@@ -378,7 +378,10 @@ class PoppyMcpServer:
         memories = self._engine.list_all(filters=filters, limit=limit)
         if not memories:
             return {"context": ""}
-        lines = [f"- [{m.memory_type}] {_truncate_content(m.content)}" for m in memories]
+        lines = []
+        for m in memories:
+            memory_type, content = renderable_memory_fields(m.memory_type, m.content)
+            lines.append(f"- [{memory_type}] {_truncate_content(content)}")
         return {"context": "\n".join(lines)}
 
 

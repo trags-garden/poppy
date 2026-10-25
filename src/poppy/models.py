@@ -19,6 +19,12 @@ def normalize_memory_type(value: str | None) -> str:
     return candidate if candidate in MEMORY_TYPES else DEFAULT_MEMORY_TYPE
 
 
+def renderable_memory_fields(memory_type: str | None, content: str) -> tuple[str, str]:
+    """Return normalized fields safe to render as a single memory bullet."""
+    flattened_type = " ".join(memory_type.split()) if memory_type is not None else None
+    return normalize_memory_type(flattened_type), " ".join(content.split())
+
+
 @dataclass
 class Source:
     type: str  # claude-code | cursor | manual | obsidian
