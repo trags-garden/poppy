@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
@@ -134,6 +135,68 @@ def test_hooks_capture_only_explicit_store(tmp_path, monkeypatch, client, overri
         assert split_hook_command(command)[1] == "hook"
     monkeypatch.delenv("POPPY_DIR", raising=False)
     assert install_commands()[1] == original
+
+
+def test_windows_hook_store_override_keeps_original_command(tmp_path, monkeypatch):
+    setup = sys.modules[install_session_start_hook.__module__]
+    monkeypatch.setattr(setup, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    executable = r"C:\Program Files\Poppy\poppy.exe"
+    monkeypatch.setattr(setup, "get_poppy_executable", lambda **_kwargs: executable)
+    monkeypatch.delenv("POPPY_DIR", raising=False)
+    path = install_session_start_hook(tmp_path)
+    original = path.read_text()
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path / "store with spaces"))
+
+    for _ in range(3):
+        install_session_start_hook(tmp_path)
+        assert path.read_text() == original
+        groups = json.loads(path.read_text())["hooks"]["SessionStart"]
+        assert len(groups) == 1
+        assert groups[0]["hooks"] == [{"type": "command", "command": f'"{executable}" hook session-start'}]
+        assert is_hook_installed(tmp_path, "SessionStart")
+
+
+@pytest.mark.parametrize("os_name", ["posix", "nt"])
+@pytest.mark.parametrize("store", ["", "old store", "store 'quoted' $HOME; `echo nope`/東京\nnext"])
+def test_saved_hook_store_is_recognised_and_replaced(tmp_path, monkeypatch, os_name, store):
+    setup = sys.modules[install_session_start_hook.__module__]
+    monkeypatch.setattr(setup, "os", SimpleNamespace(**{**vars(os), "name": os_name}))
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path / "new store"))
+    prefix = f"POPPY_DIR={shlex.quote(store)} "
+    executable = r"C:\Program Files\Poppy\poppy.exe" if os_name == "nt" else "/opt/Poppy Tools/poppy"
+    quoted = subprocess.list2cmdline([executable]) if os_name == "nt" else shlex.quote(executable)
+    command = f"{prefix}{quoted} hook session-start"
+    assert split_hook_command(command) == [executable, "hook", "session-start"]
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": command}]}],
+                    "Stop": [{"matcher": "", "hooks": [{"command": f"{prefix}{quoted} hook stop"}]}],
+                }
+            }
+        )
+    )
+    assert is_hook_installed(tmp_path, "SessionStart")
+    assert setup.poppy_hook_commands_in(json.loads(path.read_text())) == [command, f"{prefix}{quoted} hook stop"]
+    assert remove_legacy_hooks(tmp_path) == [f"Stop:{prefix}{quoted} hook stop"]
+    assert "Stop" not in json.loads(path.read_text())["hooks"]
+
+    for _ in range(3):
+        install_session_start_hook(tmp_path)
+        groups = json.loads(path.read_text())["hooks"]["SessionStart"]
+        assert len(groups) == 1
+        current = groups[0]["hooks"][0]["command"]
+        assert current != command
+        assert current.startswith("POPPY_DIR=") == (os_name == "posix")
+        assert split_hook_command(current) == [expected_poppy_path(tmp_path), "hook", "session-start"]
+
+    monkeypatch.delenv("POPPY_DIR", raising=False)
+    install_session_start_hook(tmp_path)
+    groups = json.loads(path.read_text())["hooks"]["SessionStart"]
+    assert len(groups) == 1
+    assert groups[0]["hooks"] == [{"type": "command", "command": hook_cmd(tmp_path, "session-start")}]
 
 
 def test_get_poppy_executable_prefers_path_hit(tmp_path, monkeypatch):

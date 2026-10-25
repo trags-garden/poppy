@@ -432,9 +432,9 @@ when you run `poppy daemon install`. Reinstall and restart the service to change
 ## Storage
 
 Client setup saves an explicit `POPPY_DIR` override in MCP registrations and
-prefixes installed hook commands with a shell-quoted `POPPY_DIR` assignment so
-clients launched outside your shell use the same store. Run setup again to
-change or remove that saved override.
+prefixes installed hook commands with a shell-quoted `POPPY_DIR` assignment on
+macOS and Linux so clients launched outside your shell use the same store. Run
+setup again to change or remove that saved override.
 
 Memories live at `~/.poppy/memories.db` (set `POPPY_DIR` to override). The
 schema is a single SQLite file with FTS5 plus an embeddings table; back it

@@ -1285,12 +1285,16 @@ def split_hook_command(command: object) -> list[str] | None:
     if not isinstance(command, str):
         return None
     try:
+        if command.lstrip().startswith("POPPY_DIR="):
+            lexer = shlex.shlex(command, posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            lexer.get_token()
+            command = lexer.instream.read()
         if os.name == "nt":
             argv = [part.strip('"') for part in shlex.split(command, posix=False)]
         else:
             argv = shlex.split(command)
-        if argv and argv[0].startswith("POPPY_DIR="):
-            argv = argv[1:]
         return argv
     except ValueError:
         return None
@@ -1338,7 +1342,7 @@ def poppy_hook_command(canonical: str) -> str:
     executable = get_poppy_executable(resolve_symlinks=False)
     quoted = subprocess.list2cmdline([executable]) if os.name == "nt" else shlex.quote(executable)
     command = " ".join([quoted, *canonical.split()[1:]])
-    if env := store_environment():
+    if os.name != "nt" and (env := store_environment()):
         command = f"POPPY_DIR={shlex.quote(env['POPPY_DIR'])} {command}"
     return command
 
