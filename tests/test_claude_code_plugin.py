@@ -395,7 +395,7 @@ def test_doctor_names_duplicate_hooks_and_still_checks_them(tmp_path):
     for groups in settings["hooks"].values():
         for group in groups:
             for handler in group["hooks"]:
-                handler["command"] = "/nonexistent/poppy " + " ".join(handler["command"].split()[1:])
+                handler["command"] = "/nonexistent/poppy hook " + handler["command"].split(" hook ", 1)[1]
     (claude_dir / "settings.json").write_text(json.dumps(settings))
     _record_install(claude_dir)
 

@@ -636,6 +636,7 @@ def test_setup_claude_code(tmp_path, config_dir, relative_mcp_path):
     # Hooks run the same executable as the MCP entry, so they keep working when
     # the client's PATH does not include poppy's install directory.
     poppy_cmd = shlex.quote(mcp_data["mcpServers"]["poppy"]["command"])
+    poppy_cmd = f"POPPY_DIR={shlex.quote(env['POPPY_DIR'])} {poppy_cmd}"
     assert any(
         h.get("command") == f"{poppy_cmd} hook session-start"
         for group in settings_data.get("hooks", {}).get("SessionStart", [])

@@ -1281,13 +1281,17 @@ _VERSIONED_POPPY_NAME = re.compile(r"poppy[-_.]v?\d")
 
 
 def split_hook_command(command: object) -> list[str] | None:
-    """Split a hook command into argv the way the client's shell would, or None."""
+    """Split a hook command into argv, excluding a saved store assignment, or None."""
     if not isinstance(command, str):
         return None
     try:
         if os.name == "nt":
-            return [part.strip('"') for part in shlex.split(command, posix=False)]
-        return shlex.split(command)
+            argv = [part.strip('"') for part in shlex.split(command, posix=False)]
+        else:
+            argv = shlex.split(command)
+        if argv and argv[0].startswith("POPPY_DIR="):
+            argv = argv[1:]
+        return argv
     except ValueError:
         return None
 
@@ -1333,7 +1337,10 @@ def poppy_hook_command(canonical: str) -> str:
     """
     executable = get_poppy_executable(resolve_symlinks=False)
     quoted = subprocess.list2cmdline([executable]) if os.name == "nt" else shlex.quote(executable)
-    return " ".join([quoted, *canonical.split()[1:]])
+    command = " ".join([quoted, *canonical.split()[1:]])
+    if env := store_environment():
+        command = f"POPPY_DIR={shlex.quote(env['POPPY_DIR'])} {command}"
+    return command
 
 
 def poppy_hook_commands_in(settings: object) -> list[str]:

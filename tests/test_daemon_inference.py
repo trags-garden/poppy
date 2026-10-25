@@ -44,8 +44,12 @@ def _authed_inference_app(tmp_path, *, engine_name: str = "bloom", models=None):
 @pytest.mark.parametrize("endpoint", ["embed", "rerank"])
 @pytest.mark.parametrize("quoted", [None, "text", "query", "doc"])
 def test_inference_failure_logs_safe_details(tmp_path, capsys, endpoint, quoted):
-    texts = {"text": "private memory text", "query": "private search query", "doc": "private document"}
-    message = f"bad input: {texts[quoted]}" if quoted else "boom\nsecond line"
+    texts = {
+        "text": "private memory\ntext 'secret'\\path",
+        "query": "private search\nquery 'secret'\\path",
+        "doc": "private\ndocument 'secret'\\path",
+    }
+    message = f"bad input: {texts[quoted]!r}" if quoted else "boom\nsecond line"
     payload = (
         {"texts": list(texts.values())}
         if endpoint == "embed"
@@ -66,13 +70,10 @@ def test_inference_failure_logs_safe_details(tmp_path, capsys, endpoint, quoted)
     assert response.status_code == 503
     assert response.json() == {"error": "inference_failed", "engine": "bloom"}
     stderr = capsys.readouterr().err
-    assert "ValueError" in stderr
-    assert len(stderr.splitlines()) == 1
-    assert all(text not in stderr for text in texts.values())
-    if quoted:
-        assert "bad input" not in stderr
-    else:
-        assert "boom" in stderr
+    assert stderr == f"Daemon inference failed ({endpoint}): ValueError\n"
+    assert all(text not in stderr and repr(text) not in stderr for text in texts.values())
+    assert all(line not in stderr for text in texts.values() for line in text.splitlines())
+    assert message not in stderr
 
 
 def test_internal_inference_requires_auth_and_round_trips_fake_holder(tmp_path):

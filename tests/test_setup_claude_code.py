@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -34,6 +35,7 @@ from poppy.setup.claude_code import (
     is_mcp_installed,
     managed_claude_md_present,
     remove_legacy_hooks,
+    split_hook_command,
 )
 
 
@@ -78,7 +80,60 @@ def test_registration_captures_only_explicit_store(tmp_path, monkeypatch, client
 
 
 def hook_cmd(tmp_path, subcommand):
-    return f"{shlex.quote(expected_poppy_path(tmp_path))} hook {subcommand}"
+    command = f"{shlex.quote(expected_poppy_path(tmp_path))} hook {subcommand}"
+    if value := os.environ.get("POPPY_DIR"):
+        command = f"POPPY_DIR={shlex.quote(str(Path(value).resolve()))} {command}"
+    return command
+
+
+@pytest.mark.parametrize("client", [None, "codex", "cursor"])
+@pytest.mark.parametrize("override", [None, "", "relative store", "store 'quoted' $HOME; `echo nope`/東京\nnext"])
+def test_hooks_capture_only_explicit_store(tmp_path, monkeypatch, client, override):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    executable = Path(expected_poppy_path(tmp_path))
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nprintf '%s' \"$POPPY_DIR\"\n")
+    executable.chmod(0o755)
+    options = {"client": client} if client else {}
+
+    def install_commands():
+        paths = install_for_client(**options)
+        mcp_path = paths["MCP config"]
+        if client == "codex":
+            entry = tomllib.loads(mcp_path.read_text())["mcp_servers"]["poppy"]
+        else:
+            entry = json.loads(mcp_path.read_text())["mcpServers"]["poppy"]
+        hook_label = f"{client.title()} hooks" if client else "SessionStart hook"
+        hooks_path = paths[hook_label]
+        hooks = json.loads(hooks_path.read_text())["hooks"]
+        commands = [
+            hook["command"] for groups in hooks.values() for group in groups for hook in group.get("hooks", [group])
+        ]
+        return entry, commands
+
+    monkeypatch.delenv("POPPY_DIR", raising=False)
+    _, original = install_commands()
+    assert all(command.startswith(f"{shlex.quote(str(executable))} hook ") for command in original)
+    if override is not None:
+        monkeypatch.setenv("POPPY_DIR", override)
+    entry, commands = install_commands()
+    assert len(commands) == (4 if client == "codex" else 5)
+    assert install_commands() == (entry, commands)
+    expected_store = str((tmp_path / override).resolve()) if override else ""
+    if override:
+        assert entry["env"] == {"POPPY_DIR": expected_store}
+    else:
+        assert "env" not in entry
+        assert commands == original
+    env = dict(os.environ)
+    env.pop("POPPY_DIR", None)
+    for command in commands:
+        result = subprocess.run(["/bin/sh", "-c", command], env=env, capture_output=True, text=True, check=True)
+        assert result.stdout == expected_store
+        assert split_hook_command(command)[1] == "hook"
+    monkeypatch.delenv("POPPY_DIR", raising=False)
+    assert install_commands()[1] == original
 
 
 def test_get_poppy_executable_prefers_path_hit(tmp_path, monkeypatch):
@@ -411,7 +466,7 @@ def test_hooks_pin_the_path_shim_and_recognise_versioned_targets(tmp_path, monke
     for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd", "PostCompact"):
         commands = [h["command"] for g in hooks[event] for h in g["hooks"]]
         assert len(commands) == 1, event
-        assert shlex.split(commands[0])[0] == str(shim)
+        assert split_hook_command(commands[0])[0] == str(shim)
 
 
 def test_hooks_pin_the_python_sibling_shim_when_poppy_is_not_on_path(tmp_path, monkeypatch):
@@ -440,7 +495,7 @@ def test_hooks_pin_the_python_sibling_shim_when_poppy_is_not_on_path(tmp_path, m
     for event in events:
         commands = [h["command"] for g in settings["hooks"][event] for h in g["hooks"]]
         assert len(commands) == 1, event
-        assert shlex.split(commands[0])[0] == str(venv_bin / "poppy")
+        assert split_hook_command(commands[0])[0] == str(venv_bin / "poppy")
         assert is_hook_installed(config, event)
     assert len(poppy_hook_commands_in(settings)) == len(events)
     mcp = json.loads((config / ".claude.json").read_text())["mcpServers"]["poppy"]
@@ -486,12 +541,13 @@ def test_hooks_and_mcp_entry_use_the_same_quoted_executable(tmp_path, monkeypatc
     commands = [h["command"] for groups in hooks.values() for group in groups for h in group["hooks"]]
     assert commands
     for command in commands:
-        argv = shlex.split(command)
+        argv = split_hook_command(command)
         assert argv[0] == mcp_command == str(executable.resolve())
         assert argv[1] == "hook"
 
 
 def test_hooks_fall_back_to_bare_poppy_when_unresolved(tmp_path, monkeypatch):
+    monkeypatch.delenv("POPPY_DIR", raising=False)
     monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: None)
     monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(tmp_path / "nowhere" / "python"))
 
