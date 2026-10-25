@@ -9,7 +9,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from poppy.cli.main import cli
 from poppy.config import (
     _REGISTRY,
     _SETTABLE,
@@ -22,6 +24,40 @@ from poppy.config import (
 )
 
 _POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes only")
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://example.test", "http://127.0.0.1:8000", "http://localhost:8000", "http://[::1]:8000"],
+)
+def test_api_url_setting_accepts_https_and_loopback(tmp_path, monkeypatch, url):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    result = CliRunner().invoke(cli, ["config", "set", "trags-api-url", url])
+    assert result.exit_code == 0, result.output
+    assert load_config(tmp_path).trags_api_url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://nope",
+        "http://attacker.example:8080",
+        "http://localhost.attacker.example",
+        "http://localhost@attacker.example",
+        "http://[::2]",
+        "https://",
+        "https://example.test:invalid",
+        "https://example.test\n",
+        "example.test",
+    ],
+)
+def test_api_url_setting_rejects_unsafe_url_without_persisting(tmp_path, monkeypatch, url):
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    result = CliRunner().invoke(cli, ["config", "set", "trags-api-url", url])
+    assert result.exit_code != 0
+    assert result.output.startswith("Error: trags-api-url must use HTTPS")
+    assert len(result.output.splitlines()) == 1
+    assert not (tmp_path / "config.json").exists()
 
 
 def test_default_config():

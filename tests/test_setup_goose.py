@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,20 @@ def deterministic_poppy_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 def expected_poppy_path(tmp_path: Path) -> str:
     return str((tmp_path / "resolved-bin" / "poppy").resolve())
+
+
+@pytest.mark.parametrize("override", [None, 'store with "quotes"/東京'])
+def test_extension_captures_only_explicit_store(tmp_path, monkeypatch, override):
+    monkeypatch.chdir(tmp_path)
+    if override is None:
+        monkeypatch.delenv("POPPY_DIR", raising=False)
+    else:
+        monkeypatch.setenv("POPPY_DIR", override)
+    install_for_goose(goose_config_dir=tmp_path)
+    config = (tmp_path / "config.yaml").read_text()
+    env_line = next(line for line in config.splitlines() if "envs:" in line)
+    env = json.loads(env_line.split("envs:", 1)[1])
+    assert env == ({"POPPY_DIR": str((tmp_path / override).resolve())} if override else {})
 
 
 # ---------------------------------------------------------------------------

@@ -54,7 +54,8 @@ def test_decrypt_rejects_garbage():
 
 
 @pytest.mark.parametrize("location", ["config-file", "keychain-unreadable"])
-def test_connected_line_names_the_resolved_config_path(tmp_path, monkeypatch, capsys, location):
+@pytest.mark.parametrize("api_url", [None, "https://example.test", "http://127.0.0.1:8000"])
+def test_connected_line_names_the_resolved_config_path(tmp_path, monkeypatch, capsys, location, api_url):
     """The success line names the real config.json, not a literal ~/.poppy.
 
     And only when the key is actually there: a session that cannot read the
@@ -87,6 +88,8 @@ def test_connected_line_names_the_resolved_config_path(tmp_path, monkeypatch, ca
             return self._payload
 
     def fake_post(url, **kwargs):
+        if api_url:
+            assert url == f"{api_url}/api/cli-setup/start"
         device_pubkey["key"] = serialization.load_pem_public_key(kwargs["json"]["device_pubkey"].encode())
         return _Response(201, {"code": "WXYZ", "setup_url": "https://example.test/cli", "poll_interval_seconds": 0.01})
 
@@ -97,7 +100,9 @@ def test_connected_line_names_the_resolved_config_path(tmp_path, monkeypatch, ca
     monkeypatch.setattr(httpx, "post", fake_post)
     monkeypatch.setattr(httpx, "get", fake_get)
 
-    setup_trags.run_device_code_flow()
+    setup_trags.run_device_code_flow(api_url_override=api_url)
+    if api_url:
+        assert config_module.load_config(tmp_path).trags_api_url == api_url
 
     out = capsys.readouterr().out
     if location == "config-file":
@@ -107,6 +112,27 @@ def test_connected_line_names_the_resolved_config_path(tmp_path, monkeypatch, ca
         assert "saved in" not in out
     assert "~/.poppy/config.json" not in out
     assert key not in out
+    assert "Try: poppy sync run" in out
+
+
+@pytest.mark.parametrize("api_url", ["ftp://nope", "http://attacker.example:8080", ""])
+def test_api_url_flag_rejects_unsafe_url_before_network_or_save(tmp_path, monkeypatch, api_url):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+    from poppy.setup import trags as setup_trags
+
+    def unexpected_post(*args, **kwargs):
+        pytest.fail("invalid URL reached the network")
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(setup_trags.httpx, "post", unexpected_post)
+    result = CliRunner().invoke(cli, ["setup", "trags", "--api-url", api_url])
+
+    assert result.exit_code != 0
+    assert result.output.startswith("Error: trags-api-url must use HTTPS")
+    assert len(result.output.splitlines()) == 1
+    assert not (tmp_path / "config.json").exists()
 
 
 @pytest.mark.parametrize(

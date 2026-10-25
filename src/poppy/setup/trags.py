@@ -26,7 +26,7 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from poppy.config import load_config, update_config
+from poppy.config import load_config, parse_setting, update_config
 from poppy.runtime import get_poppy_dir
 
 _DEFAULT_POLL_INTERVAL_S = 2.0
@@ -73,7 +73,13 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
     """Walk the device-code flow end-to-end. Prints progress to stdout."""
     poppy_dir = get_poppy_dir()
     cfg = load_config(poppy_dir)
-    base_url = (api_url_override or cfg.trags_api_url).rstrip("/")
+    try:
+        base_url = parse_setting(
+            "trags-api-url", api_url_override if api_url_override is not None else cfg.trags_api_url
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    base_url = base_url.rstrip("/")
 
     click.echo(f"Connecting to {base_url}…")
 
@@ -182,7 +188,7 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
                     "\n✓ Connected. This session could not confirm where the key was stored; "
                     "run `poppy doctor` to check."
                 )
-            click.echo("  Try: poppy sync push")
+            click.echo("  Try: poppy sync run")
             return
 
         if poll.status_code == 202:

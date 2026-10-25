@@ -62,6 +62,7 @@ def test_cursor_daemon_entry_has_exact_remote_shape(tmp_path, monkeypatch):
 
 
 def test_gemini_stdio_and_daemon_entries_use_native_dialect(tmp_path, monkeypatch):
+    monkeypatch.delenv("POPPY_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr("poppy.setup.claude_code.get_poppy_executable", lambda **_: "/test/poppy")
 
@@ -83,6 +84,7 @@ def test_gemini_stdio_and_daemon_entries_use_native_dialect(tmp_path, monkeypatc
 
 
 def test_vscode_stdio_and_daemon_entries_use_servers_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("POPPY_DIR", raising=False)
     path = _config_path(tmp_path, "vscode")
     monkeypatch.setenv("POPPY_VSCODE_MCP_CONFIG", str(path))
     monkeypatch.setattr("poppy.setup.claude_code.get_poppy_executable", lambda **_: "/test/poppy")

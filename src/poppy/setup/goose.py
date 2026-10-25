@@ -11,10 +11,12 @@ sub-block and never reformat surrounding YAML.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
 
+from poppy.setup import store_environment
 from poppy.setup.claude_code import (
     get_poppy_executable,
     install_primer_md_block,
@@ -53,6 +55,7 @@ def _poppy_extension_block(indent: str = "  ") -> str:
     ``  poppy:`` and contains keys at four-space indent.
     """
     cmd = get_poppy_executable()
+    envs = json.dumps(store_environment())
     body = (
         f"{indent}{GOOSE_EXTENSION_NAME}:\n"
         f"{indent}  type: stdio\n"
@@ -63,7 +66,7 @@ def _poppy_extension_block(indent: str = "  ") -> str:
         f"{indent}    - --source\n"
         f"{indent}    - goose\n"
         f"{indent}  enabled: true\n"
-        f"{indent}  envs: {{}}\n"
+        f"{indent}  envs: {envs}\n"
         f"{indent}  timeout: 300\n"
     )
     return body

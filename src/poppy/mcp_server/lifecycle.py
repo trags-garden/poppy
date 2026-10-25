@@ -20,6 +20,7 @@ from typing import Any
 from poppy.errors import PoppyError
 from poppy.mcp_server.auth import load_daemon_token
 from poppy.mcp_server.daemon import DAEMON_LOCK_FILENAME
+from poppy.setup import store_environment
 
 LAUNCHD_LABEL = "ai.trags.poppy.daemon"
 LAUNCHD_FILENAME = f"{LAUNCHD_LABEL}.plist"
@@ -378,15 +379,34 @@ def _launchd_plist(poppy_dir: Path, executable: str) -> bytes:
         "StandardOutPath": str(log_path),
         "StandardErrorPath": str(log_path),
     }
+    if env := _service_environment():
+        payload["EnvironmentVariables"] = env
     return plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False)
 
 
+def _service_environment() -> dict[str, str]:
+    env = store_environment()
+    if "POPPY_DAEMON_PORT" in os.environ:
+        env["POPPY_DAEMON_PORT"] = os.environ["POPPY_DAEMON_PORT"]
+    return env
+
+
+def _systemd_quote(value: str) -> str:
+    value = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    value = value.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return f'"{value}"'
+
+
 def _systemd_unit(executable: str) -> str:
+    environment = "".join(
+        f"Environment={_systemd_quote(f'{key}={value}')}\n" for key, value in _service_environment().items()
+    )
     return (
         "[Unit]\n"
         "Description=Poppy MCP daemon\n\n"
         "[Service]\n"
         f"ExecStart={executable} daemon run\n"
+        f"{environment}"
         "Restart=on-failure\n\n"
         "[Install]\n"
         "WantedBy=default.target\n"

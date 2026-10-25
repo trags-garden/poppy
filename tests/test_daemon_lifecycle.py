@@ -4,16 +4,22 @@ import fcntl
 import json
 import os
 import plistlib
+import shlex
 import socket
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
 
 from poppy.cli.main import cli
 from poppy.mcp_server import lifecycle
+from poppy.mcp_server.daemon import create_http_app
+from poppy.runtime import get_poppy_dir
 
 
 def _record_commands(monkeypatch, returncodes=None):
@@ -27,6 +33,91 @@ def _record_commands(monkeypatch, returncodes=None):
 
     monkeypatch.setattr(lifecycle, "_run_service_command", record)
     return calls
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("overrides", [(), ("POPPY_DIR",), ("POPPY_DAEMON_PORT",), ("POPPY_DIR", "POPPY_DAEMON_PORT")])
+def test_service_install_captures_only_explicit_overrides(tmp_path, monkeypatch, platform, overrides):
+    monkeypatch.setenv("POPPY_LAUNCH_AGENTS_DIR", str(tmp_path / "agents"))
+    monkeypatch.setenv("POPPY_SYSTEMD_USER_DIR", str(tmp_path / "units"))
+    values = {"POPPY_DIR": str(tmp_path / "custom store"), "POPPY_DAEMON_PORT": "17670"}
+    for key, value in values.items():
+        monkeypatch.delenv(key, raising=False)
+        if key in overrides:
+            monkeypatch.setenv(key, value)
+    _record_commands(monkeypatch)
+
+    path, _ = lifecycle.install_agent(tmp_path, platform=platform, executable="/opt/bin/poppy")
+
+    if platform == "darwin":
+        data = plistlib.loads(path.read_bytes())
+        env = data.get("EnvironmentVariables", {})
+        assert bool(overrides) == ("EnvironmentVariables" in data)
+    else:
+        env = dict(
+            shlex.split(line.removeprefix("Environment="))[0].split("=", 1)
+            for line in path.read_text().splitlines()
+            if line.startswith("Environment=")
+        )
+    assert env == {key: values[key] for key in overrides}
+
+
+def test_systemd_environment_escapes_unit_syntax(monkeypatch):
+    monkeypatch.setenv("POPPY_DIR", '/private/tmp/store "quoted"\\path/%n\nnext')
+    monkeypatch.delenv("POPPY_DAEMON_PORT", raising=False)
+    unit = lifecycle._systemd_unit("/opt/bin/poppy")
+    assert 'Environment="POPPY_DIR=/private/tmp/store \\"quoted\\"\\\\path/%%n\\nnext"\n' in unit
+    assert len([line for line in unit.splitlines() if line.startswith("Environment=")]) == 1
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_install_and_status_agree_on_service_store_and_port(tmp_path, monkeypatch, platform):
+    monkeypatch.setattr(lifecycle.sys, "platform", platform)
+    monkeypatch.setenv("POPPY_LAUNCH_AGENTS_DIR", str(tmp_path / "agents"))
+    monkeypatch.setenv("POPPY_SYSTEMD_USER_DIR", str(tmp_path / "units"))
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("POPPY_DAEMON_PORT", "17670")
+    responses = []
+
+    def service_command(argv):
+        if "bootstrap" in argv or "enable" in argv:
+            path = lifecycle.agent_path()
+            if platform == "darwin":
+                env = plistlib.loads(path.read_bytes())["EnvironmentVariables"]
+            else:
+                env = dict(
+                    shlex.split(line.removeprefix("Environment="))[0].split("=", 1)
+                    for line in path.read_text().splitlines()
+                    if line.startswith("Environment=")
+                )
+            with monkeypatch.context() as service_env:
+                for key in ("POPPY_DIR", "POPPY_DAEMON_PORT"):
+                    service_env.delenv(key, raising=False)
+                for key, value in env.items():
+                    service_env.setenv(key, value)
+                app = create_http_app(
+                    Starlette(), engine=SimpleNamespace(), poppy_dir=get_poppy_dir(), port=lifecycle.daemon_port()
+                )
+                responses.append(TestClient(app).get("/status").json())
+        return subprocess.CompletedProcess(argv, 1 if "print" in argv else 0, "", "")
+
+    def probe(poppy_dir, port=None, **kwargs):
+        status = responses[-1]
+        assert status["store_path"] == str(poppy_dir / "memories.db")
+        assert status["port"] == (lifecycle.daemon_port() if port is None else port)
+        return status, None
+
+    monkeypatch.setattr(lifecycle, "_run_service_command", service_command)
+    monkeypatch.setattr(lifecycle, "probe_status", probe)
+    runner = CliRunner()
+    installed = runner.invoke(cli, ["daemon", "install"])
+    assert installed.exit_code == 0, installed.output
+    result = runner.invoke(cli, ["daemon", "status"])
+    assert result.exit_code == 0, result.output
+    assert "Agent installed: yes" in result.output
+    assert "HTTP reachable: yes" in result.output
+    assert "Daemon port: 17670" in result.output
+    assert f"Store: {tmp_path / 'store' / 'memories.db'}" in result.output
 
 
 def test_launchd_install_and_uninstall_content(tmp_path, monkeypatch):

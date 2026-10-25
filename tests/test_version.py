@@ -34,6 +34,30 @@ def test_dunder_version_matches_pyproject() -> None:
     assert poppy.__version__ == _pyproject_version()
 
 
+def test_registry_versions_match_pyproject() -> None:
+    server = json.loads((REPO_ROOT / "server.json").read_text())
+    version = _pyproject_version()
+    assert server["version"] == version
+    assert server["packages"][0]["version"] == version
+    assert server["packages"][0]["runtimeArguments"][0]["value"] == f"poppy-memory=={version}"
+
+
+def test_registry_package_starts_stdio_server() -> None:
+    server = json.loads((REPO_ROOT / "server.json").read_text())
+    package = server["packages"][0]
+    assert server["name"] == "ai.trags/poppy"
+    assert package["registryType"] == "pypi"
+    assert package["identifier"] == "poppy-memory"
+    assert package["transport"] == {"type": "stdio"}
+    command = [package["runtimeHint"]]
+    for arg in [*package["runtimeArguments"], *package["packageArguments"]]:
+        if arg["type"] == "named":
+            command.append(arg["name"])
+        command.append(arg["value"])
+    assert command == ["uvx", "--from", f"poppy-memory=={_pyproject_version()}", "poppy", "serve"]
+    assert "<!-- mcp-name: ai.trags/poppy -->" in (REPO_ROOT / "README.md").read_text().splitlines()
+
+
 def test_resolve_version_falls_back_to_pyproject_when_not_installed() -> None:
     with patch.object(
         poppy._metadata,

@@ -96,6 +96,7 @@ include = [
     "SECURITY.md",
     "CONTRIBUTING.md",
     "pyproject.toml",
+    "server.json",
     "docs/",
     ".claude-plugin/",
     "plugins/poppy/",

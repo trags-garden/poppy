@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 import numpy as np
+import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
@@ -38,6 +39,40 @@ def _authed_inference_app(tmp_path, *, engine_name: str = "bloom", models=None):
     if models is not None:
         engine._models = models
     return create_http_app(Starlette(), engine=engine, poppy_dir=tmp_path, port=7679)
+
+
+@pytest.mark.parametrize("endpoint", ["embed", "rerank"])
+@pytest.mark.parametrize("quoted", [None, "text", "query", "doc"])
+def test_inference_failure_logs_safe_details(tmp_path, capsys, endpoint, quoted):
+    texts = {"text": "private memory text", "query": "private search query", "doc": "private document"}
+    message = f"bad input: {texts[quoted]}" if quoted else "boom\nsecond line"
+    payload = (
+        {"texts": list(texts.values())}
+        if endpoint == "embed"
+        else {"query": texts["query"], "docs": list(texts.values())}
+    )
+
+    class FailingModels:
+        def embed(self, text):
+            raise ValueError(message)
+
+        def rerank(self, query, docs):
+            raise ValueError(message)
+
+    app = _authed_inference_app(tmp_path, models=FailingModels())
+    client = TestClient(app, headers={"Authorization": "Bearer secret"})
+    response = client.post(f"/internal/{endpoint}", json=payload)
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "inference_failed", "engine": "bloom"}
+    stderr = capsys.readouterr().err
+    assert "ValueError" in stderr
+    assert len(stderr.splitlines()) == 1
+    assert all(text not in stderr for text in texts.values())
+    if quoted:
+        assert "bad input" not in stderr
+    else:
+        assert "boom" in stderr
 
 
 def test_internal_inference_requires_auth_and_round_trips_fake_holder(tmp_path):

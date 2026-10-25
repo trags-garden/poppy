@@ -55,6 +55,28 @@ def expected_poppy_path(tmp_path):
     return str((tmp_path / "resolved-bin" / "poppy").resolve())
 
 
+@pytest.mark.parametrize("client", [None, "codex", "cursor", "vscode", "windsurf", "copilot-cli", "pi", "gemini"])
+@pytest.mark.parametrize("override", [None, "", "relative store", "store with spaces/東京"])
+def test_registration_captures_only_explicit_store(tmp_path, monkeypatch, client, override):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("POPPY_VSCODE_MCP_CONFIG", str(tmp_path / "vscode.json"))
+    if override is None:
+        monkeypatch.delenv("POPPY_DIR", raising=False)
+    else:
+        monkeypatch.setenv("POPPY_DIR", override)
+    options = {} if client is None else {"client": client}
+    path = install_mcp_config(tmp_path / "client", **options)
+    if client == "codex":
+        entry = tomllib.loads(path.read_text())["mcp_servers"]["poppy"]
+    else:
+        entry = json.loads(path.read_text())["servers" if client == "vscode" else "mcpServers"]["poppy"]
+    if override:
+        assert entry["env"] == {"POPPY_DIR": str((tmp_path / override).resolve())}
+    else:
+        assert "env" not in entry
+
+
 def hook_cmd(tmp_path, subcommand):
     return f"{shlex.quote(expected_poppy_path(tmp_path))} hook {subcommand}"
 
@@ -657,6 +679,7 @@ def test_install_cursor_no_hooks(tmp_path, monkeypatch):
 
 
 def test_install_codex_writes_toml_and_primer_idempotently(tmp_path, monkeypatch):
+    monkeypatch.delenv("POPPY_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     assert not is_mcp_installed(client="codex")
 

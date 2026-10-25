@@ -11,3 +11,11 @@ now. Bug reports and feature requests are welcome as
 email at feedback@trags.ai. For security issues, see [SECURITY.md](SECURITY.md).
 
 If you build something on top of Poppy, we would love to hear about it.
+
+## Release checklist
+
+1. Bump the version in `pyproject.toml` and both version fields in `server.json`
+   together, including the `--from` package pin and existing release metadata.
+2. Release through the existing PyPI publish workflow.
+3. After the package is live on PyPI, the maintainer runs `mcp-publisher publish`
+   from the repository root to update `ai.trags/poppy` in the MCP Registry.

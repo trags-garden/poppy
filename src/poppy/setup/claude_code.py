@@ -34,6 +34,7 @@ import tomlkit
 from tomlkit.exceptions import TOMLKitError
 
 from poppy.errors import PoppyError
+from poppy.setup import store_environment
 
 CLAUDE_MD_BEGIN = "<!-- POPPY:BEGIN -->"
 CLAUDE_MD_END = "<!-- POPPY:END -->"
@@ -818,6 +819,8 @@ def _mcp_entry(source: str = "mcp", *, daemon: bool = False, port: int = 7679, t
     }
     if source != "gemini":
         entry["type"] = "stdio"
+    if env := store_environment():
+        entry["env"] = env
     return entry
 
 
@@ -1026,6 +1029,8 @@ def _install_codex_mcp_config(
     else:
         poppy["command"] = get_poppy_executable(resolve_symlinks=False)
         poppy["args"] = ["serve", "--source", "codex"]
+        if env := store_environment():
+            poppy["env"] = env
     mcp_servers["poppy"] = poppy
 
     backup = _backup_once(config_path, CONFIG_BACKUP_SUFFIX)

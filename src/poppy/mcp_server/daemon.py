@@ -6,6 +6,7 @@ import errno
 import fcntl
 import os
 import socket
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -25,6 +26,15 @@ from poppy.paths import ensure_poppy_dir
 
 ALREADY_RUNNING_MESSAGE = "poppy daemon already running (lock held)"
 DAEMON_LOCK_FILENAME = "daemon.lock"
+
+
+def _log_inference_failure(exc: Exception, texts: list[str]) -> None:
+    message = str(exc)
+    line = " ".join(message.splitlines())
+    detail = type(exc).__name__
+    if message and not any(text in message or text in line for text in texts):
+        detail += f": {line}"
+    print(f"Daemon inference failed: {detail}", file=sys.stderr)
 
 
 @contextmanager
@@ -118,7 +128,8 @@ def create_http_app(
             return JSONResponse({"error": "invalid_request"}, status_code=400)
         try:
             vectors = [holder.embed(text).tolist() for text in texts]
-        except Exception:
+        except Exception as exc:
+            _log_inference_failure(exc, texts)
             return JSONResponse({"error": "inference_failed", "engine": engine_name()}, status_code=503)
         return JSONResponse({"engine": engine_name(), "vectors": vectors})
 
@@ -147,7 +158,8 @@ def create_http_app(
             else:
                 return JSONResponse({"error": "inference_unavailable", "engine": engine_name()}, status_code=503)
             serialized_scores = [float(score) for score in scores]
-        except Exception:
+        except Exception as exc:
+            _log_inference_failure(exc, [query, *docs])
             return JSONResponse({"error": "inference_failed", "engine": engine_name()}, status_code=503)
         if len(serialized_scores) != len(docs):
             return JSONResponse({"error": "inference_failed", "engine": engine_name()}, status_code=503)
