@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-25
+
 ### Added
 
 - Poppy ships a Claude Code plugin and a marketplace in this repository. `claude plugin marketplace add trags-garden/poppy` and `claude plugin install poppy@trags-garden` give Claude Code the MCP server, the capture hooks and the memory primer without `poppy setup claude-code`. With the plugin installed, `poppy setup claude-code` adds no MCP server or hooks, and adds the CLAUDE.md block only when `--claude-md` is passed. `poppy doctor` accepts the plugin, fails when the plugin cannot find `poppy`, and warns when setup's entries are also present.
@@ -14,6 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - The `poppy build mcpb` command and the `.mcpb` bundle source were removed. The bundle was never published. Claude Desktop users run `poppy setup claude-desktop`.
+
+### Changed
+
+- The MCP `remember` tool now rejects an unknown `memory_type` instead of storing it as `fact`.
+- The MCP `consolidate` tool now rejects a blank summary or a blank item before storing anything, so a bad entry no longer leaves a partial write.
+- MCP tool failures (an invalid `ttl` or `since`, an unknown `supersedes` or `edit` ID) are now returned as tool errors instead of success text that starts with `Error:`. Error text names the MCP parameters, such as `ttl` and `expires_at`, instead of CLI flags.
+- The capture journal no longer stores content previews; counts and types remain. It is written atomically with mode 0600, and `poppy forget` removes previews left by older versions.
+
+### Fixed
+
+- `poppy remember` and the MCP `remember` tool now reject empty or whitespace-only content. The CLI exits non-zero.
+- Memory text and types are flattened to one line in session context, prompt and file hooks and the MCP `context` tool, so a stored or synced memory can no longer break out of its bullet or add a heading.
+- MCP `recall_full` now lists the IDs it could not find.
+- MCP `context` for a project with no memories now names that project instead of saying no memories are stored.
+- The MCP server now reports Poppy's version in `serverInfo.version` instead of the MCP SDK's.
+- `poppy doctor` now fails when the embedding models cannot load from the local cache, with the same fix that `remember` and `recall` print, instead of reporting the engine as OK. The check never downloads models.
+- `poppy doctor` and `poppy encrypt repair` now check that an encrypted store can actually be read instead of trusting its marker, so a corrupt store is reported.
+- `poppy encrypt status --deep` with a wrong key still shows encryption as on and reports the key or corruption problem in the warning line.
 
 ## [0.3.4] - 2026-10-21
 
