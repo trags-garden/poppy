@@ -17,6 +17,22 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _available_doctor_models(monkeypatch):
+    """Keep integration checks independent of the cache; model health has its own tests."""
+    from poppy.engine._fastembed_loader import FastembedModels
+
+    original = FastembedModels.check_available
+    monkeypatch.setattr(FastembedModels, "check_available", lambda self: None)
+    return original
+
+
+@pytest.fixture
+def real_model_health(monkeypatch, _available_doctor_models):
+    """Let model-health tests exercise the real availability check."""
+    monkeypatch.setattr("poppy.engine._fastembed_loader.FastembedModels.check_available", _available_doctor_models)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_poppy_env(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     poppy_dir = tmp_path_factory.mktemp("poppy-dir")
     monkeypatch.setenv("POPPY_DIR", str(poppy_dir))

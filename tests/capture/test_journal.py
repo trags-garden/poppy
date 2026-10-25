@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from poppy.capture import journal
+from poppy.capture import _state, journal
 
 
 def test_record_removes_legacy_previews_and_stores_only_types(tmp_path):
@@ -51,7 +53,7 @@ def test_failed_atomic_record_preserves_previous_journal(tmp_path, monkeypatch):
         journal.record(tmp_path, session_id="new", project=None, count=2, items=[])
 
     assert path.read_bytes() == original
-    assert list(tmp_path.iterdir()) == [path]
+    assert set(tmp_path.iterdir()) == {path, tmp_path / journal.LOCK_FILENAME}
 
 
 def test_strip_previews_tolerates_malformed_records(tmp_path):
@@ -63,6 +65,46 @@ def test_strip_previews_tolerates_malformed_records(tmp_path):
 
     assert "forgotten text" not in path.read_text()
     assert journal.read_all(tmp_path) == [{"items": []}, {"count": 1, "items": [{"type": "fact"}]}]
+
+
+@pytest.mark.skipif(_state.fcntl is None, reason="flock requires POSIX")
+@pytest.mark.parametrize("rewrite", ["strip", "record"])
+def test_record_during_rewrite_preserves_both_records(tmp_path, monkeypatch, rewrite):
+    path = tmp_path / journal.JOURNAL_FILENAME
+    legacy = {"session_id": "old", "count": 1, "items": [{"type": "fact", "preview": "private text"}]}
+    path.write_text(json.dumps(legacy) + "\n")
+    real_read_all = journal.read_all
+    main_thread = threading.current_thread()
+    started = threading.Event()
+    captures = []
+
+    def capture():
+        started.set()
+        journal.record(tmp_path, session_id="new", project=None, count=1, items=[])
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+
+        def read_during_capture(poppy_dir):
+            rows = real_read_all(poppy_dir)
+            if threading.current_thread() is main_thread:
+                future = pool.submit(capture)
+                captures.append(future)
+                assert started.wait(5)
+                with pytest.raises(TimeoutError):
+                    future.result(timeout=0.2)
+            return rows
+
+        monkeypatch.setattr(journal, "read_all", read_during_capture)
+        if rewrite == "strip":
+            journal.strip_previews(tmp_path)
+        else:
+            journal.record(tmp_path, session_id="middle", project=None, count=1, items=[])
+        captures[0].result(timeout=5)
+
+    rows = real_read_all(tmp_path)
+    expected = ["old", "new"] if rewrite == "strip" else ["old", "middle", "new"]
+    assert [row["session_id"] for row in rows] == expected
+    assert "preview" not in path.read_text()
 
 
 def test_record_round_trips_source(tmp_path: Path) -> None:

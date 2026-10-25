@@ -18,9 +18,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from poppy.paths import ensure_poppy_dir, write_text_atomic
+from poppy.capture._state import _locked
+from poppy.paths import write_text_atomic
 
 JOURNAL_FILENAME = "capture_journal.jsonl"
+LOCK_FILENAME = JOURNAL_FILENAME + ".lock"
 MAX_ENTRIES = 200
 
 
@@ -55,8 +57,9 @@ def _write_records(poppy_dir: Path, rows: list[dict[str, Any]]) -> None:
 
 def strip_previews(poppy_dir: Path) -> None:
     """Remove text left by older journal writers, preserving capture metadata."""
-    if _journal_path(poppy_dir).exists():
-        _write_records(poppy_dir, read_all(poppy_dir))
+    with _locked(poppy_dir, lock_filename=LOCK_FILENAME):
+        if _journal_path(poppy_dir).exists():
+            _write_records(poppy_dir, read_all(poppy_dir))
 
 
 def record(
@@ -82,10 +85,10 @@ def record(
         items=[{"type": getattr(it, "memory_type", "fact")} for it in items],
     )
 
-    ensure_poppy_dir(poppy_dir)
-    existing = read_all(poppy_dir)
-    existing.append(rec.__dict__)
-    _write_records(poppy_dir, existing[-max_entries:])
+    with _locked(poppy_dir, lock_filename=LOCK_FILENAME):
+        existing = read_all(poppy_dir)
+        existing.append(rec.__dict__)
+        _write_records(poppy_dir, existing[-max_entries:])
     return rec
 
 

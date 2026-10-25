@@ -14,7 +14,7 @@ from poppy.errors import ModelUnavailableError
 
 
 @pytest.mark.parametrize("failed_kind", ["bi", "cross"])
-def test_doctor_reports_model_load_failure(tmp_path, monkeypatch, failed_kind):
+def test_doctor_reports_model_load_failure(tmp_path, monkeypatch, failed_kind, real_model_health):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("POPPY_FASTEMBED_CACHE", str(tmp_path / "models"))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
@@ -42,7 +42,7 @@ def test_doctor_reports_model_load_failure(tmp_path, monkeypatch, failed_kind):
 
 
 @pytest.mark.parametrize("engine_class", [BloomEngine, SeedEngine])
-def test_doctor_reports_available_engine(tmp_path, monkeypatch, capsys, engine_class):
+def test_doctor_reports_available_engine(tmp_path, monkeypatch, capsys, engine_class, real_model_health):
     from poppy.config import load_config, save_config
 
     engine = engine_class(tmp_path / "memories.db")

@@ -12,12 +12,6 @@ from poppy.cli.main import cli
 from poppy.config import load_config
 
 
-@pytest.fixture(autouse=True)
-def _available_doctor_models(monkeypatch):
-    """Keep integration checks independent of the cache; model health has its own tests."""
-    monkeypatch.setattr("poppy.engine._fastembed_loader.FastembedModels.check_available", lambda self: None)
-
-
 def test_mcp_setup_commands_warn_when_poppy_executable_cannot_be_resolved(tmp_path, monkeypatch):
     monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: None)
     monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(tmp_path / "missing" / "python"))

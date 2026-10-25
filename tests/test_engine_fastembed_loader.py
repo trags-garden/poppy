@@ -85,7 +85,7 @@ def test_local_only_cached_failure_includes_remediation(monkeypatch, tmp_path):
         fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
 
 
-def test_local_health_check_reuses_loaded_models(monkeypatch, tmp_path, capsys):
+def test_local_health_check_reuses_loaded_models(monkeypatch, tmp_path, capsys, real_model_health):
     calls = []
 
     def load(model_name, **kwargs):

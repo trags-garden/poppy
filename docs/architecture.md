@@ -186,6 +186,7 @@ Linux, where `flock` is always available.
 | Background sync lock (`sync/auto.py:run_worker`) | `sync.lock` | At most one auto-sync worker at a time. A manual `poppy sync` does not take it. | The new worker exits; the running one sees `sync.pending`. When a worker stops because nothing was pending, it checks `sync.pending` once more after releasing the lock and drains it, so a write that lands as it finishes is not stranded. After an auth stop, a quota stop, an exhausted round budget or a re-armed failure, `sync.pending` waits for the next trigger. |
 | Sync state lock (`sync/state.py:state_lock`) | `sync_state.json.lock` | Read-modify-write of `sync_state.json` by any sync process, manual or background. | Blocks until free. If `flock` itself errors, the update runs unlocked. |
 | Capture state lock (`capture/_state.py:update`) | `capture_state.json.lock` | Read-modify-write of watermarks and turn counters from concurrent hook processes. | Blocks until free. |
+| Capture journal lock (`capture/journal.py`) | `capture_journal.jsonl.lock` | Read-modify-write when recording captures or stripping older previews. | Blocks until free. A lock or journal error during forget logs a warning after deletion. |
 | Telemetry lock (`telemetry.py:_analytics_file_lock`) | `analytics.json.lock` | Updates to `analytics.json`. | Blocks until free. |
 | Update check lock (`update_check.py:_cache_file_lock`) | `update_check.json.lock` | Cache refreshes and the once-only update notice. Also takes an in-process lock. | Blocks until free. |
 | Daemon token lock (`mcp_server/auth.py:ensure_daemon_token`) | `.daemon.token.lock` | Creating or repairing `daemon.token`, so `daemon run`, `daemon start` and `setup --daemon` agree on one token. | Blocks until free. |
@@ -193,8 +194,8 @@ Linux, where `flock` is always available.
 | Per-session capture lock (`capture/lock.py:single_flight`) | `capture-<session>.flock` | One capture worker per session at a time. The kernel releases it if the worker dies, so it has no time-to-live. | Retries for 0.1 s, then the worker skips this round; the watermark catches up next time. A `capture-<session>.lock` file left by an older version counts as held for 300 s. On a filesystem that refuses locks, capture runs without it. |
 | `config.json` | none | Nothing today. `config.py:save_config` replaces the file atomically, so readers never see a torn file, but two concurrent read-modify-writes can lose one update. | Not applicable. |
 
-`capture_journal.jsonl` and `capture_health.json` have no lock either;
-both writers replace their files atomically through owner-only temporary files unique to each writer.
+`capture_health.json` has no lock;
+its writer replaces the file atomically through an owner-only temporary file unique to each writer.
 
 ## Glossary
 

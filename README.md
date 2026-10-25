@@ -287,7 +287,9 @@ What is stored, all locally under `~/.poppy/`:
   the source app and session id;
 - a capture journal (`capture_journal.jsonl`, owner-only mode 0600) recording
   types and counts for the session banner and `poppy doctor`, without memory
-  text. Rewriting the journal or forgetting a memory removes older previews;
+  text. Rewriting the journal removes older previews. Forgetting a memory also
+  attempts this cleanup after deletion; a journal error logs a warning and
+  does not prevent the deletion;
 - per-session progress state (`capture_state.json`). The journal and
   state files are per-device and are never synced anywhere, not even to
   Trags.
