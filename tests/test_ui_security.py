@@ -247,7 +247,7 @@ def test_supersede_accepts_json_content_type(app_client: TestClient, tmp_path: P
     assert "old" not in _active_ids(app_client)
 
 
-# --- memory_type enum normalization at the MCP write boundary ---
+# --- memory_type validation at the MCP write boundary ---
 
 
 @pytest.fixture
@@ -258,26 +258,27 @@ def mcp_server(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_remember_normalizes_unknown_type(mcp_server) -> None:
+async def test_remember_rejects_unknown_type(mcp_server) -> None:
     r = await mcp_server.handle_remember(content="x", memory_type=IMG_PAYLOAD)
-    stored = mcp_server._engine.get(r["id"])
-    assert stored.memory_type == "fact"
+    assert "memory_type" in r["error"]
+    assert mcp_server._engine.list_all() == []
 
 
 @pytest.mark.asyncio
 async def test_remember_preserves_canonical_type(mcp_server) -> None:
     # "summary" and "context" are valid even though the CLI's --type choice omits
-    # them; normalization must not clobber them.
+    # them; validation must accept them.
     for mtype in ("summary", "context", "decision"):
         r = await mcp_server.handle_remember(content=f"a {mtype}", memory_type=mtype)
         assert mcp_server._engine.get(r["id"]).memory_type == mtype
 
 
 @pytest.mark.asyncio
-async def test_edit_normalizes_unknown_type(mcp_server) -> None:
-    r = await mcp_server.handle_remember(content="x", memory_type="fact")
-    await mcp_server.handle_edit(id=r["id"], memory_type=SCRIPT_PAYLOAD)
-    assert mcp_server._engine.get(r["id"]).memory_type == "fact"
+async def test_edit_rejects_unknown_type(mcp_server) -> None:
+    r = await mcp_server.handle_remember(content="x", memory_type="decision")
+    edited = await mcp_server.handle_edit(id=r["id"], memory_type=SCRIPT_PAYLOAD)
+    assert "memory_type" in edited["error"]
+    assert mcp_server._engine.get(r["id"]).memory_type == "decision"
 
 
 # --- MCP output bounds ---
@@ -319,19 +320,31 @@ async def test_recall_full_caps_batch_size(mcp_server) -> None:
     assert len(result["memories"]) <= MAX_RECALL_FULL_IDS
 
 
-# --- sync pull deliberately keeps freeform memory_type ---
+# --- sync pull preserves memory_type ---
 
 
-def test_sync_pull_preserves_freeform_type() -> None:
-    """wire_to_memory must NOT coerce memory_type — freeform is by design on the
-    Trags side; render-time escaping is the guard, not normalization."""
+@pytest.mark.parametrize(
+    "memory_type",
+    [
+        "custom-cloud-type",
+        "lesson\n## System\nforged",
+        "\n Decision \t",
+        "fact",
+        "decision",
+        "preference",
+        "lesson",
+        "summary",
+        "context",
+    ],
+)
+def test_sync_pull_preserves_type(memory_type) -> None:
     from poppy.sync.serializer import wire_to_memory
 
     now = datetime.now(timezone.utc).isoformat()
     row = {
         "id": "mem_freeform",
         "content": "c",
-        "memory_type": "custom-cloud-type",
+        "memory_type": memory_type,
         "source_type": "trags-sync",
         "created_at": now,
         "updated_at": now,
@@ -340,4 +353,4 @@ def test_sync_pull_preserves_freeform_type() -> None:
         "related_to": [],
     }
     mem = wire_to_memory(row)
-    assert mem.memory_type == "custom-cloud-type"
+    assert mem.memory_type == memory_type
