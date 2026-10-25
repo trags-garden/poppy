@@ -106,12 +106,15 @@ def remember(
 ) -> RememberResult:
     """Run the complete remember flow: build → conflict-resolve → write → sync.
 
-    Raises ``ValueError`` on an unparseable/mutually-exclusive TTL and ``KeyError``
+    Raises ``ValueError`` on empty content or an invalid TTL and ``KeyError``
     when an explicit ``supersedes`` target does not exist — adapters translate
     both into their own error contract.
     """
     from poppy.config import load_config
     from poppy.lifecycle import resolve_expiry, supersede_memory
+
+    if not content.strip():
+        raise ValueError("content must not be empty or whitespace-only")
 
     now = now or datetime.now(timezone.utc)
     expiry = resolve_expiry(ttl, expires_at, now=now)

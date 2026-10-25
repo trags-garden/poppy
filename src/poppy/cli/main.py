@@ -231,7 +231,7 @@ def remember(
             source="manual",
         )
     except ValueError as exc:
-        raise click.BadParameter(str(exc)) from exc
+        raise click.ClickException(str(exc)) from exc
     except KeyError as exc:
         raise click.ClickException(str(exc)) from exc
 

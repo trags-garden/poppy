@@ -240,6 +240,19 @@ def test_remember(tmp_path):
     assert "Remembered" in result.output
 
 
+@pytest.mark.parametrize("content", ["", "   ", "\t\r\n", "\u2003\u00a0"])
+def test_remember_rejects_blank_content(tmp_path, monkeypatch, content):
+    from poppy.engine.seed import SeedEngine
+
+    engine = SeedEngine(db_path=tmp_path / "memories.db")
+    monkeypatch.setattr("poppy.cli.main._get_engine", lambda: engine)
+    result = CliRunner().invoke(cli, ["remember", content], env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code != 0
+    assert result.output.splitlines() == ["Error: content must not be empty or whitespace-only"]
+    assert engine.list_all() == []
+
+
 def test_remember_prints_new_memory_id(tmp_path):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}

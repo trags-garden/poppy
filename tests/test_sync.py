@@ -197,6 +197,29 @@ def test_pull_applies_live_rows(tmp_path):
     assert load(tmp_path).remotes[client.base_url].last_pulled_at is not None
 
 
+def test_pulled_custom_type_survives_content_edit_and_push(tmp_path):
+    from poppy.lifecycle import edit_memory
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    row = memory_to_wire(_memory("r1", updated=_NOW))
+    row["memory_type"] = "runbook"
+    client = _FakeClient(echo=True)
+    client.rows_by_id[row["id"]] = row
+
+    pulled = pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+
+    assert pulled.applied_live == 1
+    assert engine.get("r1").memory_type == "runbook"
+    edited = edit_memory(engine, "r1", content="updated runbook content", poppy_dir=tmp_path)
+    assert edited.changed is True
+
+    pushed = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+
+    assert pushed.sent_live == 1
+    assert client.rows_by_id["r1"]["content"] == "updated runbook content"
+    assert client.rows_by_id["r1"]["memory_type"] == "runbook"
+
+
 def test_pull_tombstone_blocks_reingest(tmp_path):
     """A local tombstone at least as new as the incoming live row blocks
     the ingest, so a memory forgotten on this device cannot resurrect on the next

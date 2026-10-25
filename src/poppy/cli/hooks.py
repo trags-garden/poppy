@@ -15,7 +15,7 @@ from pathlib import Path
 import click
 
 from poppy.engine.interface import RetrievalEngine
-from poppy.models import Filters, ScoredMemory
+from poppy.models import Filters, ScoredMemory, renderable_memory_fields
 from poppy.paths import ensure_poppy_dir
 from poppy.project import project_from_cwd
 from poppy.runtime import get_fast_engine, get_poppy_dir
@@ -157,7 +157,8 @@ def _render_session_memories(memories: list, *, project: str | None) -> str | No
     used = len(header.encode("utf-8"))
     shown = 0
     for m in memories:
-        line = f"- [{m.memory_type}] {_truncate(m.content, _SESSION_START_MEMORY_CHARS)}"
+        memory_type, content = renderable_memory_fields(m.memory_type, m.content)
+        line = f"- [{memory_type}] {_truncate(content, _SESSION_START_MEMORY_CHARS)}"
         cost = len(line.encode("utf-8")) + 1  # +1 for the joining newline
         if shown > 0 and used + cost > _SESSION_START_BLOCK_BUDGET:
             break
@@ -492,8 +493,8 @@ def user_prompt_submit():
 
         lines = ["## Poppy memories possibly relevant to this message:"]
         for r in results:
-            content = _truncate(r.memory.content, 240)
-            lines.append(f"- [{r.memory.memory_type}] {content}")
+            memory_type, content = renderable_memory_fields(r.memory.memory_type, r.memory.content)
+            lines.append(f"- [{memory_type}] {_truncate(content, 240)}")
         envelope = {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
@@ -553,8 +554,8 @@ def pre_tool_use():
         names = ", ".join(f"`{path.name}`" for path in paths)
         lines = [f"## Poppy memories touching {names}:"]
         for r in results:
-            content = _truncate(r.memory.content, 240)
-            lines.append(f"- [{r.memory.memory_type}] {content}")
+            memory_type, content = renderable_memory_fields(r.memory.memory_type, r.memory.content)
+            lines.append(f"- [{memory_type}] {_truncate(content, 240)}")
         context = "\n".join(lines)
         if cursor_host:
             # Hard safety contract: recall hooks must only allow and exit 0.

@@ -57,6 +57,15 @@ def test_make_memory_id_shape():
 # ---------- remember ----------
 
 
+@pytest.mark.parametrize("content", ["", "   ", "\t\r\n", "\u2003\u00a0"])
+def test_remember_rejects_blank_content(engine, tmp_path, _no_autosync, content):
+    with pytest.raises(ValueError, match="content must not be empty or whitespace-only"):
+        remember(engine, tmp_path, content=content)
+
+    assert engine.list_all() == []
+    assert _no_autosync == []
+
+
 def test_remember_ingests(engine, tmp_path, _no_autosync):
     result = remember(engine, tmp_path, content="use ruff", memory_type="preference")
     assert isinstance(result, RememberResult)
