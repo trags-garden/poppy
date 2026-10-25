@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-10-25
+
+### Added
+
+- The package now installs a `poppy-memory` console script alongside `poppy`, and Poppy is listed in the MCP Registry as `ai.trags/poppy` (stdio, run with `uvx poppy-memory serve`).
+
+### Changed
+
+- `poppy setup trags` now suggests `poppy sync run` (pull, then push) after linking.
+- The daemon now logs which step failed and the exception type when inference fails, never the error text or request content.
+
+### Fixed
+
+- `poppy daemon install` now keeps the `POPPY_DIR` and `POPPY_DAEMON_PORT` overrides set at install time in the launchd and systemd service, so the service uses the same store and port as your shell.
+- Client setup now pins `POPPY_DIR` in each client's MCP registration when it is set, and on macOS and Linux in the installed hook commands, so a custom store location is used by every client.
+- `trags-api-url` now accepts `https://` for any host and `http://` only for loopback, and refuses anything else before saving it.
+- Superseding a memory is now atomic. The new memory is embedded before anything is deleted, and archive and insert happen in one transaction, so a failed embed or write leaves the old memory live.
+- Keyword search errors are no longer reported as no results. Only an empty match set means no results; database errors are raised, and a row with an unreadable timestamp is skipped.
+- Probing a missing store no longer creates an empty file.
+- MCP recall no longer applies the semantic score floor to keyword-only engine scores.
+
 ## [0.3.5] - 2026-10-25
 
 ### Added

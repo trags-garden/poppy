@@ -1,7 +1,7 @@
 {
   "name": "poppy",
   "displayName": "Poppy",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Local developer memory for Claude Code: the Poppy MCP tools, capture hooks and a memory primer. Needs the poppy-memory package installed.",
   "author": {
     "name": "Trags",
