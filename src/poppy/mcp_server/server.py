@@ -3,9 +3,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
+from poppy import __version__
 from poppy.engine.interface import RetrievalEngine
-from poppy.models import Filters, normalize_memory_type
+from poppy.models import MEMORY_TYPES, Filters
 from poppy.paths import ensure_poppy_dir
 from poppy.runtime import get_engine
 from poppy.sources import client_name_from_context
@@ -53,6 +55,25 @@ def _truncate_content(content: str, budget: int = CONTEXT_CONTENT_BUDGET) -> str
     if len(content) > budget:
         return content[: budget - 1].rstrip() + "…"
     return content
+
+
+def _parameter_error(exc: ValueError) -> str:
+    return str(exc).replace("--ttl", "ttl").replace("--expires-at", "expires_at").replace("--since", "since")
+
+
+def _validate_memory_type(memory_type: str) -> None:
+    if memory_type not in MEMORY_TYPES:
+        raise ValueError(f"memory_type must be one of: {', '.join(sorted(MEMORY_TYPES))}")
+
+
+def _resolve_tool_expiry(ttl: str | None, expires_at: str | None) -> datetime.datetime | None:
+    from poppy.lifecycle import resolve_expiry
+
+    try:
+        return resolve_expiry(ttl, expires_at)
+    except ValueError as exc:
+        parameter = "ttl" if ttl is not None else "expires_at"
+        raise ValueError(f"{parameter}: {_parameter_error(exc)}") from exc
 
 
 class PoppyMcpServer:
@@ -114,11 +135,13 @@ class PoppyMcpServer:
         # which still avoids ever stamping the transport string "mcp".
         resolved_source = source if source is not None else _resolve_source(client_name=None, configured=self._source)
         try:
+            _validate_memory_type(memory_type)
+            _resolve_tool_expiry(ttl, expires_at)
             result = _remember(
                 self._engine,
                 self._poppy_dir,
                 content=content,
-                memory_type=normalize_memory_type(memory_type),
+                memory_type=memory_type,
                 project=project,
                 related_to=related_to,
                 ttl=ttl,
@@ -129,9 +152,9 @@ class PoppyMcpServer:
                 source=resolved_source,
             )
         except ValueError as exc:
-            return {"error": str(exc)}
+            return {"error": _parameter_error(exc)}
         except KeyError as exc:
-            return {"error": str(exc)}
+            return {"error": exc.args[0]}
 
         conflicts_payload = _conflicts_payload(result)
         if result.mode == "check":
@@ -157,15 +180,14 @@ class PoppyMcpServer:
         expires_at: str | None = None,
         clear_expiry: bool = False,
     ) -> dict:
-        from poppy.lifecycle import edit_memory, resolve_expiry
+        from poppy.lifecycle import edit_memory
 
         try:
-            new_expiry = resolve_expiry(ttl, expires_at)
+            if memory_type is not None:
+                _validate_memory_type(memory_type)
+            new_expiry = _resolve_tool_expiry(ttl, expires_at)
         except ValueError as exc:
-            return {"error": str(exc)}
-        # None means "leave the type unchanged"; normalize only an explicit value.
-        if memory_type is not None:
-            memory_type = normalize_memory_type(memory_type)
+            return {"error": _parameter_error(exc)}
         try:
             result = edit_memory(
                 self._engine,
@@ -179,9 +201,9 @@ class PoppyMcpServer:
                 poppy_dir=self._poppy_dir,
             )
         except KeyError as exc:
-            return {"error": str(exc)}
+            return {"error": exc.args[0]}
         except ValueError as exc:
-            return {"error": str(exc)}
+            return {"error": _parameter_error(exc)}
         if result.changed:
             from poppy.sync.auto import trigger as _trigger_autosync
 
@@ -212,9 +234,7 @@ class PoppyMcpServer:
             try:
                 since_dt = parse_since(since).astimezone(datetime.UTC)
             except ValueError as exc:
-                # parse_since speaks CLI ("--since"); strip the flag spelling so
-                # the MCP-facing error names the tool parameter, not a CLI flag.
-                return {"error": str(exc).replace("--since", "since")}
+                return {"error": _parameter_error(exc)}
         limit = _clamp_limit(limit)
         filters = Filters(project=project, memory_type=memory_type, since=since_dt, include_expired=include_expired)
         results = self._engine.retrieve(query, filters=filters, limit=limit)
@@ -301,9 +321,11 @@ class PoppyMcpServer:
         # path), so bound the batch size instead.
         ids = ids[:MAX_RECALL_FULL_IDS]
         memories = []
+        unknown_ids = []
         for mem_id in ids:
             m = self._engine.get(mem_id)
             if m is None:
+                unknown_ids.append(mem_id)
                 continue
             memories.append(
                 {
@@ -316,7 +338,7 @@ class PoppyMcpServer:
                     "related_to": m.related_to,
                 }
             )
-        return {"memories": memories}
+        return {"memories": memories, "unknown_ids": unknown_ids}
 
     async def handle_forget(self, id: str) -> dict:
         # The core flow tombstones-before-delete (restorable and sync-visible)
@@ -383,6 +405,7 @@ def create_mcp_server(
         json_response=json_response,
         stateless_http=stateless_http,
     )
+    mcp._mcp_server.version = __version__
     # Status introspection shares this already-created engine and never constructs
     # a second holder or forces model loading.
     mcp._poppy_engine = handler._engine
@@ -405,7 +428,7 @@ def create_mcp_server(
 
         Args:
             content: The memory to store
-            memory_type: One of: fact, decision, preference, lesson, summary
+            memory_type: One of: fact, decision, preference, lesson, summary, context
             project: Project name (optional, for scoping)
             related_to: IDs of related memories (optional)
             ttl: Expire after duration (e.g. "30d", "12h", "1w3d") for time-sensitive facts
@@ -427,7 +450,7 @@ def create_mcp_server(
             source=handler.resolve_source(ctx),
         )
         if "error" in result:
-            return f"Error: {result['error']}"
+            raise ToolError(result["error"])
         if result.get("wrote") is False:
             # check_conflicts dry-run — surface the candidates only.
             cs = result.get("conflicts") or []
@@ -468,7 +491,7 @@ def create_mcp_server(
         Args:
             id: Memory ID to edit
             content: New content (optional)
-            memory_type: New type: fact, decision, preference, lesson (optional)
+            memory_type: New type: fact, decision, preference, lesson, summary, context (optional)
             project: New project name (optional)
             clear_project: Set project to null
             ttl: Reset expiry to a duration (e.g. "30d")
@@ -486,7 +509,7 @@ def create_mcp_server(
             clear_expiry=clear_expiry,
         )
         if "error" in result:
-            return f"Error: {result['error']}"
+            raise ToolError(result["error"])
         if not result["changed"]:
             return f"No changes for {id}."
         msg = f"Updated {id}"
@@ -513,7 +536,7 @@ def create_mcp_server(
         """
         result = await handler.handle_recall(query, project, memory_type, since=since, limit=limit)
         if "error" in result:
-            return f"Error: {result['error']}"
+            raise ToolError(result["error"])
         if not result["memories"]:
             # Nothing in the store, or nothing cleared the relevance floor
             # — abstain rather than pad with weak matches.
@@ -553,12 +576,14 @@ def create_mcp_server(
             ids: Memory IDs from a prior recall_index call
         """
         result = await handler.handle_recall_full(ids)
-        if not result["memories"]:
-            return "No memories found for given IDs."
         lines = []
         for m in result["memories"]:
             project_tag = f" [{m['project']}]" if m["project"] else ""
             lines.append(f"{m['id']} [{m['memory_type']}]{project_tag}\n  {m['content']}")
+        if result["unknown_ids"]:
+            lines.append(f"Unknown memory IDs: {', '.join(result['unknown_ids'])}")
+        if not lines:
+            return "No memories found for given IDs."
         return "\n\n".join(lines)
 
     @mcp.tool()
@@ -602,6 +627,8 @@ def create_mcp_server(
         """
         result = await handler.handle_context(project, limit=limit)
         if not result["context"]:
+            if project is not None:
+                return f"No memories for project {project!r}."
             return "No memories stored yet."
         return result["context"]
 

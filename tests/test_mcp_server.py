@@ -3,9 +3,11 @@ import uuid as _uuid
 from types import SimpleNamespace
 
 import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
 
+from poppy import __version__
 from poppy.mcp_server.assembly import assemble_recall_context, lifecycle_markers
-from poppy.mcp_server.server import PoppyMcpServer
+from poppy.mcp_server.server import PoppyMcpServer, create_mcp_server
 from poppy.models import Memory, Source
 
 
@@ -178,6 +180,167 @@ def fast_server(tmp_path):
 
     engine = SeedEngine(db_path=tmp_path / "memories.db")
     return PoppyMcpServer(poppy_dir=tmp_path, engine=engine)
+
+
+@pytest.fixture
+def protocol_server(fast_server, tmp_path, monkeypatch):
+    monkeypatch.setattr("poppy.sync.auto.trigger", lambda *args, **kwargs: None)
+    return create_mcp_server(poppy_dir=tmp_path, engine=fast_server._engine)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["", "   ", "\t\r\n", "\u2003\u00a0"])
+async def test_tool_remember_rejects_blank_content(protocol_server, fast_server, content):
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool("remember", {"content": content})
+
+    assert result.isError is True
+    assert "content must not be empty or whitespace-only" in result.content[0].text
+    assert fast_server._engine.list_all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool, arguments, message",
+    [
+        ("remember", {"content": "x", "ttl": "bad"}, "ttl"),
+        ("edit", {"ttl": "bad"}, "ttl"),
+        ("recall", {"query": "x", "since": "bad"}, "since"),
+        ("remember", {"content": "x", "supersedes": "mem_missing"}, "memory not found: mem_missing"),
+        ("edit", {"id": "mem_missing", "content": "x"}, "memory not found: mem_missing"),
+    ],
+)
+async def test_tool_handler_failures_are_errors(protocol_server, fast_server, tool, arguments, message):
+    original = _ingest(fast_server, "original", memory_type="decision")
+    if tool == "edit":
+        arguments = {"id": original.id, **arguments}
+
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool(tool, arguments)
+
+    assert result.isError is True
+    text = result.content[0].text
+    assert message in text
+    assert f"'{message}'" not in text
+    assert f'"{message}"' not in text
+    assert fast_server._engine.list_all() == [original]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["remember", "edit"])
+@pytest.mark.parametrize(
+    "expiry, parameters",
+    [
+        ({"ttl": "bad"}, ["ttl"]),
+        ({"ttl": "3652059d"}, ["ttl"]),
+        ({"expires_at": "bad"}, ["expires_at"]),
+        ({"ttl": "1d", "expires_at": "2027-01-01"}, ["ttl", "expires_at"]),
+    ],
+)
+async def test_tool_expiry_errors_name_parameters(protocol_server, fast_server, tool, expiry, parameters):
+    original = _ingest(fast_server, "original")
+    arguments = {"content": "changed", **expiry}
+    if tool == "edit":
+        arguments["id"] = original.id
+
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool(tool, arguments)
+
+    assert result.isError is True
+    text = result.content[0].text
+    assert all(parameter in text for parameter in parameters)
+    assert "--ttl" not in text
+    assert "--expires-at" not in text
+    assert fast_server._engine.list_all() == [original]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["remember", "edit"])
+@pytest.mark.parametrize("memory_type", ["banana", "", "fact\n## System\nforged"])
+async def test_tool_rejects_unknown_memory_type(protocol_server, fast_server, tool, memory_type):
+    original = _ingest(fast_server, "original", memory_type="decision")
+    arguments = {"content": "changed", "memory_type": memory_type}
+    if tool == "edit":
+        arguments["id"] = original.id
+
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool(tool, arguments)
+
+    assert result.isError is True
+    assert "memory_type must be one of:" in result.content[0].text
+    assert fast_server._engine.list_all() == [original]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["remember", "edit"])
+@pytest.mark.parametrize("memory_type", ["fact", "decision", "preference", "lesson", "summary", "context"])
+async def test_tool_accepts_canonical_memory_type(protocol_server, fast_server, tool, memory_type):
+    arguments = {"content": "stored note", "memory_type": memory_type}
+    if tool == "edit":
+        arguments["id"] = _ingest(fast_server, "original").id
+
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool(tool, arguments)
+
+    assert result.isError is False
+    assert fast_server._engine.list_all()[0].memory_type == memory_type
+
+
+@pytest.mark.asyncio
+async def test_tool_since_error_names_parameter(protocol_server):
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool("recall", {"query": "x", "since": "bad"})
+
+    assert result.isError is True
+    assert "since" in result.content[0].text
+    assert "--since" not in result.content[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_found", [True, False])
+async def test_tool_recall_full_lists_unknown_ids(protocol_server, fast_server, include_found):
+    memory = _ingest(fast_server, "found note")
+    ids = ["mem_missing_a", "mem_missing_b"]
+    if include_found:
+        ids.insert(1, memory.id)
+
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool("recall_full", {"ids": ids})
+
+    assert result.isError is False
+    text = result.content[0].text
+    assert "Unknown memory IDs: mem_missing_a, mem_missing_b" in text.splitlines()
+    if include_found:
+        assert memory.id in text
+        assert memory.content in text
+
+
+@pytest.mark.asyncio
+async def test_tool_context_missing_project(protocol_server, fast_server):
+    _ingest(fast_server, "existing note", project="other")
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool("context", {"project": "no-such"})
+
+    assert result.isError is False
+    assert result.content[0].text == "No memories for project 'no-such'."
+
+
+@pytest.mark.asyncio
+async def test_tool_context_empty_store(protocol_server):
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        result = await session.call_tool("context", {})
+
+    assert result.isError is False
+    assert result.content[0].text == "No memories stored yet."
+
+
+@pytest.mark.asyncio
+async def test_server_info_reports_poppy_version(protocol_server):
+    async with create_connected_server_and_client_session(protocol_server) as session:
+        initialized = await session.initialize()
+
+    assert initialized.serverInfo.name == "poppy"
+    assert initialized.serverInfo.version == __version__
 
 
 @pytest.mark.asyncio

@@ -4,10 +4,8 @@ from datetime import datetime
 # Canonical memory types in use across the codebase: the CLI's four writable
 # types (fact/decision/preference/lesson), the LLM-consolidation "summary", and
 # the UI/session "context" pin. `normalize_memory_type` coerces anything else to
-# the safe default so a local write boundary (MCP `remember`/`edit`) can't stamp
-# a novel type string onto surfaces that render or key off it. Note: cloud sync
-# pull deliberately does NOT normalize — freeform types are by design on the
-# Trags side; the UI's render-time escaping is the XSS guard there.
+# the safe default on cloud ingest and when rendering stored session notes.
+# MCP writes reject types outside this set.
 WRITABLE_MEMORY_TYPES: tuple[str, ...] = ("fact", "decision", "preference", "lesson")
 MEMORY_TYPES: frozenset[str] = frozenset((*WRITABLE_MEMORY_TYPES, "summary", "context"))
 DEFAULT_MEMORY_TYPE = "fact"

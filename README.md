@@ -323,7 +323,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 
 | Command | Flags | What it does |
 |---|---|---|
-| `poppy remember CONTENT` | `--type`, `--project`, `--ttl`, `--expires-at`, `--supersedes`, `--check-conflicts`, `--auto-supersede` | Store a memory. |
+| `poppy remember CONTENT` | `--type`, `--project`, `--ttl`, `--expires-at`, `--supersedes`, `--check-conflicts`, `--auto-supersede` | Store a memory; rejects empty or whitespace-only content. |
 | `poppy recall QUERY` | `--project`, `--type`, `--since`, `--limit`, `--json`, `--include-expired` | Search memories, ranked by relevance to the query. |
 | `poppy list` | `--project`, `--type`, `--since`, `--limit`, `--json`, `--include-expired` | List all memories, newest first. |
 | `poppy edit MEMORY_ID` | `--content`, `--type`, `--project`, `--no-project`, `--ttl`, `--expires-at`, `--no-expiry` | Edit a memory in place. |
@@ -363,6 +363,12 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy import hermes-memories` | `--dry-run`, `--memories-dir` | Import paragraphs from `~/.hermes/memories/{MEMORY,USER}.md`. |
 | `poppy hook ...` | | Claude Code, Cursor, and Codex hook entrypoints (`session-start`, `user-prompt-submit`, `pre-tool-use`, `post-compact`, `session-end`, `stop`, `replay-compact`, `replay-session-end`). Invoked by Poppy-installed hooks. |
 | `poppy doctor` | | Verify the installation: engine, storage, MCP config, hooks, and the Claude Code plugin. |
+
+MCP `remember` also rejects blank content. MCP `remember` and `edit` accept only
+`fact`, `decision`, `preference`, `lesson`, `summary`, or `context` as
+`memory_type`; invalid inputs return tool errors. Unknown memory types received
+from cloud sync become `fact`. SessionStart renders each stored note on one line,
+collapsing whitespace in its content and type.
 
 Cursor hooks are installed globally at `~/.cursor/hooks.json` by
 `poppy setup cursor`. Capture starts immediately once automatic capture is

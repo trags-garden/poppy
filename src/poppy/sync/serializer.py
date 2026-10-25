@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from poppy.models import Memory, Source
+from poppy.models import Memory, Source, normalize_memory_type
 from poppy.tombstones import Tombstone
 
 
@@ -90,7 +90,7 @@ def wire_to_memory(row: dict) -> Memory:
     return Memory(
         id=row["id"],
         content=row["content"],
-        memory_type=row["memory_type"],
+        memory_type=normalize_memory_type(row["memory_type"]),
         source=Source(
             type=row.get("source_type") or "trags-sync",
             session_id=row.get("source_session_id"),

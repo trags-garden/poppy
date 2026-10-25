@@ -15,7 +15,7 @@ from pathlib import Path
 import click
 
 from poppy.engine.interface import RetrievalEngine
-from poppy.models import Filters, ScoredMemory
+from poppy.models import Filters, ScoredMemory, normalize_memory_type
 from poppy.paths import ensure_poppy_dir
 from poppy.project import project_from_cwd
 from poppy.runtime import get_fast_engine, get_poppy_dir
@@ -157,7 +157,9 @@ def _render_session_memories(memories: list, *, project: str | None) -> str | No
     used = len(header.encode("utf-8"))
     shown = 0
     for m in memories:
-        line = f"- [{m.memory_type}] {_truncate(m.content, _SESSION_START_MEMORY_CHARS)}"
+        memory_type = normalize_memory_type(" ".join(m.memory_type.split()))
+        content = " ".join(m.content.split())
+        line = f"- [{memory_type}] {_truncate(content, _SESSION_START_MEMORY_CHARS)}"
         cost = len(line.encode("utf-8")) + 1  # +1 for the joining newline
         if shown > 0 and used + cost > _SESSION_START_BLOCK_BUDGET:
             break
