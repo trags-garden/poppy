@@ -10,8 +10,8 @@ This deny-list pass masks a handful of high-signal, low-false-positive token
 shapes in place and always keeps the memory (masking a token loses far less
 than dropping a whole lesson). It is applied once, early, at candidate construction
 (`capture.orchestrator.build_capture_memories`) — the single earliest seam — so a raw secret
-never becomes a Memory and every downstream consumer (the reconciler/store, sync,
-and the plaintext local capture journal preview) sees only the masked content.
+never becomes a Memory and every downstream content consumer (the reconciler/store
+and sync) sees only the masked content.
 That construction seam is shared by all three capture paths (mid-session,
 SessionEnd, PostCompact). Patterns are anchored and precompiled to keep the
 per-capture cost negligible.

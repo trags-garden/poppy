@@ -16,6 +16,7 @@ codes).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,8 @@ from typing import TYPE_CHECKING
 from poppy.engine.interface import RetrievalEngine
 from poppy.models import Memory, Source
 from poppy.sources import KNOWN_SOURCES
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from poppy.capture.reconciler import Conflict
@@ -217,6 +220,7 @@ def forget(
     fast FTS-only engine while deleting through the heavy write engine.
     ``tombstones`` lets a caller reuse an already-open store.
     """
+    from poppy.capture.journal import strip_previews
     from poppy.db import write_gate
     from poppy.tombstones import TombstoneStore
 
@@ -231,7 +235,7 @@ def forget(
         mem = reader.get(memory_id)
         if mem is None:
             existing = store.get(memory_id)
-            return ForgetResult(
+            result = ForgetResult(
                 deleted=False,
                 tombstoned=False,
                 memory=None,
@@ -239,15 +243,20 @@ def forget(
                 already_tombstoned=existing is not None,
             )
 
-        # Snapshot the memory before the live row goes. Push checks the
-        # per-ID remote provenance recorded by uploads, pulls, or upgrade.
-        ts = store.add(mem)
-        deleted = engine.delete(memory_id)
-        tombstoned = True
+        else:
+            # Snapshot the memory before the live row goes. Push checks the
+            # per-ID remote provenance recorded by uploads, pulls, or upgrade.
+            ts = store.add(mem)
+            deleted = engine.delete(memory_id)
+            result = ForgetResult(deleted=deleted, tombstoned=True, memory=mem, tombstone=ts)
 
-    if deleted:
+    try:
+        strip_previews(poppy_dir)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        log.warning("Could not scrub capture journal after forget: %s", exc)
+    if result.deleted:
         _trigger_autosync(poppy_dir)
-    return ForgetResult(deleted=deleted, tombstoned=tombstoned, memory=mem, tombstone=ts)
+    return result
 
 
 @dataclass

@@ -8,6 +8,10 @@ their own presentation and error mapping.
 
 import dataclasses
 import datetime as dt
+import json
+import os
+import stat
+from pathlib import Path
 
 import pytest
 
@@ -73,6 +77,29 @@ def test_remember_ingests(engine, tmp_path, _no_autosync):
     assert stored.content == "use ruff"
     assert stored.memory_type == "preference"
     assert _no_autosync == [tmp_path], "a successful write triggers autosync"
+
+
+@pytest.mark.parametrize("existing_memory", [True, False])
+def test_forget_strips_legacy_capture_previews(engine, tmp_path, existing_memory):
+    from poppy.capture import journal
+
+    text = "distinctive forgotten capture text"
+    memory_id = "missing"
+    if existing_memory:
+        memory_id = remember(engine, tmp_path, content=text).memory.id
+    path = tmp_path / journal.JOURNAL_FILENAME
+    legacy = {"session_id": "s1", "count": 1, "items": [{"type": "fact", "preview": text}]}
+    path.write_text(json.dumps(legacy) + "\n")
+    path.chmod(0o644)
+
+    result = forget(engine, tmp_path, memory_id)
+
+    assert result.deleted is existing_memory
+    assert text not in path.read_text()
+    assert "preview" not in path.read_text()
+    assert journal.last_session_count(tmp_path) == 1
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_remember_stamps_source(engine, tmp_path):
@@ -248,6 +275,60 @@ def test_forget_tombstones_and_deletes(engine, tmp_path, _no_autosync):
     assert engine.get(mem.id) is None
     assert TombstoneStore(tmp_path / "memories.db").get(mem.id) is not None
     assert _no_autosync == [tmp_path], "a successful delete triggers autosync"
+
+
+@pytest.mark.parametrize("failure", ["decode", "permission", "value"])
+def test_forget_survives_unreadable_journal(engine, tmp_path, monkeypatch, caplog, _no_autosync, failure):
+    from poppy.capture import journal
+
+    mem = remember(engine, tmp_path, content="ephemeral").memory
+    _no_autosync.clear()
+    path = tmp_path / journal.JOURNAL_FILENAME
+    original = b"\xff\n" if failure == "decode" else b'{"items": []}\n'
+    path.write_bytes(original)
+    real_read_text = Path.read_text
+
+    def failing_read(self, *args, **kwargs):
+        if self == path:
+            assert engine.get(mem.id) is None
+            assert TombstoneStore(tmp_path / "memories.db").get(mem.id) is not None
+            if failure == "permission":
+                raise PermissionError("journal is unreadable")
+            if failure == "value":
+                raise ValueError("journal read failed")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read)
+
+    result = forget(engine, tmp_path, mem.id)
+
+    assert result.deleted and result.tombstoned
+    assert engine.get(mem.id) is None
+    assert TombstoneStore(tmp_path / "memories.db").get(mem.id) is not None
+    assert path.read_bytes() == original
+    assert _no_autosync == [tmp_path]
+    warnings = [r for r in caplog.records if r.name == "poppy.write_flow"]
+    assert len(warnings) == 1
+    assert "Could not scrub capture journal after forget" in warnings[0].message
+
+
+def test_forget_does_not_scrub_journal_when_delete_fails(engine, tmp_path, monkeypatch):
+    from poppy.capture import journal
+
+    mem = remember(engine, tmp_path, content="ephemeral").memory
+    path = tmp_path / journal.JOURNAL_FILENAME
+    original = '{"items": [{"type": "fact", "preview": "ephemeral"}]}\n'
+    path.write_text(original)
+
+    def fail_delete(memory_id):
+        raise OSError("delete failed")
+
+    monkeypatch.setattr(engine, "delete", fail_delete)
+    with pytest.raises(OSError, match="delete failed"):
+        forget(engine, tmp_path, mem.id)
+
+    assert engine.get(mem.id) is not None
+    assert path.read_text() == original
 
 
 def test_forget_nonexistent(engine, tmp_path, _no_autosync):

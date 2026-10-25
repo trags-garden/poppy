@@ -53,6 +53,46 @@ def test_status_off_by_default(tmp_path):
     assert "dependencies: installed" in result.output
 
 
+@pytest.mark.parametrize("keychain_key", [False, True])
+def test_deep_status_wrong_key_still_reports_encryption_on(tmp_path, monkeypatch, keychain_key):
+    _seed(tmp_path)
+    if not keychain_key:
+        monkeypatch.setenv("POPPY_DB_KEY", "ab" * 32)
+    encryption.enable(tmp_path)
+
+    result = CliRunner().invoke(cli, ["encrypt", "status", "--deep"], env={**_env(tmp_path), "POPPY_DB_KEY": "cd" * 32})
+
+    assert result.exit_code == 0, result.output
+    assert "Encryption: on" in result.output
+    assert "encrypted on disk: yes" in result.output
+    assert "warning:" in result.output
+    if keychain_key:
+        assert "another stored key works" in result.output
+        assert "corrupt" not in result.output
+    else:
+        assert "wrong key, corrupt or foreign" in result.output
+
+
+def test_doctor_and_repair_detect_marked_corrupt_store(tmp_path):
+    _seed(tmp_path)
+    encryption.enable(tmp_path)
+    (tmp_path / "memories.db").write_bytes(b"random overwritten bytes" * 100)
+    original = (tmp_path / "memories.db").read_bytes()
+
+    runner = CliRunner()
+    doctor = runner.invoke(cli, ["doctor"], env=_env(tmp_path))
+    assert doctor.exit_code == 1, doctor.output
+    assert "encryption at rest: FAIL" in doctor.output
+    assert "corrupt" in doctor.output
+
+    repaired = runner.invoke(cli, ["encrypt", "repair"], env=_env(tmp_path))
+    assert repaired.exit_code == 0, repaired.output
+    assert "corrupt" in repaired.output
+    assert "nothing to repair" not in repaired.output
+    assert (tmp_path / encryption.ENCRYPTION_SENTINEL).exists()
+    assert (tmp_path / "memories.db").read_bytes() == original
+
+
 def test_bare_encrypt_shows_status(tmp_path):
     result = CliRunner().invoke(cli, ["encrypt"], env=_env(tmp_path))
     assert result.exit_code == 0

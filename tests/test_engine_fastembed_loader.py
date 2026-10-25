@@ -62,6 +62,48 @@ def test_cached_load_failure_reraises_original(monkeypatch: pytest.MonkeyPatch, 
     assert not isinstance(excinfo.value, ModelUnavailableError)
 
 
+def test_local_only_missing_model_never_calls_constructor(monkeypatch, tmp_path):
+    def unexpected(*args, **kwargs):
+        pytest.fail("a cold-cache health check must not try to download")
+
+    _patch_ctors(monkeypatch, unexpected)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: False)
+
+    with pytest.raises(ModelUnavailableError, match="Connect to the internet.*poppy engines use seed"):
+        fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
+
+
+def test_local_only_cached_failure_includes_remediation(monkeypatch, tmp_path):
+    def fail(*args, **kwargs):
+        assert kwargs["local_files_only"] is True
+        raise RuntimeError("broken cached model")
+
+    _patch_ctors(monkeypatch, fail)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: True)
+
+    with pytest.raises(ModelUnavailableError, match="broken cached model.*poppy engines use seed"):
+        fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
+
+
+def test_local_health_check_reuses_loaded_models(monkeypatch, tmp_path, capsys, real_model_health):
+    calls = []
+
+    def load(model_name, **kwargs):
+        assert kwargs["local_files_only"] is True
+        calls.append(model_name)
+        return _FakeBi() if model_name == BI else _FakeCross()
+
+    _patch_ctors(monkeypatch, load)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: True)
+    models = fe.FastembedModels(cache_dir=tmp_path, idle_timeout_s=0)
+    models.check_available()
+    models.check_available()
+    assert models.embed("test").shape == (4,)
+    assert models.rerank("test", ["doc"]) == [1.0]
+    assert calls == [BI, fe.CROSS_ENCODER]
+    assert "downloading" not in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("cached", [True, False])
 def test_load_threads_local_files_only_by_cache_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cached: bool

@@ -66,8 +66,8 @@ def save(poppy_dir: Path, data: dict) -> None:
 
 
 @contextmanager
-def _locked(poppy_dir: Path) -> Iterator[None]:
-    """Hold an exclusive advisory lock on the capture-state lock file.
+def _locked(poppy_dir: Path, *, lock_filename: str = LOCK_FILENAME) -> Iterator[None]:
+    """Hold an exclusive advisory lock on a capture data lock file.
 
     Degrades to a no-op where ``fcntl`` is unavailable (Windows), where the
     atomic ``save`` still prevents torn files even if it cannot prevent a lost
@@ -77,7 +77,7 @@ def _locked(poppy_dir: Path) -> Iterator[None]:
     if fcntl is None:
         yield
         return
-    fd = os.open(str(poppy_dir / LOCK_FILENAME), os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(str(poppy_dir / lock_filename), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

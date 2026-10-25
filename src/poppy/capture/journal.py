@@ -1,8 +1,8 @@
 """CaptureJournal — local record of what each capture stored.
 
 One local source of truth for the SessionStart banner, ``poppy doctor``, and the
-dashboard: each capture appends a record with the session, project, count, and a
-short preview of each stored item. It is a per-device cache of already-synced
+dashboard: each capture appends a record with the session, project, count, and
+type of each stored item. It is a per-device cache of already-synced
 data, so it stays local (it is NOT synced — see the sync boundary).
 
 Banner/doctor surfaces that read this are out of scope for the capture slices;
@@ -18,10 +18,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from poppy.paths import ensure_poppy_dir
+from poppy.capture._state import _locked
+from poppy.paths import write_text_atomic
 
 JOURNAL_FILENAME = "capture_journal.jsonl"
-PREVIEW_CHARS = 80
+LOCK_FILENAME = JOURNAL_FILENAME + ".lock"
 MAX_ENTRIES = 200
 
 
@@ -41,9 +42,24 @@ def _journal_path(poppy_dir: Path) -> Path:
     return poppy_dir / JOURNAL_FILENAME
 
 
-def _preview(text: str) -> str:
-    text = " ".join((text or "").split())
-    return text[:PREVIEW_CHARS]
+def _write_records(poppy_dir: Path, rows: list[dict[str, Any]]) -> None:
+    cleaned = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        items = row.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        row["items"] = [{"type": item.get("type", "fact")} for item in items if isinstance(item, dict)]
+        cleaned.append(json.dumps(row) + "\n")
+    write_text_atomic(_journal_path(poppy_dir), "".join(cleaned))
+
+
+def strip_previews(poppy_dir: Path) -> None:
+    """Remove text left by older journal writers, preserving capture metadata."""
+    with _locked(poppy_dir, lock_filename=LOCK_FILENAME):
+        if _journal_path(poppy_dir).exists():
+            _write_records(poppy_dir, read_all(poppy_dir))
 
 
 def record(
@@ -56,8 +72,8 @@ def record(
     source: str | None = None,
     max_entries: int = MAX_ENTRIES,
 ) -> CaptureRecord:
-    """Append a capture record. ``items`` are objects with ``.memory_type`` and
-    ``.content`` (Memory) — only the type and a short preview are stored.
+    """Append a capture record. ``items`` are objects with ``.memory_type``
+    (Memory) — only the type is stored.
     ``source`` is the capture host / source app so host-specific liveness checks
     (e.g. the doctor's Codex line) can filter to their own records."""
     rec = CaptureRecord(
@@ -66,20 +82,13 @@ def record(
         project=project,
         count=count,
         source=source,
-        items=[
-            {"type": getattr(it, "memory_type", "fact"), "preview": _preview(getattr(it, "content", ""))}
-            for it in items
-        ],
+        items=[{"type": getattr(it, "memory_type", "fact")} for it in items],
     )
 
-    ensure_poppy_dir(poppy_dir)
-    path = _journal_path(poppy_dir)
-    existing: list[str] = []
-    if path.exists():
-        existing = [ln for ln in path.read_text().splitlines() if ln.strip()]
-    existing.append(json.dumps(rec.__dict__))
-    existing = existing[-max_entries:]
-    path.write_text("\n".join(existing) + "\n")
+    with _locked(poppy_dir, lock_filename=LOCK_FILENAME):
+        existing = read_all(poppy_dir)
+        existing.append(rec.__dict__)
+        _write_records(poppy_dir, existing[-max_entries:])
     return rec
 
 

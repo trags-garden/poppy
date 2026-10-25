@@ -63,6 +63,9 @@ class BloomEngine(HybridEngine):
             rollback_and_close(self._conn)
             raise
 
+    def check_models(self) -> None:
+        self._models.check_available()
+
     def _embed(self, text: str) -> np.ndarray:
         return self._models.embed(text)
 

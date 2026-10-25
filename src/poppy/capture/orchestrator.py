@@ -76,11 +76,9 @@ def build_capture_memories(
 
     Secret redaction happens here, at construction, so a captured
     credential never exists as a Memory in raw form. This is the single, earliest
-    seam: every downstream consumer — the reconciler/store, sync, and the local
-    capture journal (which records an 80-char preview of each candidate, in
-    plaintext, *before* the reconciler runs) — therefore only ever sees the masked
-    content. Redacting later (e.g. only inside the reconciler) would leave the
-    journal preview holding the raw secret.
+    seam: every downstream content consumer — the reconciler/store and sync —
+    therefore only ever sees the masked content. The local capture journal
+    records only types and counts.
     """
     # Custom redaction config is an optional safety layer, never a capture
     # dependency. The orchestrator threads its already-loaded config; direct
