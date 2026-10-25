@@ -308,7 +308,7 @@ def test_supersede_tombstones_old_and_links_new(engine: SeedEngine, tmp_path: Pa
 
     from poppy.ui.tombstones import TombstoneStore
 
-    ts = TombstoneStore(tmp_path / "memories.db")
+    ts = TombstoneStore(tmp_path / "mem.db")
     assert ts.get(old.id) is not None
 
 

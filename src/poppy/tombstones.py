@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from poppy.db import apply_row_factory
+from poppy.db import apply_row_factory, write_txn
 from poppy.db import connect as connect_db
 from poppy.engine._timestamps import repush_stamp, utc_iso
 from poppy.models import Memory, Source
@@ -111,8 +111,8 @@ def _migrate_columns(conn: sqlite3.Connection) -> None:
     # open, and an unconditional UPDATE would take a write lock every time.
     if conn.execute("SELECT 1 FROM ui_tombstones WHERE token IS NULL LIMIT 1").fetchone() is not None:
         # randomblob gives each row its own token in one statement.
-        conn.execute("UPDATE ui_tombstones SET token = lower(hex(randomblob(16))) WHERE token IS NULL")
-        conn.commit()
+        with write_txn(conn):
+            conn.execute("UPDATE ui_tombstones SET token = lower(hex(randomblob(16))) WHERE token IS NULL")
 
 
 @dataclass
@@ -134,18 +134,23 @@ class Tombstone:
 class TombstoneStore:
     """Manages the `ui_tombstones` sidecar table in the Poppy SQLite DB."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, connection: sqlite3.Connection | None = None) -> None:
+        """Pass an engine connection to initialize and write within its transaction."""
         self._db_path = db_path
         self._lock = threading.RLock()
-        self._conn = connect_db(db_path, check_same_thread=False)
+        self._conn = connection if connection is not None else connect_db(db_path, check_same_thread=False)
         apply_row_factory(self._conn)
-        self._conn.executescript(SCHEMA)
-        _migrate_columns(self._conn)
-        self._migrate_sync_provenance()
-        # The engine owns `memories`. A store opened before it exists has no live
-        # rows to clear yet; the next open adds the trigger.
-        if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories'").fetchone():
-            with self._conn:
+        with self._lock, write_txn(self._conn):
+            # executescript commits an open transaction, so execute the schema
+            # statements separately when joining an engine's supersede.
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    self._conn.execute(statement)
+            _migrate_columns(self._conn)
+            self._migrate_sync_provenance()
+            # The engine owns `memories`. A store opened before it exists has no live
+            # rows to clear yet; the next open adds the trigger.
+            if self._conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories'").fetchone():
                 self._conn.execute(SUPPRESSION_TRIGGER)
 
     def _migrate_sync_provenance(self) -> None:
@@ -169,8 +174,7 @@ class TombstoneStore:
 
         if "sent_remotes" in columns("ui_tombstones"):
             return
-        with self._conn:
-            self._conn.execute("BEGIN IMMEDIATE")
+        with write_txn(self._conn):
             cols = columns("ui_tombstones")
             if "sent_remotes" in cols:  # Another opener completed the migration.
                 return
@@ -215,6 +219,7 @@ class TombstoneStore:
         superseded_by: str | None = None,
         tombstoned_at: datetime | None = None,
         sent_to: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> Tombstone:
         """Record a soft-delete.
 
@@ -226,12 +231,14 @@ class TombstoneStore:
         independent note another device wrote while the pull was in flight.
         Pass ``sent_to`` for a pulled deletion so creation and its
         acknowledgement are atomic; it must never be re-announced to its source.
+        Pass ``connection`` to join an engine transaction, including its rollback.
         """
         # Stored as UTC text: `purge_expired` compares this column with the
         # push watermark as strings, and one instant must have one spelling.
         now = (tombstoned_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         token = uuid.uuid4().hex
-        with self._lock:
+        conn = connection if connection is not None else self._conn
+        with self._lock, write_txn(conn):
             # Never backwards. A local forget at 14:00 followed by a pull of an
             # older cloud deletion at 12:00 must leave the record saying 14:00 —
             # a downgraded deletion, once pushed, loses to another device's 13:00
@@ -245,9 +252,7 @@ class TombstoneStore:
             # is making now always snapshots the row it is about to remove, or
             # a clock-skewed record from elsewhere would leave the memory the
             # user just forgot with no way back.
-            existing = self._conn.execute(
-                "SELECT tombstoned_at FROM ui_tombstones WHERE id = ?", (memory.id,)
-            ).fetchone()
+            existing = conn.execute("SELECT tombstoned_at FROM ui_tombstones WHERE id = ?", (memory.id,)).fetchone()
             if (
                 tombstoned_at is not None
                 and existing is not None
@@ -257,7 +262,7 @@ class TombstoneStore:
                 if kept is not None:
                     return kept
             sent_remotes = {sent_to.rstrip("/")} if sent_to else set()
-            self._conn.execute(
+            conn.execute(
                 """INSERT OR REPLACE INTO ui_tombstones (
                     id, content, memory_type, project, source_type, source_session_id,
                     source_timestamp, confidence, related_to, created_at, updated_at, tombstoned_at,
@@ -286,7 +291,6 @@ class TombstoneStore:
                     json.dumps(dict.fromkeys(sent_remotes, 1)),
                 ),
             )
-            self._conn.commit()
         return Tombstone(
             memory=memory, tombstoned_at=now, superseded_by=superseded_by, token=token, sent_remotes=sent_remotes
         )

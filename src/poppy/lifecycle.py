@@ -7,6 +7,7 @@ delete. CLI and MCP both call into here so the behavior stays identical.
 
 from __future__ import annotations
 
+import sqlite3
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -285,15 +286,13 @@ def supersede_memory(
     # another process between any two of them would leave the old text
     # half-redacted.
     with write_gate(poppy_dir):
-        return _supersede_memory(engine, new_memory, old_id, poppy_dir=poppy_dir)
+        return _supersede_memory(engine, new_memory, old_id)
 
 
 def _supersede_memory(
     engine: RetrievalEngine,
     new_memory: Memory,
     old_id: str,
-    *,
-    poppy_dir: Path,
 ) -> SupersedeResult:
     from poppy.tombstones import TombstoneStore
 
@@ -301,15 +300,16 @@ def _supersede_memory(
     if old is None:
         raise KeyError(f"memory not found: {old_id}")
 
-    db_path = poppy_dir / "memories.db"
-    tombstones = TombstoneStore(db_path)
-    tombstones.add(old, superseded_by=new_memory.id)
-    engine.delete(old_id)
-
     related = list(new_memory.related_to)
     if old_id not in related:
         related.append(old_id)
     new_memory.related_to = related
-    engine.ingest(new_memory)
+
+    def archive(conn: sqlite3.Connection) -> None:
+        db_path = next(row["file"] for row in conn.execute("PRAGMA database_list") if row["name"] == "main")
+        tombstones = TombstoneStore(Path(db_path or ":memory:"), connection=conn)
+        tombstones.add(old, superseded_by=new_memory.id)
+
+    engine.supersede(old_id, new_memory, before_delete=archive)
 
     return SupersedeResult(new_id=new_memory.id, old_id=old_id, tombstoned=True)

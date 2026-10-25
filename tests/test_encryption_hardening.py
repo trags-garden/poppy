@@ -1068,3 +1068,35 @@ def test_disable_names_the_keychain_failure_under_the_shared_no_key_line(tmp_pat
     assert "interaction not allowed (-25308)" in message
     assert "only locked" in message
     assert "keyrings.alt" not in message
+
+
+def test_plaintext_probe_missing_store_creates_nothing(tmp_path):
+    db = tmp_path / "missing.db"
+    assert encryption._opens_as_plaintext(db) is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_encrypted_probe_missing_store_creates_nothing(tmp_path, monkeypatch):
+    key = encryption.generate_key()
+    monkeypatch.setenv("POPPY_DB_KEY", key)
+    assert encryption._working_key(tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_encrypted_probe_opens_existing_store_read_only(tmp_path):
+    from sqlcipher3 import dbapi2
+
+    db = _seed(tmp_path, "probe memory")
+    encryption.enable(tmp_path)
+    key = keychain.get_secret(_account(tmp_path))
+    before = db.read_bytes()
+
+    assert encryption._working_key(tmp_path) == key
+    conn = encryption._open_encrypted(db, key, wal=False, immutable=True)
+    try:
+        assert conn.execute("SELECT content FROM memories").fetchone()[0] == "probe memory"
+        with pytest.raises(dbapi2.OperationalError, match="readonly"):
+            conn.execute("DELETE FROM memories")
+    finally:
+        conn.close()
+    assert db.read_bytes() == before
