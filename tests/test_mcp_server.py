@@ -782,6 +782,26 @@ async def test_handle_recall_deterministic_order(fast_server):
 # ---------- Recall relevance floor + abstention ----------
 
 
+@pytest.fixture
+def semantic_server(tmp_path):
+    import numpy as np
+
+    from poppy.engine.bloom import BloomEngine
+
+    class BiEncoder:
+        def embed(self, texts):
+            for _ in texts:
+                yield np.array([1.0, 0.0], dtype=np.float32)
+
+    class CrossEncoder:
+        def rerank(self, query, docs):
+            return [1.0] * len(docs)
+
+    engine = BloomEngine(tmp_path / "memories.db", bi_encoder=BiEncoder(), cross_encoder=CrossEncoder())
+    yield PoppyMcpServer(poppy_dir=tmp_path, engine=engine)
+    engine._conn.close()
+
+
 def _set_recall_floor(poppy_dir, value):
     from poppy.config import load_config, save_config
 
@@ -791,48 +811,67 @@ def _set_recall_floor(poppy_dir, value):
 
 
 @pytest.mark.asyncio
-async def test_recall_floor_off_returns_all(fast_server):
+async def test_recall_floor_off_returns_all(semantic_server):
     for i in range(3):
-        _ingest(fast_server, f"alpha beta gamma item {i}")
-    result = await fast_server.handle_recall(query="alpha beta gamma")
+        _ingest(semantic_server, f"alpha beta gamma item {i}")
+    result = await semantic_server.handle_recall(query="alpha beta gamma")
     assert len(result["memories"]) == 3
 
 
 @pytest.mark.asyncio
-async def test_recall_floor_suppresses_everything_when_nothing_clears(fast_server):
+async def test_recall_floor_suppresses_everything_when_nothing_clears(semantic_server):
     # No CE score maps to a probability >= 0.99, so a near-max floor abstains
     # entirely even for otherwise-matching memories.
     for i in range(3):
-        _ingest(fast_server, f"alpha beta gamma item {i}")
-    _set_recall_floor(fast_server._poppy_dir, 0.99)
-    result = await fast_server.handle_recall(query="alpha beta gamma")
+        _ingest(semantic_server, f"alpha beta gamma item {i}")
+    _set_recall_floor(semantic_server._poppy_dir, 0.99)
+    result = await semantic_server.handle_recall(query="alpha beta gamma")
     assert result["memories"] == []
 
 
 @pytest.mark.asyncio
-async def test_recall_floor_keeps_clearly_relevant(fast_server):
+async def test_recall_floor_keeps_clearly_relevant(semantic_server):
     # A low floor keeps genuine matches (their probability is > 0.5).
-    _ingest(fast_server, "postgres pooling connection tips")
-    _set_recall_floor(fast_server._poppy_dir, 0.3)
-    result = await fast_server.handle_recall(query="postgres pooling")
+    _ingest(semantic_server, "postgres pooling connection tips")
+    _set_recall_floor(semantic_server._poppy_dir, 0.3)
+    result = await semantic_server.handle_recall(query="postgres pooling")
     assert len(result["memories"]) >= 1
 
 
 @pytest.mark.asyncio
-async def test_recall_floor_empty_store_returns_empty(fast_server):
-    _set_recall_floor(fast_server._poppy_dir, 0.5)
-    result = await fast_server.handle_recall(query="nothing here")
+async def test_recall_floor_empty_store_returns_empty(semantic_server):
+    _set_recall_floor(semantic_server._poppy_dir, 0.5)
+    result = await semantic_server.handle_recall(query="nothing here")
     assert result["memories"] == []
 
 
 @pytest.mark.asyncio
-async def test_recall_index_respects_floor(fast_server):
+async def test_recall_index_respects_floor(semantic_server):
     for i in range(3):
-        _ingest(fast_server, f"alpha beta gamma item {i}")
+        _ingest(semantic_server, f"alpha beta gamma item {i}")
     # Off -> all surface.
-    idx = await fast_server.handle_recall_index(query="alpha beta gamma")
+    idx = await semantic_server.handle_recall_index(query="alpha beta gamma")
     assert len(idx["results"]) == 3
     # Near-max floor -> abstain.
-    _set_recall_floor(fast_server._poppy_dir, 0.99)
-    idx = await fast_server.handle_recall_index(query="alpha beta gamma")
+    _set_recall_floor(semantic_server._poppy_dir, 0.99)
+    idx = await semantic_server.handle_recall_index(query="alpha beta gamma")
     assert idx["results"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("floor", [0.2, 0.6, 0.99])
+@pytest.mark.parametrize("configured_engine", ["seed", "bloom"])
+async def test_recall_seed_ignores_semantic_floor(fast_server, floor, configured_engine):
+    from poppy.config import load_config, save_config
+
+    cfg = load_config(fast_server._poppy_dir)
+    cfg.engine = configured_engine
+    save_config(cfg)
+    memory = _ingest(fast_server, "keyword memory")
+    _set_recall_floor(fast_server._poppy_dir, floor)
+
+    recalled = await fast_server.handle_recall(query="keyword")
+    index = await fast_server.handle_recall_index(query="keyword")
+
+    assert [m["id"] for m in recalled["memories"]] == [memory.id]
+    assert [m["id"] for m in index["results"]] == [memory.id]

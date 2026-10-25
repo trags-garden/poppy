@@ -1,21 +1,27 @@
 import json
+import logging
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 from poppy.db import apply_row_factory, open_with_upgrades, write_txn
 from poppy.engine._timestamps import (
     TIMESTAMP_MIGRATION,
+    InvalidTimestampError,
     chunked,
     expiry_passed,
     migration_applied,
     normalise_stored_timestamps,
+    parse_stored_timestamp,
     unexpired_sql,
     utc_iso,
 )
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
 from poppy.models import Filters, Memory, ScoredMemory, Source
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -313,14 +319,14 @@ class SeedEngine(RetrievalEngine):
             source=Source(
                 type=row["source_type"],
                 session_id=row["source_session_id"],
-                timestamp=datetime.fromisoformat(row["source_timestamp"]),
+                timestamp=parse_stored_timestamp(row["source_timestamp"]),
             ),
             project=row["project"],
             related_to=json.loads(row["related_to"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
+            created_at=parse_stored_timestamp(row["created_at"]),
+            updated_at=parse_stored_timestamp(row["updated_at"]),
             confidence=row["confidence"],
-            expires_at=datetime.fromisoformat(expires_at_raw) if expires_at_raw else None,
+            expires_at=parse_stored_timestamp(expires_at_raw) if expires_at_raw else None,
         )
 
     def ingest(self, memory: Memory) -> str:
@@ -398,6 +404,15 @@ class SeedEngine(RetrievalEngine):
                     self._conn.execute(_INSERT_SQL, params)
             return memory.id
 
+    def supersede(
+        self, old_id: str, memory: Memory, *, before_delete: Callable[[sqlite3.Connection], None] | None = None
+    ) -> str:
+        with self._lock, write_txn(self._conn):
+            if before_delete is not None:
+                before_delete(self._conn)
+            self.delete(old_id)
+            return self.ingest(memory)
+
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
         escaped_query = '"' + query.replace('"', '""') + '"'
         with self._lock:
@@ -410,14 +425,21 @@ class SeedEngine(RetrievalEngine):
                        LIMIT ?""",
                     (escaped_query, limit * 3),
                 ).fetchall()
-            except Exception:
+            except Exception as exc:
+                # Only FTS syntax errors mean the query cannot match anything.
+                if type(exc).__name__ != "OperationalError" or not str(exc).startswith("fts5:"):
+                    raise
                 return []
 
         now = datetime.now(timezone.utc)
         include_expired = bool(filters and filters.include_expired)
         results = []
         for row in rows:
-            mem = self._row_to_memory(row)
+            try:
+                mem = self._row_to_memory(row)
+            except InvalidTimestampError:
+                logger.debug("Skipping memory %s with an unreadable timestamp", row["id"], exc_info=True)
+                continue
             if not include_expired and mem.expires_at is not None and mem.expires_at <= now:
                 continue
             if filters:

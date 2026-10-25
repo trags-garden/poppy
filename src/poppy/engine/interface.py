@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
+from sqlite3 import Connection
 
 from poppy.models import Filters, Memory, ScoredMemory
 
@@ -23,6 +25,9 @@ class RetrievalEngine(ABC):
     # Whether conflict candidates use the default retrieval score floor.
     apply_candidate_score_floor: bool = True
 
+    # Only cross-encoder logits can use the semantic recall probability floor.
+    apply_recall_score_floor: bool = False
+
     # Embedding model fingerprint. Engines that use a bi-encoder return a stable
     # identifier (e.g. "all-MiniLM-L6-v2"). FTS-only engines like the baseline
     # return None — they neither produce nor consume embeddings, so a stored
@@ -40,6 +45,12 @@ class RetrievalEngine(ABC):
     @abstractmethod
     def ingest(self, memory: Memory) -> str:
         """Store a memory, return its ID."""
+
+    def supersede(
+        self, old_id: str, memory: Memory, *, before_delete: Callable[[Connection], None] | None = None
+    ) -> str:
+        """Replace a memory atomically, optionally archiving it on the same connection."""
+        raise NotImplementedError
 
     @abstractmethod
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:

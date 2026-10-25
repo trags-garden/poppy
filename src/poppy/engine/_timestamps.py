@@ -43,6 +43,17 @@ import sqlite3
 from datetime import datetime, timezone
 
 
+class InvalidTimestampError(ValueError):
+    """A stored memory timestamp cannot be decoded."""
+
+
+def parse_stored_timestamp(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise InvalidTimestampError(str(exc)) from exc
+
+
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
