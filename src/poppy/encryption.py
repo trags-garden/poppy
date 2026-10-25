@@ -398,7 +398,7 @@ def _immutable_uri(db_path: Path) -> str:
     # decoded by SQLite's URI parser into a different, nonexistent path.
     from urllib.parse import quote  # noqa: PLC0415
 
-    return "file:" + quote(str(db_path)) + "?immutable=1"
+    return "file:" + quote(str(db_path)) + "?immutable=1&mode=ro"
 
 
 def _open_encrypted(

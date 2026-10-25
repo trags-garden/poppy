@@ -13,8 +13,11 @@ import numpy as np
 import pytest
 
 from poppy.engine.bloom import BloomEngine
+from poppy.engine.seed import SeedEngine
 from poppy.errors import ModelUnavailableError
+from poppy.lifecycle import supersede_memory
 from poppy.models import Memory, Source
+from poppy.tombstones import TombstoneStore
 
 OLD_TEXT = "the pumpkin cadenza"
 NEW_TEXT = "the rhubarb cadenza"
@@ -314,4 +317,90 @@ def test_a_failed_write_cannot_erase_another_threads_write(tmp_path: Path, monke
     # A failed, so nothing of A's edit landed.
     assert _family(db, "mem_a") == before
     assert engine._conn.in_transaction is False
+    engine._conn.close()
+
+
+def test_supersede_embed_failure_preserves_live_memory(tmp_path, monkeypatch):
+    db = tmp_path / "memories.db"
+    engine = _bloom(db)
+    old = _memory("old", OLD_TEXT)
+    engine.ingest(old)
+    before = _rows(db, "SELECT * FROM memories")
+    vectors = _rows(db, "SELECT * FROM memory_embeddings")
+    index = _rows(db, "SELECT * FROM memory_fts")
+    _fail_embed(monkeypatch, engine)
+
+    with pytest.raises(ModelUnavailableError):
+        supersede_memory(engine, _memory("new", NEW_TEXT), old.id, poppy_dir=tmp_path)
+
+    assert engine.get(old.id) == old
+    assert engine.get("new") is None
+    assert _rows(db, "SELECT * FROM memories") == before
+    assert _rows(db, "SELECT * FROM memory_embeddings") == vectors
+    assert _rows(db, "SELECT * FROM memory_fts") == index
+    assert _rows(db, "SELECT * FROM ui_tombstones") == []
+    assert engine._conn.in_transaction is False
+    _assert_another_process_can_write(db)
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+@pytest.mark.parametrize("failure", ["delete", "insert"])
+def test_supersede_database_failure_rolls_back_everything(tmp_path, engine_kind, failure):
+    db = tmp_path / "memories.db"
+    engine = _bloom(db) if engine_kind == "bloom" else SeedEngine(db)
+    old = _memory("old", OLD_TEXT)
+    engine.ingest(old)
+    trash = TombstoneStore(db)
+    trash.add(old, superseded_by="earlier")
+    trash._conn.close()
+    tables = ["memories", "memory_fts", "ui_tombstones"]
+    if engine_kind == "bloom":
+        tables.append("memory_embeddings")
+    before = {table: _rows(db, f"SELECT * FROM {table}") for table in tables}
+    if failure == "delete":
+        trigger = "AFTER DELETE ON memories WHEN old.id = 'old'"
+    elif engine_kind == "bloom":
+        trigger = "AFTER INSERT ON memory_embeddings WHEN new.id = 'new'"
+    else:
+        trigger = "AFTER INSERT ON memories WHEN new.id = 'new'"
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"CREATE TRIGGER fail_supersede {trigger} BEGIN SELECT RAISE(ABORT, 'write failed'); END")
+
+    with pytest.raises(sqlite3.IntegrityError, match="write failed"):
+        supersede_memory(engine, _memory("new", NEW_TEXT), old.id, poppy_dir=tmp_path)
+
+    assert engine.get(old.id) == old
+    assert engine.get("new") is None
+    for table in tables:
+        assert _rows(db, f"SELECT * FROM {table}") == before[table]
+    assert engine._conn.in_transaction is False
+    with sqlite3.connect(db, timeout=1) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+        conn.execute("DROP TRIGGER fail_supersede")
+    engine.ingest(_memory("later", "another memory"))
+    for table in tables[2:]:
+        assert all(row[0] != "new" for row in _rows(db, f"SELECT * FROM {table}"))
+    assert engine.get(old.id) == old
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_supersede_commits_memory_index_and_archive(tmp_path, engine_kind):
+    db = tmp_path / "memories.db"
+    engine = _bloom(db) if engine_kind == "bloom" else SeedEngine(db)
+    old = _memory("old", OLD_TEXT)
+    new = _memory("new", NEW_TEXT)
+    engine.ingest(old)
+
+    supersede_memory(engine, new, old.id, poppy_dir=tmp_path)
+
+    assert engine.get(old.id) is None
+    assert engine.get(new.id) == new
+    assert new.related_to == [old.id]
+    assert _rows(db, "SELECT id FROM memory_fts") == [(new.id,)]
+    assert _rows(db, "SELECT id, superseded_by FROM ui_tombstones") == [(old.id, new.id)]
+    if engine_kind == "bloom":
+        assert _rows(db, "SELECT id FROM memory_embeddings") == [(new.id,)]
     engine._conn.close()

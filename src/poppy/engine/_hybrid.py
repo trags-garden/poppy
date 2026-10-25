@@ -11,6 +11,7 @@ import logging
 import re
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,10 +20,12 @@ import numpy as np
 from poppy.db import apply_row_factory, open_with_upgrades, write_txn
 from poppy.engine._timestamps import (
     TIMESTAMP_MIGRATION,
+    InvalidTimestampError,
     chunked,
     expiry_passed,
     migration_applied,
     normalise_stored_timestamps,
+    parse_stored_timestamp,
     unexpired_sql,
     utc_iso,
 )
@@ -182,6 +185,8 @@ def _hybrid_store_is_current(conn: sqlite3.Connection) -> bool:
 class HybridEngine(RetrievalEngine):
     """FTS5 and cosine retrieval followed by cross-encoder reranking."""
 
+    apply_recall_score_floor = True
+
     # Subclasses override. ``model_id`` tags every BLOB this engine writes so a
     # later swap to a backend with different vectors never mixes incompatible
     # vector spaces in the shared memory_embeddings table.
@@ -251,14 +256,14 @@ class HybridEngine(RetrievalEngine):
             source=Source(
                 type=row["source_type"],
                 session_id=row["source_session_id"],
-                timestamp=datetime.fromisoformat(row["source_timestamp"]),
+                timestamp=parse_stored_timestamp(row["source_timestamp"]),
             ),
             project=row["project"],
             related_to=json.loads(row["related_to"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
+            created_at=parse_stored_timestamp(row["created_at"]),
+            updated_at=parse_stored_timestamp(row["updated_at"]),
             confidence=row["confidence"],
-            expires_at=datetime.fromisoformat(expires_at_raw) if expires_at_raw else None,
+            expires_at=parse_stored_timestamp(expires_at_raw) if expires_at_raw else None,
         )
 
     def _row_to_memory_enriched(self, row: sqlite3.Row) -> Memory:
@@ -270,14 +275,14 @@ class HybridEngine(RetrievalEngine):
             source=Source(
                 type=row["source_type"],
                 session_id=row["source_session_id"],
-                timestamp=datetime.fromisoformat(row["source_timestamp"]),
+                timestamp=parse_stored_timestamp(row["source_timestamp"]),
             ),
             project=row["project"],
             related_to=json.loads(row["related_to"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
+            created_at=parse_stored_timestamp(row["created_at"]),
+            updated_at=parse_stored_timestamp(row["updated_at"]),
             confidence=row["confidence"],
-            expires_at=datetime.fromisoformat(expires_at_raw) if expires_at_raw else None,
+            expires_at=parse_stored_timestamp(expires_at_raw) if expires_at_raw else None,
         )
 
     def _passes_filters(self, mem: Memory, filters: Filters | None) -> bool:
@@ -362,11 +367,25 @@ class HybridEngine(RetrievalEngine):
             (memory_id, emb_blob, self.model_id),
         )
 
+    def supersede(
+        self, old_id: str, memory: Memory, *, before_delete: Callable[[sqlite3.Connection], None] | None = None
+    ) -> str:
+        enriched = _enrich_full_content(memory.content, memory.source.timestamp.isoformat())
+        embedding = self._embed(enriched)
+        with self._lock, write_txn(self._conn):
+            if before_delete is not None:
+                before_delete(self._conn)
+            self.delete(old_id)
+            return self._ingest_prepared(memory, enriched, embedding)
+
     def ingest(self, memory: Memory) -> str:
         """Store one memory with its full-content index and embedding."""
         enriched = _enrich_full_content(memory.content, memory.source.timestamp.isoformat())
         # Model loading may fail. Do it before taking the database write lock.
         embedding = self._embed(enriched)
+        return self._ingest_prepared(memory, enriched, embedding)
+
+    def _ingest_prepared(self, memory: Memory, enriched: str, embedding: np.ndarray) -> str:
         with self._lock, write_txn(self._conn):
             prior = self._conn.execute("SELECT content, created_at FROM memories WHERE id = ?", (memory.id,)).fetchone()
             created_at = memory.created_at
@@ -417,12 +436,19 @@ class HybridEngine(RetrievalEngine):
                        LIMIT ?""",
                     (fts_query, k * 5),
                 ).fetchall()
-                for rank_pos, row in enumerate(fts_rows):
+            except Exception as exc:
+                # Only FTS syntax errors mean the query cannot match anything.
+                if type(exc).__name__ != "OperationalError" or not str(exc).startswith("fts5:"):
+                    raise
+                fts_rows = []
+            for rank_pos, row in enumerate(fts_rows):
+                try:
                     mem = self._row_to_memory_enriched(row)
-                    if self._passes_filters(mem, filters):
-                        fts_ranks[row["id"]] = rank_pos
-            except Exception:
-                pass
+                except InvalidTimestampError:
+                    logger.debug("Skipping memory %s with an unreadable timestamp", row["id"], exc_info=True)
+                    continue
+                if self._passes_filters(mem, filters):
+                    fts_ranks[row["id"]] = rank_pos
 
         query_emb = self._embed(query)
         # Embedding-channel filter on engine fingerprint. Rows from another
@@ -435,7 +461,11 @@ class HybridEngine(RetrievalEngine):
 
         emb_scored: list[tuple[str, float, sqlite3.Row]] = []
         for row in rows:
-            mem = self._row_to_memory_enriched(row)
+            try:
+                mem = self._row_to_memory_enriched(row)
+            except InvalidTimestampError:
+                logger.debug("Skipping memory %s with an unreadable timestamp", row["id"], exc_info=True)
+                continue
             if not self._passes_filters(mem, filters):
                 continue
             emb = np.frombuffer(row["embedding"], dtype=np.float32)

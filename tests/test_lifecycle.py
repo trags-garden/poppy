@@ -43,7 +43,7 @@ def _mem(content: str, mid: str = "m1", expires_at: datetime | None = None) -> M
 
 @pytest.fixture
 def engine(tmp_path: Path) -> SeedEngine:
-    return SeedEngine(db_path=tmp_path / "mem.db")
+    return SeedEngine(db_path=tmp_path / "memories.db")
 
 
 # -------- parse_ttl ----------------------------------------------------------

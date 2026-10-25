@@ -1,4 +1,8 @@
 import datetime
+import logging
+import sqlite3
+
+import pytest
 
 from poppy.engine.seed import SeedEngine
 from poppy.models import Filters, Memory, Source
@@ -139,3 +143,71 @@ def test_list_all_with_limit(tmp_path):
         engine.ingest(_make_memory(f"mem_{i:03d}", f"memory number {i}"))
     results = engine.list_all(limit=5)
     assert len(results) == 5
+
+
+@pytest.mark.parametrize("query", ["", '"""'])
+def test_retrieve_empty_or_quotes(tmp_path, query):
+    engine = SeedEngine(tmp_path / "memories.db")
+    engine.ingest(_make_memory("m1", "keyword memory"))
+    results = engine.retrieve(query)
+    assert results == []
+    engine._conn.close()
+
+
+def test_retrieve_missing_keyword_index_raises(tmp_path):
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db)
+    engine.ingest(_make_memory("m1", "keyword memory"))
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE memory_fts")
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table: memory_fts"):
+        engine.retrieve("keyword")
+    engine._conn.close()
+
+
+@pytest.mark.parametrize("column", ["source_timestamp", "created_at", "updated_at", "expires_at"])
+def test_retrieve_skips_unreadable_timestamp(tmp_path, caplog, column):
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db)
+    engine.ingest(_make_memory("bad", "keyword memory"))
+    engine.ingest(_make_memory("good", "keyword memory"))
+    with sqlite3.connect(db) as conn:
+        conn.execute(f"UPDATE memories SET {column} = ? WHERE id = ?", ("unreadable", "bad"))
+
+    with caplog.at_level(logging.DEBUG):
+        results = engine.retrieve("keyword")
+
+    assert [r.memory.id for r in results] == ["good"]
+    assert "Skipping memory bad with an unreadable timestamp" in caplog.text
+    engine._conn.close()
+
+
+@pytest.mark.parametrize(
+    ("error_name", "message", "swallowed"),
+    [
+        ("OperationalError", 'fts5: syntax error near "*"', True),
+        ("OperationalError", "database is locked", False),
+        ("DatabaseError", "fts5: corrupt index", False),
+    ],
+)
+def test_retrieve_only_swallows_fts_syntax_errors(tmp_path, monkeypatch, error_name, message, swallowed):
+    engine = SeedEngine(tmp_path / "memories.db")
+    engine.ingest(_make_memory("m1", "keyword memory"))
+    conn = engine._conn
+    error = type(error_name, (Exception,), {})
+
+    class Connection:
+        def execute(self, sql, params=()):
+            if "MATCH" in sql:
+                raise error(message)
+            return conn.execute(sql, params)
+
+    monkeypatch.setattr(engine, "_conn", Connection())
+    if swallowed:
+        results = engine.retrieve("keyword")
+        assert results == []
+    else:
+        with pytest.raises(error, match=message):
+            engine.retrieve("keyword")
+    conn.close()

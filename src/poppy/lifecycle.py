@@ -303,13 +303,18 @@ def _supersede_memory(
 
     db_path = poppy_dir / "memories.db"
     tombstones = TombstoneStore(db_path)
-    tombstones.add(old, superseded_by=new_memory.id)
-    engine.delete(old_id)
 
     related = list(new_memory.related_to)
     if old_id not in related:
         related.append(old_id)
     new_memory.related_to = related
-    engine.ingest(new_memory)
+    try:
+        engine.supersede(
+            old_id,
+            new_memory,
+            before_delete=lambda conn: tombstones.add(old, superseded_by=new_memory.id, connection=conn),
+        )
+    finally:
+        tombstones._conn.close()
 
     return SupersedeResult(new_id=new_memory.id, old_id=old_id, tombstoned=True)

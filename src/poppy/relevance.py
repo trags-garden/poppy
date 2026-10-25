@@ -13,8 +13,8 @@ post-retrieve filter: it changes nothing about engine ranking.
 Scope note: the fast hooks (UserPromptSubmit / PreToolUse) run on SeedEngine,
 whose score is derived from the FTS keyword rank, not a cross-encoder logit — a CE
 probability floor is not meaningful there, so this helper is applied on the
-CE-scored recall handlers, and the SessionStart recency dump (which has no score
-at all) is gated separately. See the PR / issue for the full rationale.
+recall handlers only when the active engine declares cross-encoder scores. The
+SessionStart recency dump (which has no score at all) is gated separately.
 """
 
 from __future__ import annotations
