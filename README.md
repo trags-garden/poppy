@@ -346,7 +346,7 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy telemetry` | `status`, `on`, `off` | Show or change anonymous usage telemetry. See [Telemetry](#telemetry). |
 | `poppy encrypt` | `status`, `enable`, `disable`, `repair` | Turn on encryption at rest for the local store. See [Encryption at rest](#encryption-at-rest-optional). |
 | `poppy serve` | | Start the Poppy MCP server (stdio). |
-| `poppy daemon` | `status`, `install`, `uninstall`, `start`, `stop`, `restart`, `run` | Manage the shared MCP daemon that `poppy setup --daemon` connects clients to. See [MCP daemon](#mcp-daemon). |
+| `poppy daemon` | `status`, `install`, `uninstall`, `start`, `stop`, `restart`, `run` | Manage the shared MCP daemon that `poppy setup <client> --daemon` connects clients to. See [MCP daemon](#mcp-daemon). |
 | `poppy ui` | `--host`, `--port`, `--no-open`, `--allow-remote` | Browse and manage memories in a local web UI. `--allow-remote` permits a non-loopback `--host`; the UI has no authentication, so this exposes its delete and edit API to your network. |
 | `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). Adds only the CLAUDE.md block, and only with an explicit `--claude-md`, when the [Claude Code plugin](#claude-code-plugin) is installed. |
 | `poppy setup claude-desktop` | `--print-instructions`, `--print-import-prompt` | Register the Poppy MCP server in the Claude desktop app. |
