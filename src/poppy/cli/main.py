@@ -1828,7 +1828,6 @@ def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: b
 
 def _remove_client(client: str) -> None:
     """Remove client wiring without loading or changing Poppy's own config."""
-    from poppy.mcp_server.lifecycle import agent_path
     from poppy.setup.claude_code import CorruptConfigError, is_claude_code_plugin_installed, remove_for_client
 
     ctx = click.get_current_context()
@@ -1844,6 +1843,10 @@ def _remove_client(client: str) -> None:
         changes = remove_for_client(client=client)
     except CorruptConfigError as exc:
         raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(
+            f"Could not finish removing Poppy from {client}: {exc}. Fix the file or folder, then run this again."
+        ) from exc
     if changes:
         for path, removed in changes.items():
             click.echo(f"Removed from {path}:")
@@ -1858,10 +1861,17 @@ def _remove_client(client: str) -> None:
             click.echo(f"Warning: could not read Claude Code's plugin records ({exc}).", err=True)
         else:
             if plugin_installed:
-                click.echo("Remove the Poppy plugin with `claude plugin uninstall poppy@trags-garden`.")
+                click.echo(
+                    "The Poppy plugin is still installed. "
+                    "To remove it too, run `claude plugin uninstall poppy@trags-garden`."
+                )
+    # The daemon module needs fcntl, so this import fails where there is no
+    # daemon service to report (Windows).
     try:
+        from poppy.mcp_server.lifecycle import agent_path
+
         service_installed = agent_path().exists()
-    except RuntimeError:
+    except (ImportError, RuntimeError):
         service_installed = False
     if service_installed:
         click.echo("The daemon service is still installed. Remove it with `poppy daemon uninstall`.")

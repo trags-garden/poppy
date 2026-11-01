@@ -195,7 +195,9 @@ not fail with `poppy: command not found` on every session.
    there instead.
 
 `--remove` leaves your memory store, daemon service, Trags key and capture
-consent untouched. Use it on its own, without installation flags such as
+consent untouched. It also keeps the `.pre-poppy.bak` backups that setup and
+removal write next to each client file; delete those too if you are removing
+Poppy for good, since a backup can hold the daemon token. Use it on its own, without installation flags such as
 `--daemon`, `--hooks`, `--claude-md` or `--yes`.
 
 ## Zero-touch capture

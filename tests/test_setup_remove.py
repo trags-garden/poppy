@@ -377,3 +377,20 @@ def test_remove_skips_telemetry_prompt_and_update_notice(tmp_path, monkeypatch, 
     assert result.exit_code == 0, result.output
     assert "Nothing was installed" in result.output
     assert list(tmp_path.rglob("*")) == []
+
+
+def test_remove_reports_a_filesystem_error_in_one_line(monkeypatch):
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+    from poppy.setup import claude_code
+
+    def refuse(**_kwargs):
+        raise PermissionError(13, "Permission denied", "settings.json")
+
+    monkeypatch.setattr(claude_code, "remove_for_client", refuse)
+    result = CliRunner().invoke(cli, ["setup", "codex", "--remove"])
+
+    assert result.exit_code == 1
+    assert "Could not finish removing Poppy from codex" in result.output
+    assert not isinstance(result.exception, PermissionError)
