@@ -91,7 +91,7 @@ that was already open does not see Poppy until you quit and reopen it.
 
 - **`remember`** stores a fact, decision, preference, or lesson.
 - **`recall`** pulls the few memories most relevant to a query.
-- **MCP server**: agents call `remember`/`recall`/`forget`/`consolidate`
+- **MCP server**: agents call the tools in [MCP tools](#mcp-tools)
   directly. Works with Claude Code, Claude Desktop, Cursor, VS Code, Windsurf,
   Codex, Gemini CLI, Copilot CLI, Pi, and Goose. Hermes Agent gets a memory
   provider plugin instead.
@@ -397,6 +397,25 @@ flag to Codex commands.
 
 Run `poppy COMMAND --help` for full flag descriptions.
 
+### MCP tools
+
+The MCP server (`poppy serve`) exposes these tools:
+
+| Tool | What it does |
+|---|---|
+| `remember` | Store a memory (optional `memory_type`, `project`, `related_to`, `ttl`/`expires_at`, `supersedes`, `check_conflicts`, `auto_supersede`). |
+| `recall` | Search memories by natural-language query, with optional `project`, `memory_type`, `since`, and `limit` (default 10). Returns full content. |
+| `recall_index` | First pass of a two-stage recall: returns only IDs and snippets for a query (`limit` default 20). |
+| `recall_full` | Second pass: fetch full content for a batch of IDs from `recall_index`. Batch the IDs in one call. |
+| `forget` | Delete a memory by ID. |
+| `edit` | Change a memory in place by ID, keeping its ID, creation time, and source. Pass only the fields to change. |
+| `context` | Return the most recent memories for a project (`limit` default 20), for priming a session. |
+| `consolidate` | Store a session summary plus a list of facts at the end of a session. |
+
+`remember`, `forget`, and `edit` are explicit writes by the agent, so they are
+not gated by the automatic-capture consent described under
+[Zero-touch capture](#zero-touch-capture).
+
 ### MCP daemon
 
 By default each client starts its own `poppy serve` process over stdio.
@@ -441,6 +460,27 @@ schema is a single SQLite file with FTS5 plus an embeddings table; back it
 up the same way you'd back up any SQLite DB.
 
 Set `POPPY_MODEL_IDLE_S` to change the 600-second model idle-unload timeout; zero or an invalid value disables unloading.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `POPPY_DIR` | Store directory (default `~/.poppy`). |
+| `POPPY_DAEMON_PORT` | Port for the [MCP daemon](#mcp-daemon) (default `7679`). |
+| `POPPY_SERVE_NO_DAEMON` | Set to `1` to make stdio `poppy serve` run in process instead of forwarding to the daemon, like `--no-daemon`. |
+| `POPPY_FASTEMBED_CACHE` | Directory for downloaded embedding and reranker model files. Defaults to `$XDG_CACHE_HOME/fastembed`, or `~/.cache/fastembed`. |
+| `POPPY_AUTOSYNC_DISABLE` | Set to `1` to turn off the automatic background sync with Trags after writes. |
+| `POPPY_AUTOSYNC_DEBOUNCE` | Seconds to wait before an automatic sync so a burst of writes becomes one (default `1.0`). |
+| `POPPY_CONSOLIDATE` | `1` or `0` forces automatic capture on or off; see [Zero-touch capture](#zero-touch-capture). |
+| `POPPY_CONSOLIDATE_MODEL`, `POPPY_CONSOLIDATE_BASE_URL`, `POPPY_CONSOLIDATE_API_KEY` | Model, endpoint, and key for the OpenAI-compatible capture backend. They override `config.json`; the base URL and key fall back to `OPENAI_BASE_URL` and `OPENAI_API_KEY`. `POPPY_CONSOLIDATE_MODEL` does not apply to host-CLI backends. |
+| `POPPY_CONSOLIDATE_MAX_ITEMS` | Most memories one capture may extract (default `5`). |
+| `POPPY_CLAUDE_DESKTOP_CONFIG` | Path to `claude_desktop_config.json` for `poppy setup claude-desktop`, instead of the platform default. |
+| `POPPY_VSCODE_MCP_CONFIG` | Path to the VS Code MCP config file for `poppy setup vscode`, instead of the user-profile default. |
+| `POPPY_GOOSE_CONFIG_DIR` | Goose config directory for `poppy setup goose`, instead of the `GOOSE_PATH_ROOT`, `XDG_CONFIG_HOME`, or platform default. |
+
+`POPPY_MODEL_IDLE_S`, `POPPY_DB_KEY`, `POPPY_TRAGS_API_KEY`, `POPPY_MCP_SOURCE`,
+`POPPY_TELEMETRY_OFF`, and `POPPY_UPDATE_CHECK_OFF` are described in their own
+sections.
 
 ## Encryption at rest (optional)
 

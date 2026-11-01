@@ -704,12 +704,114 @@ def _capture_host_cli_run(monkeypatch, cli_name):
     return calls[0]
 
 
-def test_call_host_cli_codex_is_read_only_skips_git_check_and_closes_stdin(monkeypatch):
+def test_call_host_cli_codex_is_read_only_ephemeral_and_passes_prompt_on_stdin(monkeypatch):
     cmd, kwargs = _capture_host_cli_run(monkeypatch, "codex")
-    assert cmd == ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "extract"]
-    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert cmd == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "-c",
+        "mcp_servers.poppy.enabled=false",
+        "-",
+    ]
+    assert kwargs["input"] == "extract"
+    assert "stdin" not in kwargs
     assert "cwd" not in kwargs
-    assert "input" not in kwargs
+
+
+@pytest.mark.parametrize("prompt", ["", "x" * (128 * 1024 + 1)], ids=["empty", "over-128-kib"])
+def test_call_host_cli_codex_sends_all_input_and_eof(tmp_path, monkeypatch, prompt):
+    run = subprocess.run
+
+    def read_stdin(cmd, **kwargs):
+        assert cmd[-1] == "-"
+        assert prompt not in cmd
+        # Reading to EOF makes an inherited or unclosed stdin time out.
+        return run(
+            [sys.executable, "-c", "import sys; print(len(sys.stdin.read()))"],
+            **kwargs,
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("poppy.consolidation.subprocess.run", read_stdin)
+    assert call_host_cli(prompt, cli="codex", timeout_s=5) == f"{len(prompt)}\n"
+
+
+@pytest.mark.parametrize("retry_result", ["success", "failure", "timeout"])
+@pytest.mark.parametrize("prefix", ["", "WARNING: could not create PATH aliases\n"], ids=["plain", "warning"])
+def test_call_host_cli_codex_retries_only_rejected_ephemeral_with_remaining_budget(monkeypatch, retry_result, prefix):
+    calls = []
+    failures = []
+    clock = iter([10.0, 11.0])
+    monkeypatch.setattr("poppy.consolidation.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr(health, "record_failure", lambda *args: failures.append(args))
+
+    def run(cmd, **kwargs):
+        calls.append((cmd.copy(), kwargs))
+        if len(calls) == 1:
+            return SimpleNamespace(
+                returncode=2, stdout="", stderr=prefix + "error: unexpected argument '--ephemeral' found"
+            )
+        if retry_result == "timeout":
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        return SimpleNamespace(returncode=0 if retry_result == "success" else 1, stdout="[]", stderr="login required")
+
+    monkeypatch.setattr("poppy.consolidation.subprocess.run", run)
+    result = call_host_cli("extract", cli="codex", timeout_s=20)
+    assert len(calls) == 2
+    first_override = calls[0][0].index("-c") - 1  # one position earlier once --ephemeral is gone
+    without_ephemeral = [arg for arg in calls[0][0] if arg != "--ephemeral"]
+    assert calls[1][0] == [
+        *without_ephemeral[:first_override],
+        "-c",
+        "mcp_servers={}",
+        *without_ephemeral[first_override:],
+    ]
+    assert calls[1][1]["input"] == "extract"
+    assert calls[1][1]["timeout"] == 19
+    assert result == ("[]" if retry_result == "success" else None)
+    assert len(failures) == (0 if retry_result == "success" else 1)
+
+
+def test_call_host_cli_codex_without_registered_poppy_keeps_it_disabled(monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd.copy())
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="Error: invalid transport\nin `mcp_servers.poppy`")
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr("poppy.consolidation.subprocess.run", run)
+    assert call_host_cli("extract", cli="codex") == "[]"
+    assert len(calls) == 2
+    assert calls[1] == calls[0][:-1] + ["-c", 'mcp_servers.poppy.command=""', "-"]
+    assert "mcp_servers.poppy.enabled=false" in calls[1]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "login required",
+        "error: unexpected argument '--sandbox' found",
+        "server returned text mentioning --ephemeral",
+        "Error: invalid transport\nin `mcp_servers.other`",
+    ],
+)
+def test_call_host_cli_codex_does_not_retry_other_errors(monkeypatch, stderr):
+    calls = []
+
+    def run(cmd, **kwargs):
+        assert "--ephemeral" in cmd
+        calls.append(cmd)
+        return SimpleNamespace(returncode=2, stdout="", stderr=stderr)
+
+    monkeypatch.setattr("poppy.consolidation.subprocess.run", run)
+    assert call_host_cli("extract", cli="codex") is None
+    assert len(calls) == 1
 
 
 def test_call_host_cli_claude_still_passes_prompt_on_stdin(monkeypatch):

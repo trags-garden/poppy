@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlsplit
 
+from poppy.errors import ConfigError
 from poppy.paths import ensure_poppy_dir
 
 try:
@@ -1152,13 +1153,28 @@ def _write_config_payload(poppy_dir: Path, payload: str) -> None:
         raise
 
 
+def _read_config_data(config_path: Path) -> dict:
+    """Validate settings before applying defaults or running migrations."""
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            config_path, f"invalid JSON at line {exc.lineno} column {exc.colno} (char {exc.pos})"
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(config_path, f"invalid UTF-8 at byte {exc.start}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(config_path, "expected a JSON object")
+    return data
+
+
 def load_config(poppy_dir: Path | None = None, *, _locked: bool = False) -> PoppyConfig:
     poppy_dir = poppy_dir or Path.home() / ".poppy"
     config = PoppyConfig(poppy_dir=poppy_dir)
     config_path = poppy_dir / CONFIG_FILENAME
     data: dict = {}
     if config_path.exists():
-        data = json.loads(config_path.read_text())
+        data = _read_config_data(config_path)
         for entry in _REGISTRY:
             entry.load(config, data)
     _pin_legacy_api_url(config, data, _locked=_locked)
