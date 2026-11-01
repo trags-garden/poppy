@@ -491,8 +491,8 @@ your local store remains the source of truth.
 
 `poppy setup trags` opens a browser page and shows a one-time code, including
 how long it is valid. If it expires while you are in a terminal, Poppy offers a
-fresh code up to three times. In a non-interactive session, run `poppy setup
-trags` again for a fresh code.
+fresh code, for up to three codes in total. In a non-interactive session, run
+`poppy setup trags` again for a fresh code.
 
 Once your Trags key is set up, by default each local change (a new memory, an
 edit, a forget, a restore) starts a background sync: Poppy pulls changes from

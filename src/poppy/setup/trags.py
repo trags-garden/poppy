@@ -85,7 +85,8 @@ def _seconds_until_expiry(expires_at: object) -> float | None:
         seconds = (expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
     except (OverflowError, ValueError):
         return None
-    # Outside this range the local clock is wrong, so the figure means nothing.
+    # Outside this range the local clock is clearly wrong, so say nothing rather
+    # than print a figure that means nothing.
     return seconds if 0 < seconds <= _MAX_PLAUSIBLE_CODE_LIFETIME_S else None
 
 
@@ -116,7 +117,8 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
         if _run_device_code_attempt(poppy_dir, base_url, api_url_override):
             return
 
-        if not sys.stdin.isatty() or attempt == _MAX_SETUP_ATTEMPTS:
+        # sys.stdin is None when the command starts with stdin closed.
+        if sys.stdin is None or not sys.stdin.isatty() or attempt == _MAX_SETUP_ATTEMPTS:
             raise click.ClickException("Setup code expired. Run `poppy setup trags` again.")
 
         click.echo("\nSetup code expired.")
