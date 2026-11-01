@@ -3,6 +3,8 @@
 import json
 import os
 import stat
+import subprocess
+import sys
 
 import pytest
 from click.testing import CliRunner
@@ -183,6 +185,32 @@ def test_save_config_preserves_symlink_and_updates_target(tmp_path):
     # directory's access rules, whatever its mode says.
     assert target.stat().st_ino == inode
     assert not list(tmp_path.rglob(".config-*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS ACLs")
+def test_save_config_removes_an_acl_from_the_symlink_target(tmp_path):
+    poppy_dir = tmp_path / "poppy"
+    target = link_file(tmp_path, poppy_dir / "config.json", "{}")
+    subprocess.run(["/bin/chmod", "+a", "everyone allow read", str(target)], check=True)
+
+    save_config(PoppyConfig(poppy_dir=poppy_dir, telemetry_enabled=False))
+
+    listing = subprocess.run(["/bin/ls", "-le", str(target)], check=True, capture_output=True, text=True).stdout
+    assert "allow" not in listing
+    assert json.loads(target.read_text())["telemetry_enabled"] is False
+
+
+def test_save_config_writes_nothing_when_the_target_cannot_be_restricted(tmp_path, monkeypatch):
+    poppy_dir = tmp_path / "poppy"
+    target = link_file(tmp_path, poppy_dir / "config.json", "{}")
+
+    def refuse(_fd):
+        raise OSError("not allowed")
+
+    monkeypatch.setattr("poppy.setup.claude_code._clear_acl", refuse)
+    with pytest.raises(ConfigError, match="nothing was written"):
+        save_config(PoppyConfig(poppy_dir=poppy_dir, telemetry_enabled=False))
+    assert target.read_text() == "{}"
 
 
 def test_save_config_refuses_broken_symlink_in_one_line(tmp_path):

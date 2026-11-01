@@ -776,7 +776,8 @@ def _trags_key_account(poppy_dir: Path) -> str:
 # keychain must not be hit on every read. The cache entry is invalidated by a
 # stat signature of config.json (see _config_signature): every key change goes
 # through save_config, which rewrites config.json atomically (mkstemp + rename)
-# and so gives it a NEW inode, changing the signature. Keying on that signature
+# and so gives it a NEW inode, changing the signature (a symlinked config is
+# edited in place, so there mtime and size change it). Keying on that signature
 # rather than trusting same-process writes fixes cross-process staleness -- a
 # long-lived process (the MCP server) that cached "no key" before onboarding
 # will re-read the keychain once `poppy setup trags` in another process rewrites
@@ -814,7 +815,8 @@ def _config_signature(poppy_dir: Path) -> object:
 
     (inode, mtime_ns, size): save_config renames a fresh temp file over
     config.json, so the inode changes on every write regardless of the
-    filesystem's mtime granularity. ``None`` when the file is absent (no key has
+    filesystem's mtime granularity, except through a symlink, which is edited in
+    place. ``None`` when the file is absent (no key has
     ever been set for this store). One stat syscall, cheaper than the full config
     read the hot path already performs.
     """
@@ -1136,17 +1138,27 @@ def _write_config_through_symlink(link: Path, payload: str) -> None:
     readable there. The cost is that a crash mid-write can leave a torn file, which
     the next command reports rather than reading as defaults.
     """
+    from poppy.setup.claude_code import _clear_acl
+
     try:
         target = link.resolve(strict=True)
     except FileNotFoundError as exc:
         raise ConfigError(link, "the symlink points to a file that does not exist") from exc
+    except (OSError, RuntimeError) as exc:
+        raise ConfigError(link, f"the symlink could not be followed ({exc})") from exc
     fd = os.open(target, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "w") as f:
-        # Tighten the mode before any new content lands in the file.
-        os.fchmod(f.fileno(), _CONFIG_FILE_MODE)
-        f.truncate()
+        # Owner-only has to be true before any new content lands in the file, and
+        # a macOS ACL can grant other users read access that the mode does not show.
+        try:
+            _clear_acl(f.fileno())
+            os.fchmod(f.fileno(), _CONFIG_FILE_MODE)
+        except OSError as exc:
+            raise ConfigError(link, f"its permissions could not be restricted ({exc}); nothing was written") from exc
+        # Truncating last means a full disk cannot empty the file before the write.
         f.write(payload)
         f.flush()
+        f.truncate()
         os.fsync(f.fileno())
 
 
