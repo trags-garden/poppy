@@ -224,11 +224,21 @@ def call_host_cli(
     elif cli == "cursor-agent":
         cmd = ["cursor-agent", "-p"]
     elif cli == "codex":
-        # codex exec takes a prompt arg; output is plain text. The extraction only
-        # needs to read the prompt and print JSON, so it never gets write access,
-        # whatever the user's Codex config says. Codex also refuses to run outside
-        # a git repository unless told this is fine.
-        cmd = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt]
+        # Stdin avoids the per-argument size limit for large transcript windows.
+        # Extraction needs no session copy or Poppy tools that could store raw
+        # output. Keep the working directory for relative PATH entries, and allow
+        # extraction outside git repositories with a read-only sandbox.
+        cmd = [
+            "codex",
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "-c",
+            "mcp_servers.poppy.enabled=false",
+            "-",
+        ]
     elif cli == "gemini":
         cmd = ["gemini", "-p"]
     else:
@@ -239,21 +249,41 @@ def call_host_cli(
     # flag turns it off. The other CLIs ignore this variable.
     child_env = {**os.environ, "POPPY_SUPPRESS_HOOKS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
     try:
-        if cli == "codex":
-            # Codex also reads extra prompt text from stdin when it is open, so
-            # close it. The working directory is left alone: moving it would make
-            # Poppy's data folder Codex's writable root under some configs and
-            # break codex binaries found through relative PATH entries.
-            proc = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                env=child_env,
-            )
-        else:
-            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout_s, env=child_env)
+        remaining = timeout_s
+        deadline = time.monotonic() + timeout_s if cli == "codex" else None
+        while True:
+            # run(input=...) sends EOF after the prompt, including an empty one,
+            # so Codex never waits on the parent's stdin.
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=remaining, env=child_env)
+            if cli != "codex" or proc.returncode == 0:
+                break
+            stderr = proc.stderr or ""
+            if (
+                proc.returncode == 2
+                and "error: unexpected argument '--ephemeral' found" in stderr.splitlines()
+                and "--ephemeral" in cmd
+            ):
+                # Older Codex versions reject this flag before extraction starts.
+                cmd.remove("--ephemeral")
+                # Some also ignore enabled=false, so remove all MCP registrations
+                # for the retry rather than letting Poppy store unredacted output.
+                # This goes first: on versions that layer their config, a later
+                # empty table would discard the disable and change nothing else.
+                first_override = cmd.index("-c")
+                cmd[first_override:first_override] = ["-c", "mcp_servers={}"]
+            elif (
+                "invalid transport" in stderr
+                and "in `mcp_servers.poppy`" in stderr
+                and 'mcp_servers.poppy.command=""' not in cmd
+            ):
+                # A disabled entry still needs a transport when none was saved.
+                # An empty command also cannot start Poppy on older versions.
+                cmd[-1:-1] = ["-c", 'mcp_servers.poppy.command=""']
+            else:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, timeout_s)
     except subprocess.TimeoutExpired:
         if record_health:
             health.record_failure(cli, f"timed out after {timeout_s}s")

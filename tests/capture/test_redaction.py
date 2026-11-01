@@ -8,15 +8,20 @@ path is covered.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from poppy.capture import journal
+from poppy.capture.orchestrator import CaptureOrchestrator, CapturePlan
 from poppy.capture.orchestrator import build_capture_memories as _build_memories
 from poppy.capture.reconciler import reconcile_and_ingest
 from poppy.capture.redaction import MASK, load_custom_redaction, redact_secrets
 from poppy.config import PoppyConfig, load_config, save_config
+from poppy.consolidation import _http_client
 from poppy.engine.seed import SeedEngine
 from poppy.models import Filters
 
@@ -237,6 +242,49 @@ def test_reconciler_stores_the_masked_form(tmp_path: Path, monkeypatch: pytest.M
     assert len(stored) == 1
     assert "hunter2" not in stored[0].content
     assert MASK in stored[0].content
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "remote"])
+def test_extraction_output_is_redacted_before_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    raw_content = "Keep AKIAIOSFODNN7EXAMPLE literal-secret environment-secret out of logs."
+    output = json.dumps([{"type": "lesson", "content": raw_content}])
+    monkeypatch.setenv("POPPY_TEST_CAPTURE_TOKEN", "environment-secret")
+    for name in ("POPPY_CONSOLIDATE_MODEL", "POPPY_CONSOLIDATE_BASE_URL", "POPPY_CONSOLIDATE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: None if backend == "remote" else backend)
+
+    def run(cmd, **kwargs):
+        assert cmd[0] == backend
+        assert raw_content not in kwargs["input"]
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setattr("poppy.consolidation.subprocess.run", run)
+
+    def respond(request):
+        assert raw_content.encode() not in request.content
+        return httpx.Response(200, json={"choices": [{"message": {"content": output}}]})
+
+    monkeypatch.setattr(
+        "poppy.consolidation._http_client",
+        lambda **kwargs: _http_client(**kwargs, transport=httpx.MockTransport(respond)),
+    )
+    config = PoppyConfig(
+        poppy_dir=tmp_path,
+        redaction_literals=["literal-secret"],
+        redaction_env_vars=["POPPY_TEST_CAPTURE_TOKEN"],
+        consolidate_model="test-model",
+        consolidate_api_key="test-key",
+    )
+    engine = SeedEngine(db_path=tmp_path / "memories.db")
+    result = CaptureOrchestrator(engine=engine, cfg=config, poppy_dir=tmp_path).run(
+        CapturePlan(session_id="sess", prompt="Extract durable lessons.", source_type=backend, project="poppy")
+    )
+
+    assert result.stored == 1
+    [stored] = engine.list_all(filters=Filters(project="poppy"), limit=10)
+    assert stored.content == f"Keep {MASK} {MASK} {MASK} out of logs."
 
 
 def test_capture_journal_omits_content(tmp_path: Path) -> None:

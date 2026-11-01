@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Codex capture now sends large transcript windows over stdin, disables Poppy's MCP server, and avoids saving extra session files when Codex supports it.
 - Malformed Poppy configuration now stops commands with a clear error and repair advice instead of a traceback. `poppy doctor` reports the config failure and skips the remaining checks.
 - Auto-capture no longer remains marked inactive after upgrading because of a failure streak recorded by an older Poppy version.
 
