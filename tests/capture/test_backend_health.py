@@ -585,3 +585,13 @@ def test_forced_env_still_warns_in_doctor_and_the_banner(tmp_path: Path, monkeyp
     result = _doctor(poppy_dir, tmp_path)
     assert result.exit_code == 0, result.output
     assert "[!] auto-capture: WARN" in result.output
+
+
+def test_success_removes_a_record_left_by_another_version(tmp_path):
+    path = health.health_path(tmp_path)
+    entry = {"consecutive_failures": 4, "last_error": "old", "poppy_version": "0.0.1"}
+    path.write_text(json.dumps({"version": 1, "clis": {"codex": entry}}))
+
+    health.record_success("claude", poppy_dir=tmp_path)
+
+    assert not path.exists()

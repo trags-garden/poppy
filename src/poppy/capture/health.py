@@ -5,7 +5,8 @@ A host CLI on PATH proves the binary exists, not that it works: a logged-out
 SessionStart banner still says "active" and ``poppy doctor`` still says OK. The
 extraction backend therefore records what actually happened — each hard host-CLI
 failure (non-zero exit, timeout, spawn error) increments a counter and stores the
-failing CLI plus its stderr tail; the next successful extraction clears it. After
+failing CLI plus its stderr tail; the next successful extraction clears it, and a
+record from another Poppy version is ignored and never counted. After
 ``FAILURE_THRESHOLD`` consecutive failures the ConsolidationPolicy reports
 ``WARN_BACKEND_BROKEN``, which the banner and doctor render.
 
@@ -245,10 +246,7 @@ def record_failure(cli: str, detail: str, *, poppy_dir: Path | None = None) -> N
         previous = clis.get(cli)
         running_version = _running_poppy_version()
         clis[cli] = CliHealth(
-            consecutive_failures=(
-                previous.consecutive_failures if previous and previous.poppy_version == running_version else 0
-            )
-            + 1,
+            consecutive_failures=(previous.consecutive_failures if previous else 0) + 1,
             last_error=detail[:MAX_ERROR_CHARS],
             last_failure_at=datetime.datetime.now(datetime.UTC).isoformat(),
             poppy_version=running_version,
@@ -270,6 +268,9 @@ def record_success(cli: str | None = None, *, poppy_dir: Path | None = None) -> 
         resolved = _resolve(poppy_dir)
         current = load(resolved).clis
         if not current:
+            # Anything still on disk came from another version and is ignored.
+            # Do not keep its stderr tail around after extraction works again.
+            health_path(resolved).unlink(missing_ok=True)
             return
         if cli is None:
             _save(resolved, BackendHealth())
