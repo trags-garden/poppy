@@ -1317,7 +1317,8 @@ def check_auto_capture(ctx: DoctorContext) -> None:
         safe_tail = redact_secrets(backend_health.last_error, custom_patterns)
         status_detail = (
             f"{status_detail} Last error: {backend_health.cli} "
-            f"{safe_tail} ({backend_health.consecutive_failures} in a row)."
+            f"{safe_tail} ({backend_health.consecutive_failures} in a row; "
+            f"Poppy {backend_health.poppy_version} on {backend_health.last_failure_date})."
         )
     line("auto-capture", status_kind, status_detail, hint=status_hint)
 
@@ -1393,9 +1394,24 @@ def check_capture_state(ctx: DoctorContext) -> None:
 
 def run_doctor() -> None:
     """Run the installation checks in their original reporting order."""
+    from poppy.config import CONFIG_FILENAME, _read_config_data
+    from poppy.errors import ConfigError
+
     ctx = DoctorContext()
     check_executable(ctx)
     check_storage(ctx)
+    try:
+        # Validate without migrations so the key check can still report any
+        # plaintext key before load_config moves it into the keychain.
+        config_path = ctx.poppy_dir / CONFIG_FILENAME
+        if config_path.exists():
+            _read_config_data(config_path)
+    except ConfigError as exc:
+        ctx.line("config.json", "FAIL", str(exc))
+        # Later checks share settings for encryption, capture and redaction.
+        # Stop here rather than diagnose them using missing or default values.
+        ctx.line("remaining checks", "SKIP", "fix config.json to run these checks")
+        raise SystemExit(1) from None
     check_trags_key(ctx)
     check_custom_redaction(ctx)
     _prepare_daemon(ctx)

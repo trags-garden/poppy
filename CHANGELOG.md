@@ -13,7 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The README now lists every MCP tool, states that `remember`, `forget` and `edit` are not gated by capture consent, and documents the remaining user-facing environment variables.
 - Capture and duplicate checks that run through `claude -p` now use the `haiku` model instead of your interactive default model, and no longer load your Claude Code settings, `CLAUDE.md`, auto-memory, skills, MCP servers or hooks.
+
+### Fixed
+
+- Malformed Poppy configuration now stops commands with a clear error and repair advice instead of a traceback. `poppy doctor` reports the config failure and skips the remaining checks.
+- Auto-capture no longer remains marked inactive after upgrading because of a failure streak recorded by an older Poppy version.
 
 ## [0.3.6] - 2026-10-25
 

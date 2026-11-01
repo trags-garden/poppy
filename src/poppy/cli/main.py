@@ -1461,13 +1461,18 @@ def autocapture_group(ctx: click.Context):
 @click.option("--project", default=None, help="Project name (auto-detected from the current directory if not set).")
 def autocapture_status(project: str | None):
     """Show the resolved effect plus project and global consent layers."""
-    from poppy.capture import policy
+    from poppy.capture import health, policy
     from poppy.project import project_from_cwd
 
     project = project or project_from_cwd(os.getcwd())
-    config = load_config(_get_poppy_dir())
+    poppy_dir = _get_poppy_dir()
+    config = load_config(poppy_dir)
     resolved = policy.evaluate(config, project=project)
-    click.echo(f"Resolved: {policy.status_message(resolved)}")
+    message = policy.status_message(resolved)
+    if resolved is policy.CaptureStatus.WARN_BACKEND_BROKEN:
+        backend_health = health.load(poppy_dir)
+        message += f" Failure streak: Poppy {backend_health.poppy_version} on {backend_health.last_failure_date}."
+    click.echo(f"Resolved: {message}")
     if project:
         project_state = "off" if config.is_project_disabled(project) else "on"
         click.echo(f"Project '{project}': {project_state}.")

@@ -5,9 +5,22 @@ importing the engine module, which would itself raise ImportError on an install
 whose retrieval dependencies are broken.
 """
 
+from pathlib import Path
+
 
 class PoppyError(Exception):
     """An expected, user-facing failure. The CLI prints its message on one line and exits 1."""
+
+
+class ConfigError(ValueError, PoppyError):
+    """Settings cannot be read safely.
+
+    ValueError keeps callers that handle malformed settings, such as encryption
+    repair, able to report the failure without overwriting the file.
+    """
+
+    def __init__(self, path: Path, detail: str) -> None:
+        super().__init__(f"Cannot read config {str(path)!r}: {detail}; fix the file or move it aside.")
 
 
 class ModelUnavailableError(RuntimeError, PoppyError):
