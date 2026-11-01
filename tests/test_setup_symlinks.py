@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from poppy.cli.main import cli
 from poppy.config import PoppyConfig, save_config
+from poppy.errors import ConfigError
 from poppy.setup.claude_code import (
     CLAUDE_MD_BEGIN,
     CLAUDE_MD_END,
