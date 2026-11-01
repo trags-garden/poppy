@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Auto-capture no longer remains marked inactive after upgrading because of a failure streak recorded by an older Poppy version.
+
 ### Changed
 
 - Capture and duplicate checks that run through `claude -p` now use the `haiku` model instead of your interactive default model, and no longer load your Claude Code settings, `CLAUDE.md`, auto-memory, skills, MCP servers or hooks.
