@@ -267,7 +267,10 @@ def call_host_cli(
                 cmd.remove("--ephemeral")
                 # Some also ignore enabled=false, so remove all MCP registrations
                 # for the retry rather than letting Poppy store unredacted output.
-                cmd[-1:-1] = ["-c", "mcp_servers={}"]
+                # This goes first: on versions that layer their config, a later
+                # empty table would discard the disable and change nothing else.
+                first_override = cmd.index("-c")
+                cmd[first_override:first_override] = ["-c", "mcp_servers={}"]
             elif (
                 "invalid transport" in stderr
                 and "in `mcp_servers.poppy`" in stderr

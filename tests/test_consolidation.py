@@ -762,7 +762,14 @@ def test_call_host_cli_codex_retries_only_rejected_ephemeral_with_remaining_budg
     monkeypatch.setattr("poppy.consolidation.subprocess.run", run)
     result = call_host_cli("extract", cli="codex", timeout_s=20)
     assert len(calls) == 2
-    assert calls[1][0] == [arg for arg in calls[0][0][:-1] if arg != "--ephemeral"] + ["-c", "mcp_servers={}", "-"]
+    first_override = calls[0][0].index("-c") - 1  # one position earlier once --ephemeral is gone
+    without_ephemeral = [arg for arg in calls[0][0] if arg != "--ephemeral"]
+    assert calls[1][0] == [
+        *without_ephemeral[:first_override],
+        "-c",
+        "mcp_servers={}",
+        *without_ephemeral[first_override:],
+    ]
     assert calls[1][1]["input"] == "extract"
     assert calls[1][1]["timeout"] == 19
     assert result == ("[]" if retry_result == "success" else None)
