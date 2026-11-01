@@ -157,13 +157,48 @@ On Windows, use `poppy setup claude-code`.
 Use the plugin or setup, not both. With the plugin installed, `poppy setup
 claude-code` does not add the MCP server or hooks and says so. Pass
 `--claude-md` to add the CLAUDE.md block next to the skill, so the primer loads
-in every session. If you ran setup before installing the plugin, remove
-Poppy's MCP entry and hooks from your Claude Code settings, or every hook runs
+in every session. If you ran setup before installing the plugin, run
+`poppy setup claude-code --remove` to remove setup's entries, or every hook runs
 twice. `poppy doctor` warns when it finds both, and fails when the plugin
 cannot find `poppy`.
 
 The plugin does not ask for capture consent the way setup does. Answer the
 notice at session start, or run `poppy autocapture on --global`.
+
+## Uninstall
+
+Remove client integrations before uninstalling the CLI, so leftover hooks do
+not fail with `poppy: command not found` on every session.
+
+1. Run the following for each client you set up:
+
+   ```bash
+   poppy setup claude-code --remove
+   poppy setup cursor --remove
+   poppy setup codex --remove
+   ```
+
+   This removes Poppy's MCP entry, hooks and managed primer blocks while
+   preserving your other settings. If you installed the Claude Code plugin,
+   also run `claude plugin uninstall poppy@trags-garden`.
+   Other clients still need their Poppy entry and primer removed by hand:
+   Claude Desktop's `claude_desktop_config.json`, VS Code's user-profile
+   `mcp.json`, Windsurf, Gemini CLI, GitHub Copilot CLI
+   (`$COPILOT_HOME/mcp-config.json` and `copilot-instructions.md`, default
+   `~/.copilot`), Pi (`$PI_CODING_AGENT_DIR/mcp.json` and `AGENTS.md`, default
+   `~/.pi/agent`), Goose, and Hermes Agent (plugin and `SOUL.md` guidance).
+2. If you installed the daemon service, run `poppy daemon uninstall`.
+3. Run `pipx uninstall poppy-memory`, or `uv tool uninstall poppy-memory` if
+   you installed it with uv.
+4. Optionally run `rm -rf ~/.poppy`. **This permanently deletes your memories**
+   and local Poppy settings. If you use a custom `POPPY_DIR`, your data lives
+   there instead.
+
+`--remove` leaves your memory store, daemon service, Trags key and capture
+consent untouched. It also keeps the `.pre-poppy.bak` backups that setup and
+removal write next to each client file; delete those too if you are removing
+Poppy for good, since a backup can hold the daemon token. Use it on its own, without installation flags such as
+`--daemon`, `--hooks`, `--claude-md` or `--yes`.
 
 ## Zero-touch capture
 
@@ -348,12 +383,12 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy serve` | | Start the Poppy MCP server (stdio). |
 | `poppy daemon` | `status`, `install`, `uninstall`, `start`, `stop`, `restart`, `run` | Manage the shared MCP daemon that `poppy setup <client> --daemon` connects clients to. See [MCP daemon](#mcp-daemon). |
 | `poppy ui` | `--host`, `--port`, `--no-open`, `--allow-remote` | Browse and manage memories in a local web UI. `--allow-remote` permits a non-loopback `--host`; the UI has no authentication, so this exposes its delete and edit API to your network. |
-| `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer). Adds only the CLAUDE.md block, and only with an explicit `--claude-md`, when the [Claude Code plugin](#claude-code-plugin) is installed. |
+| `poppy setup claude-code` | `--hooks/--no-hooks`, `--claude-md/--no-claude-md`, `--yes`, `--daemon`, `--remove` | Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer), or remove setup's entries with `--remove`. Adds only the CLAUDE.md block, and only with an explicit `--claude-md`, when the [Claude Code plugin](#claude-code-plugin) is installed. |
 | `poppy setup claude-desktop` | `--print-instructions`, `--print-import-prompt` | Register the Poppy MCP server in the Claude desktop app. |
-| `poppy setup cursor` | `--hooks/--no-hooks`, `--daemon` | Install Poppy into Cursor (MCP + zero-touch capture hooks). Honors `$CURSOR_HOME`. |
+| `poppy setup cursor` | `--hooks/--no-hooks`, `--daemon`, `--remove` | Install Poppy into Cursor (MCP + zero-touch capture hooks), or remove setup's entries with `--remove`. Honors `$CURSOR_HOME`. |
 | `poppy setup vscode` | `--daemon` | Install Poppy into VS Code (MCP only). |
 | `poppy setup windsurf` | | Install Poppy into Windsurf (MCP only). |
-| `poppy setup codex` | `--hooks/--no-hooks`, `--daemon` | Install Poppy into Codex (MCP + cadence capture hooks + AGENTS.md primer). Honors `$CODEX_HOME`. |
+| `poppy setup codex` | `--hooks/--no-hooks`, `--daemon`, `--remove` | Install Poppy into Codex (MCP + cadence capture hooks + AGENTS.md primer), or remove setup's entries with `--remove`. Honors `$CODEX_HOME`. |
 | `poppy setup gemini` | `--daemon` | Install Poppy into Gemini CLI (MCP only). |
 | `poppy setup copilot-cli` | | Install Poppy into GitHub Copilot CLI (MCP via `$COPILOT_HOME/mcp-config.json` + `$COPILOT_HOME/copilot-instructions.md` primer; defaults to `~/.copilot`). |
 | `poppy setup pi` | | Install Poppy into Pi (MCP via pi-mcp-adapter + AGENTS.md primer in `$PI_CODING_AGENT_DIR`; defaults to `~/.pi/agent`). |

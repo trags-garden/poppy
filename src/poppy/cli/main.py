@@ -151,7 +151,11 @@ class _AskAboutTelemetryCommand(click.Command):
     """
 
     def invoke(self, ctx: click.Context):
-        if _may_ask_about_telemetry(ctx):
+        if _invocation_path(ctx)[:1] == ("setup",) and ctx.params.get("remove"):
+            # Removing client entries must not change consent or write notices
+            # into the memory store, even in an interactive terminal.
+            ctx.meta["setup_remove"] = True
+        elif _may_ask_about_telemetry(ctx):
             telemetry.maybe_prompt_for_consent(_get_poppy_dir())
         return super().invoke(ctx)
 
@@ -173,7 +177,7 @@ def cli():
 @click.pass_context
 def _update_notice_epilogue(ctx: click.Context, result):
     """Surface a cached update once after interactive human commands."""
-    if ctx.invoked_subcommand not in {"doctor", "hook", "serve"}:
+    if not ctx.meta.get("setup_remove") and ctx.invoked_subcommand not in {"doctor", "hook", "serve"}:
         update_check.maybe_print_update_notice(_get_poppy_dir())
     return result
 
@@ -1822,6 +1826,57 @@ def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: b
     _record_agent_setup("claude-code", via="plugin")
 
 
+def _remove_client(client: str) -> None:
+    """Remove client wiring without loading or changing Poppy's own config."""
+    from poppy.setup.claude_code import CorruptConfigError, is_claude_code_plugin_installed, remove_for_client
+
+    ctx = click.get_current_context()
+    for name, flag in (
+        ("hooks", "--hooks/--no-hooks"),
+        ("claude_md", "--claude-md/--no-claude-md"),
+        ("daemon_mode", "--daemon"),
+        ("yes", "--yes"),
+    ):
+        if ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE:
+            raise click.UsageError(f"--remove cannot be combined with {flag}.")
+    try:
+        changes = remove_for_client(client=client)
+    except CorruptConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(
+            f"Could not finish removing Poppy from {client}: {exc}. Fix the file or folder, then run this again."
+        ) from exc
+    if changes:
+        for path, removed in changes.items():
+            click.echo(f"Removed from {path}:")
+            for item in removed:
+                click.echo(f"  {item}")
+    else:
+        click.echo(f"Nothing was installed by Poppy setup for {client}.")
+    if client == "claude-code":
+        try:
+            plugin_installed = is_claude_code_plugin_installed()
+        except OSError as exc:
+            click.echo(f"Warning: could not read Claude Code's plugin records ({exc}).", err=True)
+        else:
+            if plugin_installed:
+                click.echo(
+                    "The Poppy plugin is still installed. "
+                    "To remove it too, run `claude plugin uninstall poppy@trags-garden`."
+                )
+    # The daemon module needs fcntl, so this import fails where there is no
+    # daemon service to report (Windows).
+    try:
+        from poppy.mcp_server.lifecycle import agent_path
+
+        service_installed = agent_path().exists()
+    except (ImportError, RuntimeError):
+        service_installed = False
+    if service_installed:
+        click.echo("The daemon service is still installed. Remove it with `poppy daemon uninstall`.")
+
+
 @setup.command("claude-code")
 @click.option(
     "--hooks/--no-hooks",
@@ -1835,9 +1890,14 @@ def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: b
 )
 @click.option("--yes", is_flag=True, help="Grant auto-capture consent without prompting (non-interactive installs).")
 @click.option("--daemon", "daemon_mode", is_flag=True, help="Use the shared authenticated HTTP daemon.")
-def setup_claude_code(hooks: bool, claude_md: bool, yes: bool, daemon_mode: bool):
+@click.option("--remove", is_flag=True, help="Remove Poppy's MCP entry, hooks and managed primer.")
+def setup_claude_code(hooks: bool, claude_md: bool, yes: bool, daemon_mode: bool, remove: bool):
     """Install Poppy into Claude Code (MCP + hooks + CLAUDE.md primer)."""
     from poppy.setup.claude_code import is_claude_code_plugin_installed
+
+    if remove:
+        _remove_client("claude-code")
+        return
 
     claude_dir = Path(os.environ["CLAUDE_CONFIG_DIR"]) if os.environ.get("CLAUDE_CONFIG_DIR") else None
 
@@ -1885,8 +1945,12 @@ def setup_pi():
     help="Install lifecycle hooks. Default: enabled.",
 )
 @click.option("--daemon", "daemon_mode", is_flag=True, help="Use the shared authenticated HTTP daemon.")
-def setup_cursor(hooks: bool, daemon_mode: bool):
+@click.option("--remove", is_flag=True, help="Remove Poppy's MCP entry and hooks.")
+def setup_cursor(hooks: bool, daemon_mode: bool, remove: bool):
     """Install Poppy into Cursor (MCP + hooks)."""
+    if remove:
+        _remove_client("cursor")
+        return
     paths = _install_or_abort(client="cursor", install_hooks=hooks, daemon_mode=daemon_mode)
     _print_install_paths(paths, "cursor")
     _record_agent_setup("cursor")
@@ -1920,8 +1984,12 @@ def setup_windsurf():
     help="Install lifecycle hooks. Default: enabled.",
 )
 @click.option("--daemon", "daemon_mode", is_flag=True, help="Use the shared authenticated HTTP daemon.")
-def setup_codex(hooks: bool, daemon_mode: bool):
+@click.option("--remove", is_flag=True, help="Remove Poppy's MCP entry, hooks and managed primer.")
+def setup_codex(hooks: bool, daemon_mode: bool, remove: bool):
     """Install Poppy into Codex (MCP + hooks + AGENTS.md primer)."""
+    if remove:
+        _remove_client("codex")
+        return
     paths = _install_or_abort(client="codex", install_hooks=hooks, daemon_mode=daemon_mode)
     _print_install_paths(paths, "codex")
     _record_agent_setup("codex")
