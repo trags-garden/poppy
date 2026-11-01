@@ -5,7 +5,8 @@ A host CLI on PATH proves the binary exists, not that it works: a logged-out
 SessionStart banner still says "active" and ``poppy doctor`` still says OK. The
 extraction backend therefore records what actually happened — each hard host-CLI
 failure (non-zero exit, timeout, spawn error) increments a counter and stores the
-failing CLI plus its stderr tail; the next successful extraction clears it. After
+failing CLI plus its stderr tail; the next successful extraction clears it, and a
+record from another Poppy version is ignored and never counted. After
 ``FAILURE_THRESHOLD`` consecutive failures the ConsolidationPolicy reports
 ``WARN_BACKEND_BROKEN``, which the banner and doctor render.
 
@@ -61,6 +62,7 @@ class CliHealth:
     consecutive_failures: int = 0
     last_error: str = ""
     last_failure_at: str = ""
+    poppy_version: str = ""
 
 
 @dataclass
@@ -117,6 +119,16 @@ class BackendHealth:
     def last_failure_at(self) -> str:
         return self._reported().last_failure_at
 
+    @property
+    def poppy_version(self) -> str:
+        return self._reported().poppy_version
+
+    @property
+    def last_failure_date(self) -> str:
+        """The date of the reported failure, without assuming a valid timestamp."""
+        timestamp = self.last_failure_at
+        return timestamp.split("T", 1)[0] if timestamp else "unknown date"
+
 
 def health_path(poppy_dir: Path) -> Path:
     return poppy_dir / HEALTH_FILENAME
@@ -128,6 +140,16 @@ def _resolve(poppy_dir: Path | None) -> Path:
     from poppy.runtime import get_poppy_dir
 
     return get_poppy_dir()
+
+
+def _running_poppy_version() -> str:
+    """Return the running version without making health reporting depend on parsing it."""
+    try:
+        from poppy import __version__
+
+        return str(__version__)
+    except Exception:
+        return ""
 
 
 def load(poppy_dir: Path | None = None) -> BackendHealth:
@@ -144,14 +166,20 @@ def load(poppy_dir: Path | None = None) -> BackendHealth:
         data = json.loads(health_path(_resolve(poppy_dir)).read_text())
         if not isinstance(data, dict) or not isinstance(data.get("clis"), dict):
             return BackendHealth()
+        running_version = _running_poppy_version()
         clis = {
             str(name): CliHealth(
                 consecutive_failures=int(entry.get("consecutive_failures", 0) or 0),
                 last_error=str(entry.get("last_error", "") or ""),
                 last_failure_at=str(entry.get("last_failure_at", "") or ""),
+                poppy_version=str(entry.get("poppy_version", "") or ""),
             )
             for name, entry in data["clis"].items()
             if isinstance(entry, dict)
+            # A failure from another version, including records written before
+            # versions were stored, cannot describe this installation's health.
+            and running_version
+            and entry.get("poppy_version") == running_version
         }
     except (OSError, ValueError, TypeError):
         return BackendHealth()
@@ -184,6 +212,7 @@ def _save(poppy_dir: Path, health: BackendHealth) -> None:
                     "consecutive_failures": entry.consecutive_failures,
                     "last_error": entry.last_error,
                     "last_failure_at": entry.last_failure_at,
+                    "poppy_version": entry.poppy_version,
                 }
                 for name, entry in health.clis.items()
             },
@@ -215,10 +244,12 @@ def record_failure(cli: str, detail: str, *, poppy_dir: Path | None = None) -> N
         resolved = _resolve(poppy_dir)
         clis = dict(load(resolved).clis)
         previous = clis.get(cli)
+        running_version = _running_poppy_version()
         clis[cli] = CliHealth(
             consecutive_failures=(previous.consecutive_failures if previous else 0) + 1,
             last_error=detail[:MAX_ERROR_CHARS],
             last_failure_at=datetime.datetime.now(datetime.UTC).isoformat(),
+            poppy_version=running_version,
         )
         _save(resolved, BackendHealth(clis=_pruned(clis)))
     except OSError:
@@ -237,6 +268,9 @@ def record_success(cli: str | None = None, *, poppy_dir: Path | None = None) -> 
         resolved = _resolve(poppy_dir)
         current = load(resolved).clis
         if not current:
+            # Anything still on disk came from another version and is ignored.
+            # Do not keep its stderr tail around after extraction works again.
+            health_path(resolved).unlink(missing_ok=True)
             return
         if cli is None:
             _save(resolved, BackendHealth())

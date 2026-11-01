@@ -50,13 +50,69 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- health record ---------------------------------------------------------
 
 
-def test_failures_accumulate_until_the_threshold(tmp_path: Path) -> None:
+def test_failures_accumulate_until_the_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(health, "_running_poppy_version", lambda: "dev-build")
     for _ in range(health.FAILURE_THRESHOLD - 1):
         health.record_failure("claude", "exited rc=1", poppy_dir=tmp_path)
         assert not health.backend_failing(tmp_path)
     health.record_failure("claude", "exited rc=1", poppy_dir=tmp_path)
     assert health.backend_failing(tmp_path)
     assert health.load(tmp_path).cli == "claude"
+    assert health.load(tmp_path).clis["claude"].poppy_version == "dev-build"
+
+
+def test_a_stale_versioned_record_reads_healthy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(health, "_running_poppy_version", lambda: "1.2.3")
+    health.health_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "clis": {
+                    "claude": {
+                        "consecutive_failures": health.FAILURE_THRESHOLD,
+                        "last_error": "exited rc=1",
+                        "last_failure_at": "2026-10-25T12:00:00+00:00",
+                        "poppy_version": "1.2.2",
+                    }
+                }
+            }
+        )
+    )
+
+    assert health.load(tmp_path).clis == {}
+    assert not health.backend_failing(tmp_path)
+
+
+def test_a_versionless_legacy_record_reads_healthy(tmp_path: Path) -> None:
+    health.health_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "clis": {
+                    "claude": {
+                        "consecutive_failures": health.FAILURE_THRESHOLD,
+                        "last_error": "exited rc=1",
+                        "last_failure_at": "2026-10-25T12:00:00+00:00",
+                    }
+                }
+            }
+        )
+    )
+
+    assert health.load(tmp_path).clis == {}
+    assert not health.backend_failing(tmp_path)
+
+
+def test_failure_streak_restarts_when_poppy_version_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    version = "1.2.2"
+    monkeypatch.setattr(health, "_running_poppy_version", lambda: version)
+    for _ in range(health.FAILURE_THRESHOLD):
+        health.record_failure("claude", "exited rc=1", poppy_dir=tmp_path)
+
+    version = "1.2.3"
+    health.record_failure("claude", "exited rc=1", poppy_dir=tmp_path)
+
+    recorded = health.load(tmp_path).clis["claude"]
+    assert recorded.consecutive_failures == 1
+    assert recorded.poppy_version == "1.2.3"
 
 
 def test_success_clears_the_record(tmp_path: Path) -> None:
@@ -307,6 +363,8 @@ def test_broken_claude_degrades_banner_and_doctor(tmp_path: Path, monkeypatch: p
     assert "[!] auto-capture: WARN" in result.output
     assert STUB_STDERR in result.output
     assert "rc=1" in result.output
+    recorded = health.load(poppy_dir)
+    assert f"Poppy {recorded.poppy_version} on {recorded.last_failure_date}" in result.output
 
     # A working backend heals the state: the next success clears the record.
     health.record_success(poppy_dir=poppy_dir)
@@ -527,3 +585,13 @@ def test_forced_env_still_warns_in_doctor_and_the_banner(tmp_path: Path, monkeyp
     result = _doctor(poppy_dir, tmp_path)
     assert result.exit_code == 0, result.output
     assert "[!] auto-capture: WARN" in result.output
+
+
+def test_success_removes_a_record_left_by_another_version(tmp_path):
+    path = health.health_path(tmp_path)
+    entry = {"consecutive_failures": 4, "last_error": "old", "poppy_version": "0.0.1"}
+    path.write_text(json.dumps({"version": 1, "clis": {"codex": entry}}))
+
+    health.record_success("claude", poppy_dir=tmp_path)
+
+    assert not path.exists()

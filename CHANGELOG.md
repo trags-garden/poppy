@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Auto-capture no longer remains marked inactive after upgrading because of a failure streak recorded by an older Poppy version.
+
 ### Changed
 
 - The README now lists every MCP tool, states that `remember`, `forget` and `edit` are not gated by capture consent, and documents the remaining user-facing environment variables.
