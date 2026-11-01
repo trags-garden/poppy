@@ -1925,6 +1925,124 @@ def _client_primer_path(client: str) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+def _remove_poppy_hooks(settings: dict, *, flat: bool) -> list[str]:
+    """Strip recognized commands, retaining empty containers we did not empty."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    removed: list[str] = []
+    for event, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        kept_groups = []
+        event_removed = False
+        for group in groups:
+            commands = [group] if flat else group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(commands, list):
+                kept_groups.append(group)
+                continue
+            kept = []
+            for command in commands:
+                if isinstance(command, dict) and _is_any_poppy_hook(command.get("command"), _ALL_POPPY_HOOK_COMMANDS):
+                    removed.append(f"{event}: {command['command']}")
+                else:
+                    kept.append(command)
+            if len(kept) == len(commands):
+                kept_groups.append(group)
+            else:
+                event_removed = True
+                if kept:
+                    kept_groups.append({**group, "hooks": kept})
+        if event_removed:
+            if kept_groups:
+                hooks[event] = kept_groups
+            else:
+                del hooks[event]
+    if removed and not hooks:
+        del settings["hooks"]
+    return removed
+
+
+def remove_for_client(*, client: str, claude_config_dir: Path | None = None) -> dict[Path, list[str]]:
+    """Remove setup-owned entries after validating every affected file."""
+    if client not in {"claude-code", "cursor", "codex"}:
+        raise ValueError(f"Removal is not supported for {client}")
+    claude_dir = claude_config_dir or get_claude_config_dir()
+    validate_client_config(client=client, claude_config_dir=claude_dir)
+    config = _client_settings_path(client, claude_dir)
+    hooks_path = {
+        "claude-code": claude_dir / "settings.json",
+        "cursor": get_cursor_home() / "hooks.json",
+        "codex": get_codex_home() / "hooks.json",
+    }[client]
+    primer = claude_dir / "CLAUDE.md" if client == "claude-code" else _client_primer_path(client)
+    configs = [config, config.with_suffix(".json")] if client == "codex" else [config]
+    changes: dict[Path, list[str]] = {}
+    writes: list[tuple[Path, Path, str]] = []
+    primers: list[Path] = []
+
+    # Plan all edits before writing: even a later corrupt hooks file must leave
+    # the MCP registration and instructions untouched.
+    for path in configs:
+        target = _resolve_write_target(path)
+        is_toml = client == "codex" and path == config
+        settings = _read_codex_toml(path, strict=True) if is_toml else _read_json(path, strict=True)
+        key = "mcp_servers" if is_toml else "mcpServers"
+        if not isinstance(settings, MutableMapping) or (
+            key in settings and not isinstance(settings[key], MutableMapping)
+        ):
+            raise CorruptConfigError(
+                f"Refusing to overwrite invalid {key} config at {path}. Fix or remove it, then re-run `poppy setup`."
+            )
+        servers = settings.get(key, {})
+        if "poppy" in servers:
+            del servers["poppy"]
+            # An explicit TOML table can carry the user's comments even when
+            # it is empty. Only discard the implicit parent of Poppy's table.
+            if not servers and (not is_toml or getattr(servers, "is_super_table", lambda: False)()):
+                del settings[key]
+            content = tomlkit.dumps(settings) if is_toml else json.dumps(settings, indent=2)
+            writes.append((path, target, content))
+            changes[path] = ["MCP entry (poppy)"]
+
+    hooks_target = _resolve_write_target(hooks_path)
+    hook_settings = _read_json(hooks_path, strict=True)
+    if client == "cursor":
+        reason = _validate_cursor_hooks_config(hook_settings, hooks_path)
+        if reason:
+            raise _invalid_hooks_config(hooks_path, reason)
+    else:
+        _validate_hooks_object(hook_settings, hooks_path, allow_null=client == "codex")
+    removed_hooks = _remove_poppy_hooks(hook_settings, flat=client == "cursor")
+    if removed_hooks:
+        writes.append((hooks_path, hooks_target, json.dumps(hook_settings, indent=2)))
+        changes[hooks_path] = [f"hook ({hook})" for hook in removed_hooks]
+
+    for path in (primer, _legacy_primer_path(client)):
+        if path is None:
+            continue
+        _resolve_write_target(path)
+        if path.exists():
+            try:
+                text = path.read_text()
+            except UnicodeDecodeError as exc:
+                raise CorruptConfigError(
+                    f"Refusing to overwrite unparseable config at {path}. Fix or remove it, then re-run `poppy setup`."
+                ) from exc
+            start = text.find(CLAUDE_MD_BEGIN)
+            if start != -1 and text.find(CLAUDE_MD_END, start) != -1:
+                primers.append(path)
+                changes[path] = ["managed primer block"]
+
+    for path, target, content in writes:
+        _backup_once(path, CONFIG_BACKUP_SUFFIX)
+        _write_text(path, content, target=target)
+    for path in primers:
+        _backup_once(path, CONFIG_BACKUP_SUFFIX)
+        _remove_managed_primer_block(path)
+    return changes
+
+
 def validate_client_config(
     *,
     client: str = "claude-code",

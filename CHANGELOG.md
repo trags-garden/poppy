@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `poppy setup claude-code`, `poppy setup cursor` and `poppy setup codex` now accept `--remove` to remove Poppy's MCP entry, hooks and managed primer before uninstalling the CLI. The README documents the full uninstall order.
+
 ### Changed
 
 - The README now lists every MCP tool, states that `remember`, `forget` and `edit` are not gated by capture consent, and documents the remaining user-facing environment variables.
