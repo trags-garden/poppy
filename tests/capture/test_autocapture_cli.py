@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from poppy.capture import health
 from poppy.cli.main import _CONSENT_DISCLOSURE, cli
 from poppy.config import load_config, save_config
 
@@ -171,6 +172,24 @@ def test_status_reports_project_mask_and_global_pending(
     assert "Resolved: Auto-capture is off for this project" in result.output
     assert "Project 'myrepo': off" in result.output
     assert "Global consent: pending" in result.output
+
+
+def test_status_names_the_version_and_date_of_a_fresh_failure_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(tmp_path)
+    config.consent = "granted"
+    save_config(config)
+    monkeypatch.setattr("shutil.which", lambda name: "/mock/claude" if name == "claude" else None)
+    for _ in range(health.FAILURE_THRESHOLD):
+        health.record_failure("claude", "exited rc=1", poppy_dir=tmp_path)
+
+    result = CliRunner().invoke(cli, ["autocapture", "status"], env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code == 0, result.output
+    recorded = health.load(tmp_path)
+    assert "INACTIVE" in result.output
+    assert f"Poppy {recorded.poppy_version} on {recorded.last_failure_date}" in result.output
 
 
 def test_autocapture_is_visible_and_capture_alias_is_hidden(tmp_path: Path) -> None:

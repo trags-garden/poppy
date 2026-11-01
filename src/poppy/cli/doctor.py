@@ -1317,7 +1317,8 @@ def check_auto_capture(ctx: DoctorContext) -> None:
         safe_tail = redact_secrets(backend_health.last_error, custom_patterns)
         status_detail = (
             f"{status_detail} Last error: {backend_health.cli} "
-            f"{safe_tail} ({backend_health.consecutive_failures} in a row)."
+            f"{safe_tail} ({backend_health.consecutive_failures} in a row; "
+            f"Poppy {backend_health.poppy_version} on {backend_health.last_failure_date})."
         )
     line("auto-capture", status_kind, status_detail, hint=status_hint)
 
