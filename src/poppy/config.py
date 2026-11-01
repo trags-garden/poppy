@@ -1128,18 +1128,40 @@ def update_config(poppy_dir: Path, mutate: Callable[[PoppyConfig], _T]) -> _T:
         return result
 
 
+def _write_config_through_symlink(link: Path, payload: str) -> None:
+    """Edit a dotfiles-managed config in place, keeping the user's link.
+
+    A replacement file created beside the target would inherit that directory's
+    access rules, which a mode change does not remove, so a key could become
+    readable there. The cost is that a crash mid-write can leave a torn file, which
+    the next command reports rather than reading as defaults.
+    """
+    try:
+        target = link.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ConfigError(link, "the symlink points to a file that does not exist") from exc
+    fd = os.open(target, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "w") as f:
+        # Tighten the mode before any new content lands in the file.
+        os.fchmod(f.fileno(), _CONFIG_FILE_MODE)
+        f.truncate()
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _write_config_payload(poppy_dir: Path, payload: str) -> None:
     config_path = poppy_dir / CONFIG_FILENAME
-    # Replace the target so a dotfiles-managed config keeps its symlink.
     if config_path.is_symlink():
-        config_path = config_path.resolve(strict=True)
+        _write_config_through_symlink(config_path, payload)
+        return
     # Atomic, never-world-readable write: tempfile.mkstemp creates a fresh file
     # with 0600 honored (it is guaranteed-new, unlike os.open(O_CREAT, 0600)
     # whose mode is ignored for an existing 0644 file), so the plaintext key
     # never lands in a world-readable inode. os.replace then renames it over the
     # target atomically, so a crash can't leave a half-written or loose-perm
     # config, and an existing 0644 config is replaced by the 0600 inode.
-    fd, tmp_name = tempfile.mkstemp(dir=str(config_path.parent), prefix=".config-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(poppy_dir), prefix=".config-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(payload)

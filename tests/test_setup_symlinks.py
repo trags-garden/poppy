@@ -169,6 +169,7 @@ def test_save_config_preserves_symlink_and_updates_target(tmp_path):
     target = link_file(tmp_path, link, "{}")
     target.chmod(0o644)
     link_text = os.readlink(link)
+    inode = target.stat().st_ino
     config = PoppyConfig(poppy_dir=poppy_dir, telemetry_enabled=False)
 
     save_config(config)
@@ -177,7 +178,23 @@ def test_save_config_preserves_symlink_and_updates_target(tmp_path):
     assert os.readlink(link) == link_text
     assert json.loads(target.read_text())["telemetry_enabled"] is False
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    # The same file is edited: a new one beside the target would inherit that
+    # directory's access rules, whatever its mode says.
+    assert target.stat().st_ino == inode
     assert not list(tmp_path.rglob(".config-*.tmp"))
+
+
+def test_save_config_refuses_broken_symlink_in_one_line(tmp_path):
+    poppy_dir = tmp_path / "poppy"
+    poppy_dir.mkdir()
+    link = poppy_dir / "config.json"
+    link.symlink_to(tmp_path / "missing.json")
+
+    with pytest.raises(ConfigError, match="does not exist"):
+        save_config(PoppyConfig(poppy_dir=poppy_dir, telemetry_enabled=False))
+
+    assert link.is_symlink()
+    assert not (tmp_path / "missing.json").exists()
 
 
 def test_setup_with_plugin_refuses_broken_primer_before_any_changes(tmp_path, monkeypatch):
