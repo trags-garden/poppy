@@ -7,12 +7,22 @@ they run without Node, and guard the Poppy side against parameter drift.
 """
 
 import base64
+import datetime
+import io
 
+import click
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from poppy.setup.trags import _OAEP, _decrypt_api_key, _generate_device_keypair
+
+
+class _TerminalInput(io.StringIO):
+    """A small stdin double for retry tests that must behave like a terminal."""
+
+    def isatty(self):
+        return True
 
 
 def test_generate_keypair_returns_spki_pem():
@@ -237,6 +247,212 @@ def test_device_flow_falls_back_to_default_poll_interval(tmp_path, monkeypatch, 
         setup_trags.run_device_code_flow()
 
     assert sleeps == [setup_trags._DEFAULT_POLL_INTERVAL_S]
+
+
+def test_device_flow_shows_server_reported_code_lifetime(tmp_path, monkeypatch, capsys):
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_args, **_kwargs: httpx.Response(
+            201,
+            json={
+                "code": "WXYZ",
+                "setup_url": "https://example.test/cli",
+                "expires_at": (datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)).isoformat(),
+            },
+        ),
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(410))
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+
+    with pytest.raises(click.ClickException, match="Setup code expired"):
+        setup_trags.run_device_code_flow()
+
+    assert "This code is valid for 5 minutes." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("expires_at", [pytest.param(None, id="missing"), pytest.param("not-a-date", id="garbage")])
+def test_device_flow_ignores_unusable_expiry_from_older_server(tmp_path, monkeypatch, capsys, expires_at):
+    import click
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    response = {"code": "WXYZ", "setup_url": "https://example.test/cli"}
+    if expires_at is not None:
+        response["expires_at"] = expires_at
+    monkeypatch.setattr(httpx, "post", lambda *_args, **_kwargs: httpx.Response(201, json=response))
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(410))
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+
+    with pytest.raises(click.ClickException, match="Setup code expired"):
+        setup_trags.run_device_code_flow()
+
+    assert "This code is valid for" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("skew_minutes", [pytest.param(-10, id="clock-fast"), pytest.param(600, id="clock-slow")])
+def test_device_flow_keeps_polling_when_local_clock_is_skewed(tmp_path, monkeypatch, capsys, skew_minutes):
+    import click
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    expires_at = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=skew_minutes)
+    response = {"code": "WXYZ", "setup_url": "https://example.test/cli", "expires_at": expires_at.isoformat()}
+    polls = []
+    monkeypatch.setattr(httpx, "post", lambda *_args, **_kwargs: httpx.Response(201, json=response))
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: polls.append(1) or httpx.Response(410))
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+
+    with pytest.raises(click.ClickException, match="Setup code expired"):
+        setup_trags.run_device_code_flow()
+
+    assert polls
+    assert "This code is valid for" not in capsys.readouterr().out
+
+
+def test_device_flow_retries_expired_code_from_terminal(tmp_path, monkeypatch, capsys):
+    import httpx
+
+    from poppy import keychain
+    from poppy.config import load_config
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(keychain, "available", lambda: False)
+    terminal = _TerminalInput("\n")
+    monkeypatch.setattr(setup_trags.sys, "stdin", terminal)
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+    public_keys = []
+
+    def fake_post(_url, **kwargs):
+        public_keys.append(serialization.load_pem_public_key(kwargs["json"]["device_pubkey"].encode()))
+        return httpx.Response(201, json={"code": f"CODE{len(public_keys)}", "setup_url": "https://example.test/cli"})
+
+    def fake_get(_url, **_kwargs):
+        if len(public_keys) == 1:
+            return httpx.Response(410)
+        ciphertext = public_keys[-1].encrypt(b"usr_new_code", _OAEP)
+        return httpx.Response(200, json={"api_key_encrypted": base64.b64encode(ciphertext).decode()})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    setup_trags.run_device_code_flow()
+
+    assert len(public_keys) == 2
+    assert load_config(tmp_path).trags_api_key == "usr_new_code"
+    output = capsys.readouterr().out
+    assert "Press Enter for a new code, or Ctrl-C to stop." in output
+    assert "Code: CODE2" in output
+
+
+def test_device_flow_expired_code_is_an_error_without_terminal(tmp_path, monkeypatch):
+    import httpx
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_args, **_kwargs: httpx.Response(201, json={"code": "WXYZ", "setup_url": "https://example.test/cli"}),
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(410))
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+
+    result = CliRunner().invoke(cli, ["setup", "trags"], env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code == 1
+    assert result.output.endswith("Error: Setup code expired. Run `poppy setup trags` again.\n")
+
+
+def test_device_flow_reports_its_deadline_as_expired(tmp_path, monkeypatch):
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_args, **_kwargs: httpx.Response(201, json={"code": "WXYZ", "setup_url": "https://example.test/cli"}),
+    )
+    monkeypatch.setattr(setup_trags, "_DEFAULT_TIMEOUT_S", 0)
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail("the client deadline must end before another poll"),
+    )
+
+    with pytest.raises(click.ClickException) as excinfo:
+        setup_trags.run_device_code_flow()
+
+    assert str(excinfo.value) == "Setup code expired. Run `poppy setup trags` again."
+
+
+def test_device_flow_stops_after_three_expired_codes(tmp_path, monkeypatch):
+    import click
+    import httpx
+
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    terminal = _TerminalInput("\n\n")
+    monkeypatch.setattr(setup_trags.sys, "stdin", terminal)
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+    starts = []
+
+    def fake_post(_url, **_kwargs):
+        starts.append(None)
+        return httpx.Response(201, json={"code": "WXYZ", "setup_url": "https://example.test/cli"})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(410))
+
+    with pytest.raises(click.ClickException, match="Setup code expired"):
+        setup_trags.run_device_code_flow()
+
+    assert len(starts) == setup_trags._MAX_SETUP_ATTEMPTS
+
+
+def test_device_flow_reports_unknown_or_used_code_separately(tmp_path, monkeypatch):
+    import httpx
+    from click.testing import CliRunner
+
+    from poppy.cli.main import cli
+    from poppy.setup import trags as setup_trags
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_args, **_kwargs: httpx.Response(201, json={"code": "WXYZ", "setup_url": "https://example.test/cli"}),
+    )
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: httpx.Response(404))
+    monkeypatch.setattr(setup_trags.webbrowser, "open", lambda *_args: True)
+    monkeypatch.setattr(setup_trags.time, "sleep", lambda *_args: None)
+
+    result = CliRunner().invoke(cli, ["setup", "trags"], env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code == 1
+    assert "Setup code was not recognized or was already used." in result.output
+    assert "Setup code expired." not in result.output
 
 
 @pytest.mark.parametrize(

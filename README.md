@@ -489,11 +489,10 @@ If you want your memories searchable across machines and inside the Trags
 web app, run `poppy setup trags` to onboard. Sync is opt-in and additive;
 your local store remains the source of truth.
 
-`poppy setup trags` opens a browser page and shows a one-time code. Approve it
-within five minutes: the code expires after that, and the command stops
-waiting at the same time. If you see `Setup code expired or already used` or
-`Timed out waiting for authorization`, run `poppy setup trags` again for a
-fresh code.
+`poppy setup trags` opens a browser page and shows a one-time code, including
+how long it is valid. If it expires while you are in a terminal, Poppy offers a
+fresh code up to three times. In a non-interactive session, run `poppy setup
+trags` again for a fresh code.
 
 Once your Trags key is set up, by default each local change (a new memory, an
 edit, a forget, a restore) starts a background sync: Poppy pulls changes from

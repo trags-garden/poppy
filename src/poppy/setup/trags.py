@@ -18,6 +18,9 @@ ciphertext, so a leaked setup code or compromised DB yields nothing usable.
 from __future__ import annotations
 
 import base64
+import datetime
+import math
+import sys
 import time
 import webbrowser
 
@@ -32,6 +35,8 @@ from poppy.runtime import get_poppy_dir
 _DEFAULT_POLL_INTERVAL_S = 2.0
 _MAX_POLL_INTERVAL_S = 60.0
 _DEFAULT_TIMEOUT_S = 5 * 60
+_MAX_SETUP_ATTEMPTS = 3
+_MAX_PLAUSIBLE_CODE_LIFETIME_S = 60 * 60
 # OAEP-SHA256 padding for a 2048-bit key can wrap up to 190 bytes — far more
 # than a usr_* key. The Trags CLI authorization endpoint returns ciphertext
 # encrypted with the submitted public key, using these same parameters.
@@ -69,6 +74,30 @@ def _response_object(response: httpx.Response, phase: str, hint: str = "") -> di
     return body
 
 
+def _seconds_until_expiry(expires_at: object) -> float | None:
+    """Return the server-reported remaining lifetime, when it is usable."""
+    if not isinstance(expires_at, str):
+        return None
+    try:
+        expiry = datetime.datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        if expiry.tzinfo is None:
+            return None
+        seconds = (expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    except (OverflowError, ValueError):
+        return None
+    # Outside this range the local clock is wrong, so the figure means nothing.
+    return seconds if 0 < seconds <= _MAX_PLAUSIBLE_CODE_LIFETIME_S else None
+
+
+def _valid_for_line(seconds: float) -> str:
+    """Describe a code lifetime without implying an already elapsed exact second."""
+    if seconds < 60:
+        return "This code is valid for less than a minute."
+    minutes = math.ceil(seconds / 60)
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"This code is valid for {minutes} {unit}."
+
+
 def run_device_code_flow(api_url_override: str | None = None) -> None:
     """Walk the device-code flow end-to-end. Prints progress to stdout."""
     poppy_dir = get_poppy_dir()
@@ -82,6 +111,21 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
     base_url = base_url.rstrip("/")
 
     click.echo(f"Connecting to {base_url}…")
+
+    for attempt in range(1, _MAX_SETUP_ATTEMPTS + 1):
+        if _run_device_code_attempt(poppy_dir, base_url, api_url_override):
+            return
+
+        if not sys.stdin.isatty() or attempt == _MAX_SETUP_ATTEMPTS:
+            raise click.ClickException("Setup code expired. Run `poppy setup trags` again.")
+
+        click.echo("\nSetup code expired.")
+        click.echo("Press Enter for a new code, or Ctrl-C to stop.")
+        sys.stdin.readline()
+
+
+def _run_device_code_attempt(poppy_dir, base_url: str, api_url_override: str | None) -> bool:
+    """Run one pairing attempt and return false when its code has expired."""
 
     # Ephemeral key pair for this attempt. The private key stays in memory and
     # is discarded when the flow ends; only the public key is sent to the server.
@@ -117,10 +161,13 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
     code = body["code"]
     setup_url = body["setup_url"]
     poll_interval = float(poll_interval)
+    seconds_until_expiry = _seconds_until_expiry(body.get("expires_at"))
 
     click.echo("\nOpening your browser to authorize this machine.")
     click.echo(f"  URL:  {setup_url}")
     click.echo(f"  Code: {code}")
+    if seconds_until_expiry is not None:
+        click.echo(f"  {_valid_for_line(seconds_until_expiry)}")
     click.echo("\nIf the browser doesn't open, paste the URL into it yourself.")
     try:
         webbrowser.open(setup_url)
@@ -135,9 +182,14 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
         poll_params["device_id"] = device_id
 
     click.echo("\nWaiting for authorization…")
-    deadline = time.monotonic() + _DEFAULT_TIMEOUT_S
-    while time.monotonic() < deadline:
-        time.sleep(poll_interval)
+    # The server decides when a code expires. This deadline is only a backstop,
+    # so a local clock running fast cannot end the wait while the code is valid.
+    deadline = time.monotonic() + max(_DEFAULT_TIMEOUT_S, seconds_until_expiry or 0.0)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(poll_interval, remaining))
         try:
             poll = httpx.get(
                 f"{base_url}/api/cli-setup/poll",
@@ -189,14 +241,17 @@ def run_device_code_flow(api_url_override: str | None = None) -> None:
                     "run `poppy doctor` to check."
                 )
             click.echo("  Try: poppy sync run")
-            return
+            return True
 
         if poll.status_code == 202:
             continue
 
-        if poll.status_code in (404, 410):
-            raise click.ClickException("Setup code expired or already used. Run `poppy setup trags` again.")
+        if poll.status_code == 410:
+            return False
+
+        if poll.status_code == 404:
+            raise click.ClickException(
+                "Setup code was not recognized or was already used. Run `poppy setup trags` again."
+            )
 
         raise click.ClickException(f"Unexpected response while polling (HTTP {poll.status_code}): {poll.text[:200]}")
-
-    raise click.ClickException("Timed out waiting for authorization. Run `poppy setup trags` again.")
