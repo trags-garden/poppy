@@ -1129,13 +1129,16 @@ def update_config(poppy_dir: Path, mutate: Callable[[PoppyConfig], _T]) -> _T:
 
 def _write_config_payload(poppy_dir: Path, payload: str) -> None:
     config_path = poppy_dir / CONFIG_FILENAME
+    # Replace the target so a dotfiles-managed config keeps its symlink.
+    if config_path.is_symlink():
+        config_path = config_path.resolve(strict=True)
     # Atomic, never-world-readable write: tempfile.mkstemp creates a fresh file
     # with 0600 honored (it is guaranteed-new, unlike os.open(O_CREAT, 0600)
     # whose mode is ignored for an existing 0644 file), so the plaintext key
     # never lands in a world-readable inode. os.replace then renames it over the
     # target atomically, so a crash can't leave a half-written or loose-perm
     # config, and an existing 0644 config is replaced by the 0600 inode.
-    fd, tmp_name = tempfile.mkstemp(dir=str(poppy_dir), prefix=".config-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(config_path.parent), prefix=".config-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             f.write(payload)

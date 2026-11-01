@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Setup now preserves symlinked instruction and Goose and Hermes config files, refuses broken links before making changes, and keeps links when removing an empty managed block. Saving Poppy's own config also preserves its symlink.
+
 ### Changed
 
 - Capture and duplicate checks that run through `claude -p` now use the `haiku` model instead of your interactive default model, and no longer load your Claude Code settings, `CLAUDE.md`, auto-memory, skills, MCP servers or hooks.

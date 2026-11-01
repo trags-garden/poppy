@@ -18,6 +18,8 @@ from pathlib import Path
 
 from poppy.setup import store_environment
 from poppy.setup.claude_code import (
+    _resolve_write_target,
+    _write_text,
     get_poppy_executable,
     install_primer_md_block,
 )
@@ -153,11 +155,11 @@ def _set_poppy_extension(config_text: str) -> str:
 
 
 def _install_extension(config_path: Path) -> Path:
+    target = _resolve_write_target(config_path)
     existing = config_path.read_text() if config_path.exists() else ""
     new_text = _set_poppy_extension(existing)
     if new_text != existing:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(new_text)
+        _write_text(config_path, new_text, target=target)
     return config_path
 
 
@@ -171,6 +173,8 @@ def install_for_goose(goose_config_dir: Path | None = None) -> dict[str, Path]:
         primer block describing the Poppy tool surface.
     """
     config_dir = goose_config_dir or get_goose_config_dir()
+    for name in ("config.yaml", ".goosehints"):
+        _resolve_write_target(config_dir / name)
     config_path = _install_extension(config_dir / "config.yaml")
     primer_path = install_primer_md_block(config_dir / ".goosehints")
     return {
