@@ -714,8 +714,21 @@ def test_call_host_cli_codex_is_read_only_skips_git_check_and_closes_stdin(monke
 
 def test_call_host_cli_claude_still_passes_prompt_on_stdin(monkeypatch):
     cmd, kwargs = _capture_host_cli_run(monkeypatch, "claude")
-    assert "--skip-git-repo-check" not in cmd
+    assert cmd == [
+        "claude",
+        "-p",
+        "--output-format",
+        "text",
+        "--model",
+        "haiku",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+    ]
+    assert "extract" not in cmd
     assert kwargs["input"] == "extract"
+    assert kwargs["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
 
 
 def _host_cli_stub(monkeypatch, stdout: str, *, returncode: int = 0):
@@ -734,6 +747,29 @@ def _host_cli_stub(monkeypatch, stdout: str, *, returncode: int = 0):
         "poppy.consolidation.subprocess",
         SimpleNamespace(run=lambda *args, **kwargs: result, TimeoutExpired=subprocess.TimeoutExpired),
     )
+
+
+def test_call_llm_uses_claude_haiku_when_openai_model_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("POPPY_CONSOLIDATE_MODEL", "gpt-test")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return Result()
+
+    monkeypatch.setattr("poppy.consolidation.detect_host_cli", lambda _: "claude")
+    monkeypatch.setattr("poppy.consolidation.subprocess.run", fake_run)
+
+    assert (
+        call_llm("extract", transcript_path=None, cfg=PoppyConfig(poppy_dir=tmp_path, consolidate_model="gpt-other"))
+        == []
+    )
+    assert calls[0][0][calls[0][0].index("--model") + 1] == "haiku"
 
 
 @pytest.mark.parametrize("stdout", ["[]", "```json\n[]\n```", "  [ ]  "])
