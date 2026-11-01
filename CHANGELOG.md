@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Capture and duplicate checks that run through `claude -p` now use the `haiku` model instead of your interactive default model, and no longer load your Claude Code settings, `CLAUDE.md`, auto-memory, skills, MCP servers or hooks.
 
+### Fixed
+
+- Codex capture now sends large transcript windows over stdin, disables Poppy's MCP server, and avoids saving extra session files when Codex supports it.
+
 ## [0.3.6] - 2026-10-25
 
 ### Added
