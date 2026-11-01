@@ -307,7 +307,7 @@ def _resolve_write_target(path: Path) -> Path:
             pointee = "unknown"
         raise CorruptConfigError(
             f"Refusing to write through symlink at {path}: the file it points to ({pointee}) does not exist. "
-            "Create that file (containing `{}` for a JSON config, or empty for TOML) or remove the link, "
+            "Create that file (containing `{}` for a JSON config, or empty for other files) or remove the link, "
             "then re-run `poppy setup`."
         ) from exc
     except OSError as exc:
@@ -1837,6 +1837,7 @@ def install_primer_md_block(md_path: Path) -> Path:
     The block is bracketed with `POPPY:BEGIN`/`POPPY:END` markers so subsequent
     runs replace it cleanly without disturbing surrounding user content.
     """
+    target = _resolve_write_target(md_path)
     block = f"{CLAUDE_MD_BEGIN}\n{CLAUDE_MD_BODY}\n{CLAUDE_MD_END}"
 
     if md_path.exists():
@@ -1851,8 +1852,7 @@ def install_primer_md_block(md_path: Path) -> Path:
     else:
         new_text = block + "\n"
 
-    md_path.parent.mkdir(parents=True, exist_ok=True)
-    md_path.write_text(new_text)
+    _write_text(md_path, new_text, target=target)
     return md_path
 
 
@@ -1874,7 +1874,8 @@ def managed_claude_md_present(claude_config_dir: Path | None = None) -> bool:
 
 
 def _remove_managed_primer_block(md_path: Path) -> None:
-    """Remove only Poppy's managed primer block, deleting an empty result."""
+    """Remove only Poppy's managed primer block, deleting empty regular files."""
+    target = _resolve_write_target(md_path)
     if not md_path.exists():
         return
     text = md_path.read_text()
@@ -1887,9 +1888,12 @@ def _remove_managed_primer_block(md_path: Path) -> None:
     end = end_marker + len(CLAUDE_MD_END)
     remaining = text[:start] + text[end:]
     if remaining.strip():
-        md_path.write_text(remaining)
+        _write_text(md_path, remaining, target=target)
+    elif md_path.is_symlink():
+        # Keep a user's link and empty its target; only empty regular files are deleted.
+        _write_text(md_path, "", target=target)
     else:
-        md_path.unlink()
+        _check_write_target(md_path, target).unlink()
 
 
 def _legacy_primer_path(client: str) -> Path | None:
@@ -1926,9 +1930,16 @@ def validate_client_config(
     client: str = "claude-code",
     claude_config_dir: Path | None = None,
     install_hooks: bool = True,
+    install_claude_md: bool = True,
 ) -> None:
     """Reject unparseable or structurally invalid configs before any changes."""
     claude_dir = claude_config_dir or get_claude_config_dir()
+    primer_path = _client_primer_path(client)
+    if client == "claude-code" and install_claude_md:
+        primer_path = claude_dir / "CLAUDE.md"
+    for path in (primer_path, _legacy_primer_path(client)):
+        if path is not None:
+            _resolve_write_target(path)
     config_path = _client_settings_path(client, claude_dir)
     if client == "codex":
         _read_codex_toml(config_path, strict=True)
@@ -1965,7 +1976,12 @@ def install_for_client(
     daemon_token: str | None = None,
 ) -> dict[str, Path]:
     """Install Poppy into the given client. Returns a {label: path} map."""
-    validate_client_config(client=client, claude_config_dir=claude_config_dir, install_hooks=install_hooks)
+    validate_client_config(
+        client=client,
+        claude_config_dir=claude_config_dir,
+        install_hooks=install_hooks,
+        install_claude_md=install_claude_md,
+    )
     paths: dict[str, Path] = {}
 
     if client == "claude-desktop":

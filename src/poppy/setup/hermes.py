@@ -24,6 +24,8 @@ import re
 from importlib import resources
 from pathlib import Path
 
+from poppy.setup.claude_code import _remove_managed_primer_block, _resolve_write_target, _write_text
+
 HERMES_PLUGIN_NAME = "poppy"
 
 _POPPY_BEGIN = "<!-- POPPY:BEGIN -->"
@@ -171,11 +173,11 @@ def _set_memory_provider(config_text: str, provider: str) -> str:
 
 def _activate_provider(config_path: Path, provider: str = HERMES_PLUGIN_NAME) -> Path:
     """Set ``memory.provider: poppy`` in ``~/.hermes/config.yaml``."""
+    target = _resolve_write_target(config_path)
     existing = config_path.read_text() if config_path.exists() else ""
     new_text = _set_memory_provider(existing, provider)
     if new_text != existing:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(new_text)
+        _write_text(config_path, new_text, target=target)
     return config_path
 
 
@@ -186,6 +188,7 @@ def _activate_provider(config_path: Path, provider: str = HERMES_PLUGIN_NAME) ->
 
 def _install_soul_block(soul_path: Path) -> Path:
     """Insert or replace Hermes-specific Poppy guidance without changing user content."""
+    target = _resolve_write_target(soul_path)
     block = f"{_POPPY_BEGIN}\n{HERMES_SOUL_BODY}\n{_POPPY_END}"
     existing = soul_path.read_text() if soul_path.exists() else ""
 
@@ -199,26 +202,13 @@ def _install_soul_block(soul_path: Path) -> Path:
     else:
         new_text = block + "\n"
 
-    soul_path.parent.mkdir(parents=True, exist_ok=True)
-    soul_path.write_text(new_text)
+    _write_text(soul_path, new_text, target=target)
     return soul_path
 
 
 def _remove_legacy_agents_block(agents_path: Path) -> None:
     """Remove the obsolete managed primer from HERMES_HOME/AGENTS.md, if present."""
-    if not agents_path.exists():
-        return
-    existing = agents_path.read_text()
-    if _POPPY_BEGIN not in existing or _POPPY_END not in existing:
-        return
-
-    start = existing.index(_POPPY_BEGIN)
-    end = existing.index(_POPPY_END, start) + len(_POPPY_END)
-    new_text = existing[:start] + existing[end:]
-    if new_text.strip():
-        agents_path.write_text(new_text)
-    else:
-        agents_path.unlink()
+    _remove_managed_primer_block(agents_path)
 
 
 def install_for_hermes(hermes_home: Path | None = None) -> dict[str, Path]:
@@ -232,6 +222,8 @@ def install_for_hermes(hermes_home: Path | None = None) -> dict[str, Path]:
     Also removes the obsolete managed Poppy block from ``$HERMES_HOME/AGENTS.md``.
     """
     home = hermes_home or get_hermes_home()
+    for name in ("config.yaml", "SOUL.md", "AGENTS.md"):
+        _resolve_write_target(home / name)
     plugin_dir = home / "plugins" / HERMES_PLUGIN_NAME
     plugin_dir.mkdir(parents=True, exist_ok=True)
 

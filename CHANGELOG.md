@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- `poppy setup trags` now shows how long a pairing code is valid, offers a fresh code after expiry in a terminal, and distinguishes expired codes from codes that were not recognized or were already used.
-
 ### Changed
 
 - The README now lists every MCP tool, states that `remember`, `forget` and `edit` are not gated by capture consent, and documents the remaining user-facing environment variables.
@@ -18,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy setup trags` now shows how long a pairing code is valid, offers a fresh code after expiry in a terminal, and distinguishes expired codes from codes that were not recognized or were already used.
+- Setup now preserves symlinked instruction and Goose and Hermes config files, refuses broken links before making changes, and keeps links when removing an empty managed block. Saving Poppy's own config also preserves its symlink.
 - Codex capture now sends large transcript windows over stdin, disables Poppy's MCP server, and avoids saving extra session files when Codex supports it.
 - Malformed Poppy configuration now stops commands with a clear error and repair advice instead of a traceback. `poppy doctor` reports the config failure and skips the remaining checks.
 - Auto-capture no longer remains marked inactive after upgrading because of a failure streak recorded by an older Poppy version.

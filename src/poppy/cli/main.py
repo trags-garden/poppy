@@ -1727,6 +1727,7 @@ def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
                 client=kwargs["client"],
                 claude_config_dir=kwargs.get("claude_config_dir"),
                 install_hooks=kwargs.get("install_hooks", True),
+                install_claude_md=kwargs.get("install_claude_md", True),
             )
             kwargs.update(_daemon_setup_kwargs())
         return install_for_client(**kwargs)
@@ -1797,7 +1798,16 @@ def _install_simple_client(client: str, *, daemon_mode: bool = False) -> None:
 
 def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: bool, daemon_mode: bool) -> None:
     """Leave the plugin's wiring alone; add only the CLAUDE.md block when asked by flag."""
-    from poppy.setup.claude_code import install_claude_md_block
+    from poppy.setup.claude_code import CorruptConfigError, install_claude_md_block
+
+    # The flag defaults to on, so only an explicit --claude-md writes the
+    # always-loaded block next to the plugin's skill.
+    primer_path = None
+    if claude_md and click.get_current_context().get_parameter_source("claude_md") == ParameterSource.COMMANDLINE:
+        try:
+            primer_path = install_claude_md_block(claude_dir)
+        except CorruptConfigError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     click.echo(
         "The Poppy plugin for Claude Code is installed and already provides the MCP server, hooks "
@@ -1807,10 +1817,8 @@ def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: b
         click.echo(
             "--daemon was ignored: the plugin's MCP server runs `poppy serve`, which uses the daemon when one answers."
         )
-    # The flag defaults to on, so only an explicit --claude-md writes the
-    # always-loaded block next to the plugin's skill.
-    if claude_md and click.get_current_context().get_parameter_source("claude_md") == ParameterSource.COMMANDLINE:
-        click.echo(f"  CLAUDE.md block: {install_claude_md_block(claude_dir)}")
+    if primer_path is not None:
+        click.echo(f"  CLAUDE.md block: {primer_path}")
     _record_agent_setup("claude-code", via="plugin")
 
 
@@ -1948,9 +1956,13 @@ def setup_goose():
     ``extensions:`` block of ``~/.config/goose/config.yaml`` and global
     agent hints from ``~/.config/goose/.goosehints``.
     """
+    from poppy.setup.claude_code import CorruptConfigError
     from poppy.setup.goose import install_for_goose
 
-    paths = install_for_goose()
+    try:
+        paths = install_for_goose()
+    except CorruptConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
     for label, path in paths.items():
         click.echo(f"  {label}: {path}")
     _warn_if_poppy_unresolved()
@@ -1969,9 +1981,13 @@ def setup_hermes_agent():
     `~/.hermes/plugins/<name>/`. This drops the Poppy plugin + sets
     `memory.provider: poppy` in `~/.hermes/config.yaml`.
     """
+    from poppy.setup.claude_code import CorruptConfigError
     from poppy.setup.hermes import install_for_hermes
 
-    paths = install_for_hermes()
+    try:
+        paths = install_for_hermes()
+    except CorruptConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
     for label, path in paths.items():
         click.echo(f"  {label}: {path}")
     click.echo(
