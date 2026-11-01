@@ -733,7 +733,12 @@ class ConsolidateSettings:
 
 
 def resolved_consolidate_settings(cfg: PoppyConfig) -> ConsolidateSettings:
-    """The single seam for consolidate model/base_url/api_key/max_items precedence."""
+    """The single seam for consolidate model/base_url/api_key/max_items precedence.
+
+    Model precedence is ``POPPY_CONSOLIDATE_MODEL``, then ``consolidate_model``.
+    The model applies only to the OpenAI-compatible backend, since host CLIs
+    pick their own.
+    """
     model = os.environ.get("POPPY_CONSOLIDATE_MODEL") or cfg.consolidate_model
     # OPENAI_BASE_URL is the last resort so that pointing the shell at a local
     # or proxied OpenAI-compatible server keeps working without poppy-specific

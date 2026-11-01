@@ -137,6 +137,12 @@ def format_transcript(messages: list[dict[str, str]], char_budget: int = 16000) 
 # can never reach a backend a normal capture would not have used.
 HOST_CLI_PREFERENCE = ("claude", "cursor-agent", "codex", "gemini")
 
+# Extraction and dedupe checks are bounded digest work, and this alias keeps
+# following the current cheap model. It is fixed rather than read from
+# consolidate_model, because that setting names a model on the
+# OpenAI-compatible endpoint, which the claude CLI would reject.
+CLAUDE_CLI_MODEL = "haiku"
+
 # Seconds a host CLI gets to answer. Sized for the big job: a whole transcript
 # window to extract memories from. Callers with a small prompt pass a smaller
 # budget.
@@ -199,9 +205,22 @@ def call_host_cli(
     evidence the CLI is broken, and their success is not evidence it is healthy.
     """
     if cli == "claude":
-        # claude -p reads the prompt from stdin or as a positional arg.
-        # --output-format text gives us the raw text response (no JSON envelope).
-        cmd = ["claude", "-p", "--output-format", "text"]
+        # Keep the prompt on stdin because some Claude flags are variadic and can
+        # swallow a positional prompt. --output-format text gives raw text. These
+        # three trimming flags keep the user's CLAUDE.md, skills, MCP servers, and
+        # hooks out of a run that only reads a prompt and prints JSON.
+        cmd = [
+            "claude",
+            "-p",
+            "--output-format",
+            "text",
+            "--model",
+            CLAUDE_CLI_MODEL,
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+        ]
     elif cli == "cursor-agent":
         cmd = ["cursor-agent", "-p"]
     elif cli == "codex":
@@ -216,7 +235,9 @@ def call_host_cli(
         sys.stderr.write(f"poppy consolidate: unknown cli {cli!r}\n")
         return None
 
-    child_env = {**os.environ, "POPPY_SUPPRESS_HOOKS": "1"}
+    # Claude's auto-memory index loads whatever --setting-sources says, and no
+    # flag turns it off. The other CLIs ignore this variable.
+    child_env = {**os.environ, "POPPY_SUPPRESS_HOOKS": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
     try:
         if cli == "codex":
             # Codex also reads extra prompt text from stdin when it is open, so
