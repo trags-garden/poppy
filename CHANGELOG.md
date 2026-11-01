@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy setup trags` now shows how long a pairing code is valid, offers a fresh code after expiry in a terminal, and distinguishes expired codes from codes that were not recognized or were already used.
+
 ### Changed
 
 - The README now lists every MCP tool, states that `remember`, `forget` and `edit` are not gated by capture consent, and documents the remaining user-facing environment variables.
