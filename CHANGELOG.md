@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `poppy remember --help` no longer claims `--project` is detected from the working directory. Without the flag, the memory is stored with no project.
+
 ## [0.3.7] - 2026-11-02
 
 ### Added
