@@ -185,7 +185,7 @@ def _update_notice_epilogue(ctx: click.Context, result):
 @cli.command()
 @click.argument("content")
 @click.option("--type", "memory_type", default="fact", type=click.Choice(WRITABLE_MEMORY_TYPES))
-@click.option("--project", default=None, help="Project name (auto-detected from cwd if not set)")
+@click.option("--project", default=None, help="Project name. Without it the memory is stored with no project")
 @click.option("--ttl", default=None, help="Expire after duration (e.g. 30d, 12h, 1w3d)")
 @click.option("--expires-at", default=None, help="Expire at ISO-8601 datetime (mutually exclusive with --ttl)")
 @click.option("--supersedes", default=None, help="ID of a memory this one replaces (tombstones the old)")

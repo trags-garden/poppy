@@ -262,6 +262,23 @@ def test_remember_prints_new_memory_id(tmp_path):
     assert f"  id: {mem_id}\n" in result.output
 
 
+def test_remember_without_project_stores_no_project(tmp_path, monkeypatch):
+    """The --project help must match the behaviour: no flag means no project,
+    even inside a git repo, where a cwd-based guess would find one."""
+    repo = tmp_path / "some-repo"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.chdir(repo)
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path / "poppy")}
+
+    help_text = runner.invoke(cli, ["remember", "--help"], env=env).output
+    assert "stored with no project" in " ".join(help_text.split())
+
+    assert runner.invoke(cli, ["remember", "prefer pnpm in monorepos"], env=env).exit_code == 0
+    rows = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)
+    assert [row.get("project") for row in rows] == [None]
+
+
 def test_remember_supersedes_prints_new_id(tmp_path):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}

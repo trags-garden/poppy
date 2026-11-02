@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A new device no longer uploads every memory it just pulled on its first `poppy sync push`. Rows created or edited locally are still sent.
 - `poppy sync pull` now names the memories whose remote version it discarded because the local copy, an edit or a deletion, is newer.
+- `poppy remember --help` no longer claims `--project` is detected from the working directory. Without the flag, the memory is stored with no project.
 
 ## [0.3.7] - 2026-11-02
 
