@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1120,10 +1121,17 @@ def check_codex(ctx: DoctorContext) -> None:
         # capture must not make this line read OK while the Codex hooks are dead.
         codex_last_capture = _codex_journal.read_last(poppy_dir, source="codex")
         if codex_last_capture is not None:
+            hooks_changed = safe_read(
+                lambda: datetime.fromisoformat(codex_last_capture.ts).timestamp() < codex_hooks_path.stat().st_mtime,
+                False,
+            )
             line(
                 "Codex capture liveness",
-                "OK",
-                f"last capture at {codex_last_capture.ts}, {codex_last_capture.count} stored",
+                "WARN" if hooks_changed else "OK",
+                "no captures observed since the hooks changed"
+                if hooks_changed
+                else f"last capture at {codex_last_capture.ts}, {codex_last_capture.count} stored",
+                hint="open Codex in the TUI and re-trust the Poppy hooks" if hooks_changed else "",
             )
         elif not capture_expected:
             # Auto-capture isn't active: no capture is expected, not a fault.

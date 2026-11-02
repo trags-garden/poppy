@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Setup's unresolved `poppy` path warning now mentions hooks only for Claude Code, Cursor and Codex.
+- `poppy doctor` now warns when Codex has not captured since its hooks changed and asks you to re-trust the hooks.
 - A new device no longer uploads every memory it just pulled on its first `poppy sync push`. Rows created or edited locally are still sent.
 - `poppy sync pull` now names the memories whose remote version it discarded because the local copy, an edit or a deletion, is newer.
 - `poppy remember --help` no longer claims `--project` is detected from the working directory. Without the flag, the memory is stored with no project.
