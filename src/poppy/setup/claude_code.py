@@ -1216,6 +1216,9 @@ _HOOK_DEFS: dict[str, tuple[str, str]] = {
     "PostCompact": ("", "poppy hook post-compact"),
 }
 
+# Only former Poppy defaults may be migrated or dropped; custom matchers stay.
+_OBSOLETE_HOOK_MATCHERS = {"PreToolUse": {"Edit|Write", "Edit|Write|MultiEdit"}}
+
 # Legacy hooks we used to install but no longer do (still removed during setup
 # so an upgrade tidies the user's settings.json without breaking it).
 _LEGACY_HOOK_COMMANDS: dict[str, list[str]] = {
@@ -1277,7 +1280,7 @@ assert _CURSOR_HOOK_DEFS.keys() <= CURSOR_DOCUMENTED_HOOK_EVENTS
 _ALL_POPPY_HOOK_COMMANDS = {command for _matcher, command in (*_HOOK_DEFS.values(), *_CODEX_HOOK_DEFS.values())}
 
 
-_VERSIONED_POPPY_NAME = re.compile(r"poppy[-_.]v?\d")
+_VERSIONED_POPPY_NAME = re.compile(r"poppy[-_.]v?\d+(?:\.\d+)*(?:(?:a|b|rc|\.?dev|\.?post)\d*)?")
 
 
 def split_hook_command(command: object) -> list[str] | None:
@@ -1314,7 +1317,7 @@ def _hook_tail(command: object) -> tuple[str, ...] | None:
     name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
     # A pinned path can point at a versioned build such as `poppy-0.3.3` or
     # `poppy_v0.3.3`. Other names, like a user's `poppy-debug` wrapper, are not ours.
-    if name != "poppy" and not _VERSIONED_POPPY_NAME.match(name):
+    if name != "poppy" and not _VERSIONED_POPPY_NAME.fullmatch(name):
         return None
     return tuple(argv[1:])
 
@@ -1340,7 +1343,11 @@ def poppy_hook_command(canonical: str) -> str:
     target changes name on every upgrade.
     """
     executable = get_poppy_executable(resolve_symlinks=False)
-    quoted = subprocess.list2cmdline([executable]) if os.name == "nt" else shlex.quote(executable)
+    if os.name == "nt":
+        # Forward slashes work in cmd too, and keep Git Bash from eating backslashes.
+        quoted = subprocess.list2cmdline([executable.replace("\\", "/")])
+    else:
+        quoted = shlex.quote(executable)
     command = " ".join([quoted, *canonical.split()[1:]])
     if os.name != "nt" and (env := store_environment()):
         command = f"POPPY_DIR={shlex.quote(env['POPPY_DIR'])} {command}"
@@ -1667,28 +1674,36 @@ def _install_hook(claude_dir: Path, event: str) -> Path:
         commands = group.get("hooks", [])
         return len(commands) == 1 and _is_poppy_hook(commands[0].get("command"), canonical)
 
-    # A single-command group is Poppy's own. If none uses the current matcher,
-    # move an older one to it rather than adding a second Poppy group.
-    if not any(owned(g) and g.get("matcher") == matcher for g in groups):
-        stale = next((g for g in groups if owned(g)), None)
+    # Move a former default only if no group (including mixed groups) already
+    # runs Poppy with the current matcher.
+    obsolete_matchers = _OBSOLETE_HOOK_MATCHERS.get(event, set())
+    if not any(
+        g.get("matcher") == matcher and any(_is_poppy_hook(h.get("command"), canonical) for h in g.get("hooks", []))
+        for g in groups
+    ):
+        stale = next((g for g in groups if owned(g) and g.get("matcher") in obsolete_matchers), None)
         if stale is not None:
             stale["matcher"] = matcher
             changed = True
 
-    # Drop exact copies of Poppy's own groups, which older setups could leave.
+    # Drop obsolete owned defaults and exact copies of any owned group.
+    # Other matchers may be deliberate user customizations.
     seen: set[str] = set()
     deduped: list[dict] = []
     for group in groups:
         if owned(group):
             key = json.dumps(group, sort_keys=True)
-            if key in seen:
+            if group.get("matcher") in obsolete_matchers or key in seen:
                 changed = True
                 continue
             seen.add(key)
         deduped.append(group)
     settings["hooks"][event] = deduped
 
-    if not any(owned(g) and g.get("matcher") == matcher for g in deduped):
+    if not any(
+        g.get("matcher") == matcher and any(_is_poppy_hook(h.get("command"), canonical) for h in g.get("hooks", []))
+        for g in deduped
+    ):
         deduped.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
         changed = True
     if changed:

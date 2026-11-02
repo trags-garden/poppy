@@ -152,7 +152,31 @@ def test_windows_hook_store_override_keeps_original_command(tmp_path, monkeypatc
         assert path.read_text() == original
         groups = json.loads(path.read_text())["hooks"]["SessionStart"]
         assert len(groups) == 1
-        assert groups[0]["hooks"] == [{"type": "command", "command": f'"{executable}" hook session-start'}]
+        assert groups[0]["hooks"] == [
+            {"type": "command", "command": '"C:/Program Files/Poppy/poppy.exe" hook session-start'}
+        ]
+        assert is_hook_installed(tmp_path, "SessionStart")
+
+
+@pytest.mark.parametrize("executable", [r"C:\Users\x\poppy.exe", r"C:\Program Files\Poppy\poppy.exe"])
+def test_windows_hook_command_survives_posix_shell(tmp_path, monkeypatch, executable):
+    setup = sys.modules[install_session_start_hook.__module__]
+    monkeypatch.setattr(setup, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(setup, "get_poppy_executable", lambda **_kwargs: executable)
+    legacy = f"{subprocess.list2cmdline([executable])} hook session-start"
+    assert split_hook_command(legacy) == [executable, "hook", "session-start"]
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"command": legacy}]}]}}))
+    assert is_hook_installed(tmp_path, "SessionStart")
+
+    for _ in range(3):
+        install_session_start_hook(tmp_path)
+        groups = json.loads(path.read_text())["hooks"]["SessionStart"]
+        assert len(groups) == 1
+        command = groups[0]["hooks"][0]["command"]
+        expected = [executable.replace("\\", "/"), "hook", "session-start"]
+        assert shlex.split(command, posix=True) == expected
+        assert split_hook_command(command) == expected
         assert is_hook_installed(tmp_path, "SessionStart")
 
 
@@ -300,7 +324,8 @@ def test_install_hook_idempotent(tmp_path):
     assert len(matching) == 1
 
 
-def test_install_pre_tool_use_hook_migrates_owned_stale_matcher(tmp_path):
+@pytest.mark.parametrize("matcher", ["Edit|Write", "Edit|Write|MultiEdit"])
+def test_install_pre_tool_use_hook_migrates_owned_stale_matcher(tmp_path, matcher):
     settings_path = tmp_path / "settings.json"
     user_group = {
         "matcher": "Bash",
@@ -312,7 +337,7 @@ def test_install_pre_tool_use_hook_migrates_owned_stale_matcher(tmp_path):
                 "hooks": {
                     "PreToolUse": [
                         {
-                            "matcher": "Edit|Write|MultiEdit",
+                            "matcher": matcher,
                             "hooks": [{"type": "command", "command": "poppy hook pre-tool-use"}],
                         },
                         user_group,
@@ -332,13 +357,14 @@ def test_install_pre_tool_use_hook_migrates_owned_stale_matcher(tmp_path):
     assert settings_path.read_text() == after_migration
 
 
-def test_install_pre_tool_use_hook_rewrites_mixed_group_command_and_adds_poppy_group(tmp_path):
+@pytest.mark.parametrize("matcher", ["Edit|Write|MultiEdit", "Edit|Write|NotebookEdit"])
+def test_install_pre_tool_use_hook_rewrites_mixed_group(tmp_path, matcher):
     settings_path = tmp_path / "settings.json"
     settings = {
         "hooks": {
             "PreToolUse": [
                 {
-                    "matcher": "Edit|Write|MultiEdit",
+                    "matcher": matcher,
                     "hooks": [
                         {"type": "command", "command": "poppy hook pre-tool-use"},
                         {"type": "command", "command": "user's other hook"},
@@ -352,17 +378,58 @@ def test_install_pre_tool_use_hook_rewrites_mixed_group_command_and_adds_poppy_g
     install_pre_tool_use_hook(tmp_path)
 
     # The group may be user-owned, so its matcher and the user's hook stay as
-    # written; only Poppy's own command moves to the resolved executable. Poppy
-    # has no group of its own with the current matcher, so one is added.
+    # written; only Poppy's own command moves to the resolved executable.
+    # Add a group only if the mixed group doesn't already use the current matcher.
     group = settings["hooks"]["PreToolUse"][0]
     group["hooks"][0]["command"] = hook_cmd(tmp_path, "pre-tool-use")
-    settings["hooks"]["PreToolUse"].append(
-        {
-            "matcher": "Edit|Write|NotebookEdit",
-            "hooks": [{"type": "command", "command": hook_cmd(tmp_path, "pre-tool-use")}],
-        }
-    )
+    if matcher != "Edit|Write|NotebookEdit":
+        settings["hooks"]["PreToolUse"].append(
+            {
+                "matcher": "Edit|Write|NotebookEdit",
+                "hooks": [{"type": "command", "command": hook_cmd(tmp_path, "pre-tool-use")}],
+            }
+        )
     assert json.loads(settings_path.read_text()) == settings
+    first = settings_path.read_text()
+    install_pre_tool_use_hook(tmp_path)
+    assert settings_path.read_text() == first
+
+
+@pytest.mark.parametrize("stale_first", [True, False])
+@pytest.mark.parametrize("mixed_current", [False, True])
+def test_install_pre_tool_use_hook_drops_owned_stale_matcher_with_current_group(tmp_path, stale_first, mixed_current):
+    stale = {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "poppy hook pre-tool-use"}]}
+    current = {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [{"type": "command", "command": "/old/bin/poppy-0.3.3 hook pre-tool-use", "timeout": 17}],
+    }
+    if mixed_current:
+        current["hooks"].append({"type": "command", "command": "user's hook"})
+    groups = [stale, current] if stale_first else [current, stale]
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"hooks": {"PreToolUse": groups}}))
+    current["hooks"][0]["command"] = hook_cmd(tmp_path, "pre-tool-use")
+
+    for _ in range(3):
+        install_pre_tool_use_hook(tmp_path)
+        assert json.loads(path.read_text())["hooks"]["PreToolUse"] == [current]
+
+
+@pytest.mark.parametrize("with_current", [False, True])
+def test_install_pre_tool_use_hook_preserves_owned_custom_matcher(tmp_path, with_current):
+    custom = {"matcher": "Read", "hooks": [{"type": "command", "command": "poppy hook pre-tool-use"}]}
+    current = {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [{"type": "command", "command": "poppy hook pre-tool-use"}],
+    }
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"hooks": {"PreToolUse": [custom, current] if with_current else [custom]}}))
+    custom["hooks"][0]["command"] = hook_cmd(tmp_path, "pre-tool-use")
+    current["hooks"][0]["command"] = hook_cmd(tmp_path, "pre-tool-use")
+
+    for _ in range(2):
+        install_pre_tool_use_hook(tmp_path)
+        assert json.loads(path.read_text())["hooks"]["PreToolUse"] == [custom, current]
 
 
 @pytest.mark.parametrize(
@@ -565,10 +632,14 @@ def test_hooks_pin_the_python_sibling_shim_when_poppy_is_not_on_path(tmp_path, m
     assert mcp["command"] == str(venv_bin / "poppy")
 
 
-def test_hook_recognition_accepts_versioned_builds_but_not_other_poppy_named_tools(tmp_path):
+@pytest.mark.parametrize("versioned_name", ["poppy-0.3.3", "poppy_v0.3.3", "poppy-0.4.0rc1", "poppy-0.3.8.dev0"])
+@pytest.mark.parametrize("wrapper_name", ["poppy-2fa", "poppy-debug"])
+def test_hook_recognition_accepts_versioned_builds_but_not_other_poppy_named_tools(
+    tmp_path, versioned_name, wrapper_name
+):
     settings_path = tmp_path / "settings.json"
-    versioned = {"type": "command", "command": "/opt/bin/poppy_v0.3.3 hook session-start"}
-    wrapper = {"type": "command", "command": "/usr/local/bin/poppy-debug hook session-start"}
+    versioned = {"type": "command", "command": f"/opt/bin/{versioned_name} hook session-start"}
+    wrapper = {"type": "command", "command": f"/usr/local/bin/{wrapper_name} hook session-start"}
     settings_path.write_text(
         json.dumps(
             {
