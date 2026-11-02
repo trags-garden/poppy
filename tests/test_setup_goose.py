@@ -56,6 +56,21 @@ def test_install_writes_config_yaml(tmp_path: Path) -> None:
     assert paths["config.yaml"] == tmp_path / "config.yaml"
 
 
+def test_install_keeps_executable_symlink(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "poppy-0.3.3"
+    target.touch()
+    shim = tmp_path / "bin" / "poppy"
+    shim.parent.mkdir()
+    shim.symlink_to(target)
+    monkeypatch.setattr("poppy.setup.claude_code.shutil.which", lambda _name: str(shim))
+
+    for _ in range(3):
+        install_for_goose(goose_config_dir=tmp_path / "goose")
+        config = (tmp_path / "goose" / "config.yaml").read_text()
+        assert f"cmd: {shim}\n" in config
+        assert str(target) not in config
+
+
 def test_install_writes_primer(tmp_path: Path) -> None:
     install_for_goose(goose_config_dir=tmp_path)
     hints = tmp_path / ".goosehints"

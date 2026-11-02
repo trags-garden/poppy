@@ -133,6 +133,14 @@ than something that holds the next release back.
 
 `poppy doctor` checks the integrations installed on your machine.
 
+Setup treats any hook command of the form `<path>/poppy hook <event>` (including
+a versioned executable name such as `poppy-0.3.3`) as Poppy's own. It rewrites
+these commands to the current executable, so a deliberate pin to a development
+install is overwritten on the next setup and removed by `--remove`. Before
+downgrading, run `poppy setup <client> --remove` with the current version, then
+set up again with the older version. Older versions do not recognise
+absolute-path hook entries and would add duplicates.
+
 ### Claude Code plugin
 
 Claude Code can also load Poppy as a plugin, in place of
