@@ -1023,7 +1023,7 @@ def test_doctor_codex_changed_hooks_do_not_warn_when_capture_disabled(tmp_path):
     result = runner.invoke(cli, ["doctor"], env=env)
 
     assert result.exit_code == 0, result.output
-    assert "Codex capture liveness: INFO, no capture yet (auto-capture not active)" in result.output
+    assert f"Codex capture liveness: OK, last capture at {capture.ts}, 2 stored" in result.output
     assert "Codex capture liveness: WARN" not in result.output
     assert "re-trust" not in result.output
 
