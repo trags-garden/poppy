@@ -99,6 +99,11 @@ class RemoteState:
     # whose save never lands is a pass still owed.
     push_watermark_v: int = 0
 
+    # Exact live versions learned from this remote. ID membership alone cannot
+    # distinguish a pulled row from an unpushed local edit of that row. Saved
+    # with the pull watermark so a restart retains the same evidence.
+    pulled_live_versions: dict[str, str] = field(default_factory=dict)
+
     # -- Back-compat read helpers (single-slot callers/tests) ---------------
     @property
     def last_error(self) -> str | None:
@@ -219,6 +224,11 @@ def _merge_remote(a: RemoteState, b: RemoteState) -> RemoteState:
         # merge claiming the newer generation would retire the recovery pass while
         # carrying the very value that pass exists to distrust.
         push_watermark_v=min(a.push_watermark_v, b.push_watermark_v),
+        # Keep only agreed sightings: absence may mean the other record learned
+        # of a deletion. Dropping ambiguous evidence only costs a retry.
+        pulled_live_versions={
+            key: value for key, value in a.pulled_live_versions.items() if b.pulled_live_versions.get(key) == value
+        },
     )
 
 

@@ -1857,6 +1857,8 @@ def test_forget_a_capped_memory_clears_banner_on_clean_push(tmp_path):
         pull(engine=engine, tombstones=tombstones, client=remote, state=load(tmp_path), poppy_dir=tmp_path).applied_live
         == 1
     )
+    # An unchanged pulled row needs no upload; make local work for this refusal.
+    engine.ingest(_memory("X", updated=_NOW + timedelta(seconds=1)))
     with pytest.raises(TragsQuotaError):
         push(engine=engine, tombstones=tombstones, client=_CapClient(), state=load(tmp_path), poppy_dir=tmp_path)
     assert load(tmp_path).remotes["https://trags.test"].errors.get("push") == _QUOTA_MSG
@@ -4734,3 +4736,250 @@ def test_dashboard_keeps_deletion_the_current_server_may_hold_from_a_lost_upload
     assert (result.pull.applied_live, result.push.sent_tombstones) == (0, 1)
     assert engine.get("X") is None
     assert is_tombstone(new.rows_by_id["X"])
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+def test_fresh_pull_then_push_sends_no_live_rows(tmp_path, reopen):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(
+        rows=[memory_to_wire(_memory(f"r{n}", updated=_NOW + timedelta(seconds=n))) for n in range(22)]
+    )
+    state = SyncState()
+    assert pull(engine=engine, tombstones=tombstones, client=client, state=state, poppy_dir=tmp_path).applied_live == 22
+    if reopen:
+        engine, tombstones = _engine_and_tombstones(tmp_path)
+        state = load(tmp_path)
+    result = push(engine=engine, tombstones=tombstones, client=client, state=state, poppy_dir=tmp_path)
+    assert (result.sent_live, result.sent_tombstones, result.errors) == (0, 0, 0)
+    assert client.upserts == []
+    assert load(tmp_path).remotes[client.base_url].last_pushed_at is None
+
+
+def test_first_pull_does_not_hide_older_local_rows_or_newer_local_conflicts(tmp_path):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("local-only", updated=_NOW - timedelta(days=1)))
+    engine.ingest(_memory("conflict", updated=_NOW + timedelta(seconds=1)))
+    client = _FakeClient(
+        rows=[
+            memory_to_wire(_memory("conflict", updated=_NOW)),
+            memory_to_wire(_memory("remote", updated=_NOW + timedelta(days=1))),
+        ]
+    )
+    result = pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert result.stale_ids == ["conflict"]
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert (result.sent_live, result.errors) == (2, 0)
+    assert [row["id"] for row in client.upserts] == ["local-only", "conflict"]
+    assert load(tmp_path).remotes[client.base_url].last_pushed_at == (_NOW + timedelta(seconds=1)).isoformat()
+
+
+@pytest.mark.parametrize("same_timestamp", [False, True])
+def test_local_edit_after_pull_is_not_an_echo(tmp_path, same_timestamp):
+    from dataclasses import replace
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW))])
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    edited = replace(
+        engine.get("remote"),
+        content="edited locally",
+        updated_at=_NOW if same_timestamp else _NOW + timedelta(seconds=1),
+    )
+    engine.ingest(edited)
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.sent_live == 1
+    assert client.upserts == [memory_to_wire(edited)]
+
+
+def test_pulled_tombstone_and_local_deletion_keep_separate_sent_marks(tmp_path, forget_memory):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    deleted = memory_to_wire(_memory("remote-deletion", updated=_NOW))
+    deleted["deleted_at"] = deleted["updated_at"]
+    client = _FakeClient(rows=[deleted, memory_to_wire(_memory("local-deletion", updated=_NOW))])
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    forget_memory(engine, tombstones, tmp_path, "local-deletion")
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert (result.sent_live, result.sent_tombstones) == (0, 1)
+    assert client.upserts[0]["id"] == "local-deletion"
+    assert is_tombstone(client.upserts[0])
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_interrupted_pull_state_save_cannot_hide_local_work(tmp_path, monkeypatch, saved):
+    import poppy.sync as sync_module
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("local", updated=_NOW - timedelta(days=1)))
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW))])
+    original = sync_module.mutate_remote
+
+    def interrupt(*args):
+        if saved:
+            original(*args)
+        raise RuntimeError("interrupted")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync_module, "mutate_remote", interrupt)
+        with pytest.raises(RuntimeError, match="interrupted"):
+            pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.errors == 0
+    assert {row["id"] for row in client.upserts} == ({"local"} if saved else {"local", "remote"})
+
+
+def test_edit_during_pull_is_not_certified_as_remote(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW))])
+    original = tombstones.note_remote_memories
+
+    def edit_before_save(*args):
+        engine.ingest(
+            replace(
+                engine.get("remote"), content="local edit before pull saved", updated_at=_NOW + timedelta(seconds=1)
+            )
+        )
+        original(*args)
+
+    monkeypatch.setattr(tombstones, "note_remote_memories", edit_before_save)
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.sent_live == 1
+    assert client.upserts[0]["content"] == "local edit before pull saved"
+
+
+def test_pulled_versions_do_not_unfreeze_failed_local_rows(tmp_path):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("failed", updated=_NOW))
+    engine.ingest(_memory("later", updated=_NOW + timedelta(seconds=2)))
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW + timedelta(seconds=1)))])
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    failing = _FakeClient(upsert_error=TragsError("500"), fail_after=0)
+    result = push(engine=engine, tombstones=tombstones, client=failing, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.errors == 2
+    assert load(tmp_path).remotes[client.base_url].last_pushed_at is None
+    result = push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    assert result.sent_live == 2
+    assert [row["id"] for row in client.upserts] == ["failed", "later"]
+
+
+def test_live_pull_fingerprints_normalize_offsets_and_are_per_remote(tmp_path):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    offset = timezone(timedelta(hours=2))
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW.astimezone(offset)))])
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert (
+        push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path).sent_live
+        == 0
+    )
+    other = _FakeClient(base_url="https://other.test")
+    assert (
+        push(engine=engine, tombstones=tombstones, client=other, state=load(tmp_path), poppy_dir=tmp_path).sent_live
+        == 1
+    )
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_sync_skips_versions_that_pull_applies(tmp_path, dry_run):
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    engine.ingest(_memory("remote", updated=_NOW - timedelta(seconds=1)))
+    engine.ingest(_memory("local", updated=_NOW - timedelta(days=1)))
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW))])
+    result = sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path, dry_run=dry_run)
+    assert (result.pull.applied_live, result.push.sent_live) == (1, 1)
+    if dry_run:
+        assert not (tmp_path / "sync_state.json").exists()
+        assert client.upserts == []
+    else:
+        assert [row["id"] for row in client.upserts] == ["local"]
+
+
+@pytest.mark.parametrize("count", [1, 12])
+def test_cli_pull_names_discarded_stale_remote_versions(tmp_path, monkeypatch, count):
+    engine, _ = _engine_and_tombstones(tmp_path)
+    rows = []
+    for n in range(count):
+        mid = f"stale-{n:02d}"
+        engine.ingest(_memory(mid, updated=_NOW + timedelta(seconds=1)))
+        rows.append(memory_to_wire(_memory(mid, updated=_NOW)))
+    result = _run_cli(tmp_path, monkeypatch, _FakeClient(rows=rows), ["sync", "pull"])
+    assert result.exit_code == 0, result.output
+    assert "Remote version discarded because the local copy (edit or deletion) is newer:" in result.output
+    for n in range(min(count, 10)):
+        assert f"stale-{n:02d}" in result.output
+    if count > 10:
+        assert "stale-10" not in result.output
+        assert "and 2 more" in result.output
+
+
+@pytest.mark.parametrize("repair", ["generation", "offset", "future", "rewrite"])
+def test_pulled_versions_do_not_bypass_watermark_recovery_pass(tmp_path, repair, monkeypatch):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW))])
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    state = load(tmp_path)
+    remote = state.remotes[client.base_url]
+    remote.push_watermark_v = PUSH_WATERMARK_VERSION
+    remote.last_pushed_at = _NOW.isoformat()
+    if repair == "generation":
+        remote.push_watermark_v = 0
+    elif repair == "offset":
+        remote.last_pushed_at = _NOW.astimezone(timezone(timedelta(hours=2))).isoformat()
+    elif repair == "future":
+        remote.last_pushed_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    else:
+        monkeypatch.setattr(tombstones, "repush_stamp", lambda: "rewrite-event")
+    save(tmp_path, state)
+    assert (
+        push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path).sent_live
+        == 1
+    )
+
+
+def test_future_pulled_version_does_not_hide_an_honest_local_edit(tmp_path):
+    from dataclasses import replace
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(
+        rows=[memory_to_wire(_memory("remote", updated=datetime.now(timezone.utc) + timedelta(days=1)))]
+    )
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert (
+        push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path).sent_live
+        == 0
+    )
+    assert load(tmp_path).remotes[client.base_url].last_pushed_at is None
+    engine.ingest(replace(engine.get("remote"), content="honest local edit", updated_at=datetime.now(timezone.utc)))
+    assert (
+        push(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path).sent_live
+        == 1
+    )
+    assert client.upserts[0]["content"] == "honest local edit"
+
+
+@pytest.mark.parametrize("via_pull", [False, True])
+def test_pulled_live_evidence_is_removed_when_remote_holds_a_deletion(tmp_path, via_pull):
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    client = _FakeClient(rows=[memory_to_wire(_memory("remote", updated=_NOW))])
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+    assert "remote" in load(tmp_path).remotes[client.base_url].pulled_live_versions
+    if via_pull:
+        row = memory_to_wire(_memory("remote", updated=_NOW + timedelta(seconds=1)))
+        row["deleted_at"] = row["updated_at"]
+        client._rows = [row]
+        pull(engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path)
+    else:
+        engine.delete("remote")
+        tombstones.add(_memory("remote", updated=_NOW), tombstoned_at=_NOW + timedelta(seconds=1))
+        assert (
+            push(
+                engine=engine, tombstones=tombstones, client=client, state=load(tmp_path), poppy_dir=tmp_path
+            ).sent_tombstones
+            == 1
+        )
+    assert load(tmp_path).remotes[client.base_url].pulled_live_versions == {}

@@ -2360,6 +2360,11 @@ def _print_pull(res) -> None:
         f"  pull: {res.applied_live} live, {res.applied_tombstones} tombstones, "
         f"{res.skipped_stale} skipped (local newer), {res.errors} errors"
     )
+    if res.stale_ids:
+        ids = ", ".join(res.stale_ids[:10])
+        if len(res.stale_ids) > 10:
+            ids += f", and {len(res.stale_ids) - 10} more"
+        click.echo(f"    Remote version discarded because the local copy (edit or deletion) is newer: {ids}")
 
 
 @sync_group.command("push")
