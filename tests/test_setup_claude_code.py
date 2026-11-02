@@ -892,6 +892,16 @@ def test_install_codex_writes_toml_and_primer_idempotently(tmp_path, monkeypatch
     assert primer_text.count(CLAUDE_MD_END) == 1
 
 
+def test_install_codex_hooks_preserves_mtime_when_unchanged(tmp_path):
+    hooks_path = install_codex_hooks(tmp_path)
+    previous_mtime = hooks_path.stat().st_mtime_ns - 60_000_000_000
+    os.utime(hooks_path, ns=(previous_mtime, previous_mtime))
+
+    install_codex_hooks(tmp_path)
+
+    assert hooks_path.stat().st_mtime_ns == previous_mtime
+
+
 def test_install_codex_hooks_merges_migrates_and_is_idempotent(tmp_path):
     hooks_path = tmp_path / "hooks.json"
     hooks_path.write_text(

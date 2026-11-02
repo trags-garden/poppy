@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Setup's unresolved `poppy` path warning now mentions hooks only for Claude Code, Cursor and Codex.
+- `poppy doctor` now warns when Codex has not captured since its hooks changed and asks you to re-trust the hooks.
 - Windows setup now writes hook commands that preserve executable paths in Git Bash, including paths without spaces.
 - Claude Code setup no longer adds a duplicate Poppy hook when a mixed group already runs it with the current matcher.
-- Claude Code setup now removes Poppy-owned groups with older matchers when a current-matcher group exists.
+- Claude Code setup now removes Poppy-owned groups left on a former default matcher. Custom matchers are kept.
 - Goose setup now keeps the executable shim path instead of resolving its symlink, matching other clients and surviving upgrades.
 - Setup no longer rewrites hooks for unrelated executables such as `poppy-2fa`; versioned names such as `poppy-0.3.3` remain recognised.
 - A new device no longer uploads every memory it just pulled on its first `poppy sync push`. Rows created or edited locally are still sent.

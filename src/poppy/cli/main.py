@@ -1706,16 +1706,19 @@ def setup():
 def _print_install_paths(paths: dict, client: str) -> None:
     for label, path in paths.items():
         click.echo(f"  {label}: {path}")
-    _warn_if_poppy_unresolved()
+    _warn_if_poppy_unresolved(client)
     click.echo(f"\nPoppy is ready. Restart {client} to activate.")
 
 
-def _warn_if_poppy_unresolved() -> None:
+def _warn_if_poppy_unresolved(client: str) -> None:
     from poppy.setup.claude_code import get_poppy_executable
 
     if get_poppy_executable() == "poppy":
+        subject = (
+            "the MCP entry and hooks use" if client in {"claude-code", "cursor", "codex"} else "the MCP entry uses"
+        )
         click.echo(
-            "Warning: poppy could not be resolved to an absolute path, so the MCP entry and hooks use the bare "
+            f"Warning: poppy could not be resolved to an absolute path, so {subject} the bare "
             "`poppy` command; the client may not find poppy on its PATH.",
             err=True,
         )
@@ -2033,7 +2036,7 @@ def setup_goose():
         raise click.ClickException(str(exc)) from exc
     for label, path in paths.items():
         click.echo(f"  {label}: {path}")
-    _warn_if_poppy_unresolved()
+    _warn_if_poppy_unresolved("goose")
     click.echo(
         "\nPoppy is registered as a Goose extension. Run `goose session` to "
         "start a session. Poppy will be available via the standard MCP tool surface."
@@ -2127,7 +2130,7 @@ def setup_claude_desktop(print_instructions: bool, print_import_prompt: bool):
             "Poppy wrote both config files due to this upstream issue: "
             "https://github.com/anthropics/claude-code/issues/26073"
         )
-    _warn_if_poppy_unresolved()
+    _warn_if_poppy_unresolved("claude-desktop")
     _record_agent_setup("claude-desktop")
     click.echo(
         "\nPoppy is ready. Restart the Claude desktop app to activate.\n"

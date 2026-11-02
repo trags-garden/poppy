@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import os
 import re
 import shlex
 from pathlib import Path
@@ -17,7 +18,14 @@ def test_mcp_setup_commands_warn_when_poppy_executable_cannot_be_resolved(tmp_pa
     monkeypatch.setattr("poppy.setup.claude_code.sys.executable", str(tmp_path / "missing" / "python"))
 
     cases = (
+        (["setup", "claude-code"], {}),
         (["setup", "cursor"], {}),
+        (["setup", "codex"], {"CODEX_HOME": str(tmp_path / "codex")}),
+        (["setup", "windsurf"], {}),
+        (["setup", "gemini"], {}),
+        (["setup", "vscode"], {}),
+        (["setup", "copilot-cli"], {}),
+        (["setup", "pi"], {}),
         (["setup", "goose"], {"POPPY_GOOSE_CONFIG_DIR": str(tmp_path / "goose")}),
         (
             ["setup", "claude-desktop"],
@@ -39,6 +47,11 @@ def test_mcp_setup_commands_warn_when_poppy_executable_cannot_be_resolved(tmp_pa
         assert result.exit_code == 0, result.output
         assert "Warning: poppy could not be resolved to an absolute path" in result.output
         assert "client may not find poppy on its PATH" in result.output
+        if args[1] in {"claude-code", "cursor", "codex"}:
+            assert "the MCP entry and hooks use the bare `poppy` command" in result.output
+        else:
+            assert "the MCP entry uses the bare `poppy` command" in result.output
+            assert "MCP entry and hooks" not in result.output
 
 
 def test_setup_codex_installs_hooks_and_explains_trust_gate(tmp_path):
@@ -969,11 +982,50 @@ def test_doctor_reports_codex_hooks_and_capture_liveness(tmp_path):
     still_dead = runner.invoke(cli, ["doctor"], env=env)
     assert "hooks installed but no capture observed" in still_dead.output
 
-    journal.record(poppy_dir, session_id="codex-session", project="poppy", count=2, items=[], source="codex")
+    capture = journal.record(poppy_dir, session_id="codex-session", project="poppy", count=2, items=[], source="codex")
+    capture_ts = dt.datetime.fromisoformat(capture.ts).timestamp()
+    hooks_path = codex_home / "hooks.json"
+    os.utime(hooks_path, (capture_ts - 60, capture_ts - 60))
     live = runner.invoke(cli, ["doctor"], env=env)
     assert live.exit_code == 0, live.output
     assert "Codex capture liveness: OK" in live.output
     assert "2 stored" in live.output
+
+    os.utime(hooks_path, (capture_ts + 60, capture_ts + 60))
+    stale = runner.invoke(cli, ["doctor"], env=env)
+    assert stale.exit_code == 0, stale.output
+    assert "Codex capture liveness: WARN, no captures observed since the hooks changed" in stale.output
+    assert f"(last at {capture.ts}, 2 stored)" in stale.output
+    assert "open Codex in the TUI and re-trust the Poppy hooks" in stale.output
+
+
+def test_doctor_codex_changed_hooks_do_not_warn_when_capture_disabled(tmp_path):
+    from poppy.capture import journal
+    from poppy.setup.claude_code import install_codex_hooks
+
+    poppy_dir = tmp_path / ".poppy"
+    codex_home = tmp_path / "codex-home"
+    hooks_path = install_codex_hooks(codex_home)
+    capture = journal.record(poppy_dir, session_id="codex-session", project="poppy", count=2, items=[], source="codex")
+    hooks_ts = dt.datetime.fromisoformat(capture.ts).timestamp() + 60
+    os.utime(hooks_path, (hooks_ts, hooks_ts))
+    runner = CliRunner()
+    env = {
+        "HOME": str(tmp_path),
+        "CODEX_HOME": str(codex_home),
+        "POPPY_DIR": str(poppy_dir),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+        "POPPY_CONSOLIDATE": None,
+    }
+    disabled = runner.invoke(cli, ["consent", "--disable"], env=env)
+    assert disabled.exit_code == 0, disabled.output
+
+    result = runner.invoke(cli, ["doctor"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert f"Codex capture liveness: OK, last capture at {capture.ts}, 2 stored" in result.output
+    assert "Codex capture liveness: WARN" not in result.output
+    assert "re-trust" not in result.output
 
 
 def test_doctor_reports_cursor_hooks_account_flag_and_capture_liveness(tmp_path):
