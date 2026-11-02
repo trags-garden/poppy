@@ -15,8 +15,11 @@ Mapping rules:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 
+from poppy.engine._timestamps import utc_iso
 from poppy.models import Memory, Source
 from poppy.tombstones import Tombstone
 
@@ -42,6 +45,18 @@ def memory_to_wire(memory: Memory) -> dict:
         "updated_at": _iso(memory.updated_at),
         "deleted_at": None,
     }
+
+
+def live_version(memory: Memory) -> str:
+    """Fingerprint the complete synced version, without keeping its text in state.
+
+    Timestamp spelling changes on ingest, so compare instants in UTC. Including
+    the body also catches edits that retain the same updated_at.
+    """
+    row = memory_to_wire(memory)
+    for key in ("created_at", "updated_at", "source_timestamp", "expires_at"):
+        row[key] = utc_iso(row[key])
+    return hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
 
 
 def tombstone_to_wire(tombstone: Tombstone) -> dict:

@@ -8,6 +8,8 @@ Watermarks are tracked per remote URL in ``~/.poppy/sync_state.json`` —
 push sends live rows updated after ``last_pushed_at`` and tombstones with
 known IDs that have not been sent to that remote. Pull fetches
 everything with ``updated_at >= last_pulled_at``.
+Exact live versions learned by pull need no upload; this evidence never moves
+the push watermark, which must still account for older local-only rows.
 
 Conflict policy: last-writer-wins by ``updated_at``. On push, we use
 upsert (POST) which the Trags server resolves server-side. On pull,
@@ -49,6 +51,7 @@ from poppy.sync.client import (
 from poppy.sync.serializer import (
     deletion_time,
     is_tombstone,
+    live_version,
     memory_to_wire,
     tombstone_to_wire,
     wire_to_memory,
@@ -107,6 +110,8 @@ class PullResult:
     # Virtual Trash after a dry-run pull, consumed by the same cycle's push.
     tombstone_preview: dict[str, Tombstone | None] = field(default_factory=dict, repr=False)
     known_ids: set[str] = field(default_factory=set, repr=False)
+    live_versions: dict[str, str] = field(default_factory=dict, repr=False)
+    stale_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -188,6 +193,7 @@ def push(
     already_authenticated: bool = False,
     tombstone_preview: dict[str, Tombstone | None] | None = None,
     known_ids_preview: set[str] | None = None,
+    live_versions_preview: dict[str, str] | None = None,
 ) -> PushResult:
     """Send local memories + tombstones to Trags.
 
@@ -219,10 +225,9 @@ def push(
     # honest — no per-row sent set, no hole for a single string to express. The
     # price is re-sending, on every push, every candidate the mark will not move
     # past: the future row itself, and — on a device whose own clock LAGS — the
-    # whole set of rows just pulled from other devices, which carry those devices'
-    # correct and locally still-future stamps. That worst case is a SET, not a row.
-    # Both are bounded by the skew and end when it does; upserts are idempotent and
-    # the server's freshness gate is the arbiter, so the cost is requests only.
+    # rows from other devices whose versions we cannot prove are already remote.
+    # Exact pulled versions are excluded below without advancing this watermark.
+    # Upserts are idempotent, so the cost of retrying is requests only.
     now = datetime.now(timezone.utc)
 
     def carries_watermark(iso: str) -> bool:
@@ -308,6 +313,15 @@ def push(
         if (owes_repush or watermark_respelled or owes_watermark_pass or watermark_unusable)
         else canonical_watermark
     )
+    # Recovery passes still send every row they were introduced to repair. A
+    # fresh remote (no old watermark) needs no such repair and can use pull's
+    # exact-version evidence even before its first push writes the generation.
+    use_pulled_versions = not (
+        owes_repush
+        or watermark_respelled
+        or watermark_unusable
+        or (owes_watermark_pass and stored_watermark is not None)
+    )
     # Error-slot GENERATIONS this cycle STARTED with. Clearing compares against
     # these so a clean push only resolves the exact failures it saw — never one a
     # concurrent sync recorded after this snapshot, even if the text is identical.
@@ -368,6 +382,14 @@ def push(
             continue  # The dry-run pull would have deleted this live row.
         iso = utc_iso(memory.updated_at)
         if watermark and iso <= watermark:
+            skipped += 1
+            continue
+        if use_pulled_versions and (
+            (dry_run and live_versions_preview and memory.id in live_versions_preview)
+            or remote.pulled_live_versions.get(memory.id) == live_version(memory)
+        ):
+            # Do not advance the scalar past older local work. This proves only
+            # this version, never a later edit or a sibling with an older clock.
             skipped += 1
             continue
         candidates.append((iso, "live", memory))
@@ -658,6 +680,9 @@ def push(
             # Runs on a FRESH read under the state lock, so counter deltas
             # accumulate and a concurrent sync's error slots survive.
             r.last_pushed_at = new_watermark
+            for ts in accepted_tombstones:
+                # The remote now holds a deletion, not the old live version.
+                r.pulled_live_versions.pop(ts.memory.id, None)
             # The generation the watermark on disk was written under, recorded by
             # the SAME save for the same reason ``repush_done_for`` is: a save that
             # never lands leaves the pass still owed. Unconditional — a pass that
@@ -984,6 +1009,7 @@ def pull(
     applied_live = 0
     applied_tombstones = 0
     skipped_stale = 0
+    stale_ids: list[str] = []
     errors = 0
     skipped_echoes = 0
     new_watermark = watermark
@@ -993,6 +1019,7 @@ def pull(
     last_pull_error: str | None = None
     tombstone_preview: dict[str, Tombstone | None] = {}
     known_ids: set[str] = set()
+    live_versions: dict[str, str] = {}
     seen_deletions: list[Tombstone] = []
 
     # Collect + parse, then sort oldest-first. Server returns newest-first,
@@ -1071,10 +1098,16 @@ def pull(
         # Even a stale row proves this ID exists. Pulled deletions are marked
         # sent at creation, so their sightings add no pending work.
         known_ids.add(incoming.id)
+        # Fingerprint the incoming snapshot, never a read after ingest: a local
+        # edit between ingest and that read must not be certified as remote.
+        live_versions.pop(incoming.id, None)
+        if outcome == "live":
+            live_versions[incoming.id] = live_version(incoming)
         if outcome == "echo":
             skipped_echoes += 1
         elif outcome == "stale":
             skipped_stale += 1
+            stale_ids.append(incoming.id)
         elif outcome == "tombstone":
             applied_tombstones += 1
         else:
@@ -1088,6 +1121,9 @@ def pull(
 
         def _persist(r: RemoteState) -> None:
             r.last_pulled_at = new_watermark
+            for mid in known_ids:
+                r.pulled_live_versions.pop(mid, None)
+            r.pulled_live_versions.update(live_versions)
             r.pulled_count += applied_live + applied_tombstones
             r.last_synced_at = datetime.now(timezone.utc).isoformat()
             if auth_exc is not None:
@@ -1108,6 +1144,11 @@ def pull(
                         r.error_gens.pop(kind, None)
 
         mutate_remote(poppy_dir, client.base_url, _persist)
+        # Callers may reuse their state object for a following push. Publish the
+        # evidence only after its durable save; a failed save can only cost retries.
+        for mid in known_ids:
+            remote.pulled_live_versions.pop(mid, None)
+        remote.pulled_live_versions.update(live_versions)
 
     if auth_exc is not None:
         raise auth_exc
@@ -1122,6 +1163,8 @@ def pull(
         skipped_echoes=skipped_echoes,
         tombstone_preview=tombstone_preview,
         known_ids=known_ids,
+        live_versions=live_versions,
+        stale_ids=stale_ids,
     )
 
 
@@ -1158,6 +1201,7 @@ def sync(
             already_authenticated=pull_res.errors == 0,
             tombstone_preview=pull_res.tombstone_preview,
             known_ids_preview=pull_res.known_ids,
+            live_versions_preview=pull_res.live_versions,
         )
     except (TragsTransportError, TragsResponseError) as exc:
         # The pull that just ran applied rows to the local store and the push
