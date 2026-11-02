@@ -1216,6 +1216,9 @@ _HOOK_DEFS: dict[str, tuple[str, str]] = {
     "PostCompact": ("", "poppy hook post-compact"),
 }
 
+# Only former Poppy defaults may be migrated or dropped; custom matchers stay.
+_OBSOLETE_HOOK_MATCHERS = {"PreToolUse": {"Edit|Write", "Edit|Write|MultiEdit"}}
+
 # Legacy hooks we used to install but no longer do (still removed during setup
 # so an upgrade tidies the user's settings.json without breaking it).
 _LEGACY_HOOK_COMMANDS: dict[str, list[str]] = {
@@ -1277,7 +1280,7 @@ assert _CURSOR_HOOK_DEFS.keys() <= CURSOR_DOCUMENTED_HOOK_EVENTS
 _ALL_POPPY_HOOK_COMMANDS = {command for _matcher, command in (*_HOOK_DEFS.values(), *_CODEX_HOOK_DEFS.values())}
 
 
-_VERSIONED_POPPY_NAME = re.compile(r"poppy[-_.]v?\d+(?:\.\d+)*")
+_VERSIONED_POPPY_NAME = re.compile(r"poppy[-_.]v?\d+(?:\.\d+)*(?:(?:a|b|rc|\.?dev|\.?post)\d*)?")
 
 
 def split_hook_command(command: object) -> list[str] | None:
@@ -1671,22 +1674,26 @@ def _install_hook(claude_dir: Path, event: str) -> Path:
         commands = group.get("hooks", [])
         return len(commands) == 1 and _is_poppy_hook(commands[0].get("command"), canonical)
 
-    # A single-command group is Poppy's own. If none uses the current matcher,
-    # move an older one to it rather than adding a second Poppy group.
-    if not any(owned(g) and g.get("matcher") == matcher for g in groups):
-        stale = next((g for g in groups if owned(g)), None)
+    # Move a former default only if no group (including mixed groups) already
+    # runs Poppy with the current matcher.
+    obsolete_matchers = _OBSOLETE_HOOK_MATCHERS.get(event, set())
+    if not any(
+        g.get("matcher") == matcher and any(_is_poppy_hook(h.get("command"), canonical) for h in g.get("hooks", []))
+        for g in groups
+    ):
+        stale = next((g for g in groups if owned(g) and g.get("matcher") in obsolete_matchers), None)
         if stale is not None:
             stale["matcher"] = matcher
             changed = True
 
-    # An owned current-matcher group now exists if any owned groups do. Drop
-    # older matchers and exact copies, which older setups could leave.
+    # Drop obsolete owned defaults and exact copies of any owned group.
+    # Other matchers may be deliberate user customizations.
     seen: set[str] = set()
     deduped: list[dict] = []
     for group in groups:
         if owned(group):
             key = json.dumps(group, sort_keys=True)
-            if group.get("matcher") != matcher or key in seen:
+            if group.get("matcher") in obsolete_matchers or key in seen:
                 changed = True
                 continue
             seen.add(key)
