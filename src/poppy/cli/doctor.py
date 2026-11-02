@@ -1120,7 +1120,7 @@ def check_codex(ctx: DoctorContext) -> None:
         # Only Codex-host records prove Codex capture is alive; a Claude Code
         # capture must not make this line read OK while the Codex hooks are dead.
         codex_last_capture = _codex_journal.read_last(poppy_dir, source="codex")
-        if codex_last_capture is not None:
+        if codex_last_capture is not None and capture_expected:
             hooks_changed = safe_read(
                 lambda: datetime.fromisoformat(codex_last_capture.ts).timestamp() < codex_hooks_path.stat().st_mtime,
                 False,
@@ -1128,7 +1128,8 @@ def check_codex(ctx: DoctorContext) -> None:
             line(
                 "Codex capture liveness",
                 "WARN" if hooks_changed else "OK",
-                "no captures observed since the hooks changed"
+                f"no captures observed since the hooks changed (last at {codex_last_capture.ts}, "
+                f"{codex_last_capture.count} stored)"
                 if hooks_changed
                 else f"last capture at {codex_last_capture.ts}, {codex_last_capture.count} stored",
                 hint="open Codex in the TUI and re-trust the Poppy hooks" if hooks_changed else "",

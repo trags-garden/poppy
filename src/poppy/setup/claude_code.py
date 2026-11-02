@@ -1519,6 +1519,7 @@ def install_codex_hooks(codex_home: Path | None = None) -> Path:
     hooks_path = (codex_home or get_codex_home()) / "hooks.json"
     target = _resolve_write_target(hooks_path)
     settings = _read_json(target, strict=True)
+    original = json.dumps(settings, sort_keys=True)
     hooks = _validate_hooks_object(settings, hooks_path, allow_null=True)
 
     # Preserve verbatim any shape the merger does not positively recognize as a
@@ -1569,7 +1570,9 @@ def install_codex_hooks(codex_home: Path | None = None) -> Path:
             )
 
     settings["hooks"] = merged
-    _write_json(hooks_path, settings, target=target)
+    changed = json.dumps(settings, sort_keys=True) != original
+    if changed:
+        _write_json(hooks_path, settings, target=target)
     return hooks_path
 
 

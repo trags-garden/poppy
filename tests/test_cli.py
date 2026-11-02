@@ -995,7 +995,37 @@ def test_doctor_reports_codex_hooks_and_capture_liveness(tmp_path):
     stale = runner.invoke(cli, ["doctor"], env=env)
     assert stale.exit_code == 0, stale.output
     assert "Codex capture liveness: WARN, no captures observed since the hooks changed" in stale.output
+    assert f"(last at {capture.ts}, 2 stored)" in stale.output
     assert "open Codex in the TUI and re-trust the Poppy hooks" in stale.output
+
+
+def test_doctor_codex_changed_hooks_do_not_warn_when_capture_disabled(tmp_path):
+    from poppy.capture import journal
+    from poppy.setup.claude_code import install_codex_hooks
+
+    poppy_dir = tmp_path / ".poppy"
+    codex_home = tmp_path / "codex-home"
+    hooks_path = install_codex_hooks(codex_home)
+    capture = journal.record(poppy_dir, session_id="codex-session", project="poppy", count=2, items=[], source="codex")
+    hooks_ts = dt.datetime.fromisoformat(capture.ts).timestamp() + 60
+    os.utime(hooks_path, (hooks_ts, hooks_ts))
+    runner = CliRunner()
+    env = {
+        "HOME": str(tmp_path),
+        "CODEX_HOME": str(codex_home),
+        "POPPY_DIR": str(poppy_dir),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
+        "POPPY_CONSOLIDATE": None,
+    }
+    disabled = runner.invoke(cli, ["consent", "--disable"], env=env)
+    assert disabled.exit_code == 0, disabled.output
+
+    result = runner.invoke(cli, ["doctor"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert "Codex capture liveness: INFO, no capture yet (auto-capture not active)" in result.output
+    assert "Codex capture liveness: WARN" not in result.output
+    assert "re-trust" not in result.output
 
 
 def test_doctor_reports_cursor_hooks_account_flag_and_capture_liveness(tmp_path):
