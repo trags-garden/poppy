@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A new device no longer uploads every memory it just pulled on its first `poppy sync push`. Rows created or edited locally are still sent.
-- `poppy sync pull` now names the memories whose remote version it discarded because the local edit is newer.
+- `poppy sync pull` now names the memories whose remote version it discarded because the local copy, an edit or a deletion, is newer.
 
 ## [0.3.7] - 2026-11-02
 

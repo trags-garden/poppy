@@ -386,7 +386,12 @@ def push(
             continue
         if use_pulled_versions and (
             (dry_run and live_versions_preview and memory.id in live_versions_preview)
-            or remote.pulled_live_versions.get(memory.id) == live_version(memory)
+            # Membership first: hashing every row on each push is wasted work for
+            # ids pull never saw.
+            or (
+                memory.id in remote.pulled_live_versions
+                and remote.pulled_live_versions[memory.id] == live_version(memory)
+            )
         ):
             # Do not advance the scalar past older local work. This proves only
             # this version, never a later edit or a sibling with an older clock.

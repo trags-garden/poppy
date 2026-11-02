@@ -2364,7 +2364,7 @@ def _print_pull(res) -> None:
         ids = ", ".join(res.stale_ids[:10])
         if len(res.stale_ids) > 10:
             ids += f", and {len(res.stale_ids) - 10} more"
-        click.echo(f"    Remote version discarded because the local edit is newer: {ids}")
+        click.echo(f"    Remote version discarded because the local copy (edit or deletion) is newer: {ids}")
 
 
 @sync_group.command("push")

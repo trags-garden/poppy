@@ -4909,7 +4909,7 @@ def test_cli_pull_names_discarded_stale_remote_versions(tmp_path, monkeypatch, c
         rows.append(memory_to_wire(_memory(mid, updated=_NOW)))
     result = _run_cli(tmp_path, monkeypatch, _FakeClient(rows=rows), ["sync", "pull"])
     assert result.exit_code == 0, result.output
-    assert "Remote version discarded because the local edit is newer:" in result.output
+    assert "Remote version discarded because the local copy (edit or deletion) is newer:" in result.output
     for n in range(min(count, 10)):
         assert f"stale-{n:02d}" in result.output
     if count > 10:
