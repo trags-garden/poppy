@@ -56,7 +56,7 @@ def _poppy_extension_block(indent: str = "  ") -> str:
     Two-space indent is the Goose convention. The block is anchored at
     ``  poppy:`` and contains keys at four-space indent.
     """
-    cmd = get_poppy_executable()
+    cmd = get_poppy_executable(resolve_symlinks=False)
     envs = json.dumps(store_environment())
     body = (
         f"{indent}{GOOSE_EXTENSION_NAME}:\n"
