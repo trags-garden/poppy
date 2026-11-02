@@ -1,6 +1,6 @@
 [project]
 name = "poppy-memory"
-version = "0.3.6"
+version = "0.3.7"
 description = "Developer memory CLI. Remember what matters."
 authors = [{name = "Trags"}]
 license = {text = "Apache-2.0"}
