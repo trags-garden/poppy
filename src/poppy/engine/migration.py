@@ -214,10 +214,9 @@ def list_targets(db_path: Path, model_id: str, filters: MigrateFilters) -> list[
     a write connection — SQLite serializes writers, so an open read cursor on
     the same DB blocks UPDATEs and produces ``database is locked``.
 
-    The active engine's content extractor is the engine's responsibility once
-    we hand back IDs — we read ``memories.content`` which is the canonical
-    column shared by every engine. Engines like ``bloom`` that index
-    enriched_content compute that derivation at re-embed time from content.
+    Content is a raw snapshot from the canonical column shared by every engine.
+    ``migrate`` re-reads it with the source timestamp and uses the active
+    engine's ``embed_text_for`` method when available to prepare embedding text.
     """
     if not db_path.exists():
         return []
@@ -268,6 +267,7 @@ def migrate(
             f"engine {type(engine).__name__} declares model_id={engine.model_id!r} "
             "but exposes no _embed(text) method; migration cannot proceed."
         )
+    embed_text_for = getattr(engine, "embed_text_for", None)
     targets = list_targets(db_path, engine.model_id, filters)
     total = len(targets)
     if total == 0:
@@ -281,22 +281,28 @@ def migrate(
             # embedding stale text while tagging the row with the active model_id
             # would leave a wrong vector that doctor then reports as compatible.
             # A row deleted in that window is skipped.
-            row = write_conn.execute("SELECT content FROM memories WHERE id = ?", (memory_id,)).fetchone()
+            row = write_conn.execute(
+                "SELECT content, source_timestamp FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()
             if row is None:
                 continue
-            content = row[0]
-            vec = embedder(content)
+            content, source_timestamp = row
+            text = embed_text_for(content, source_timestamp) if embed_text_for is not None else content
+            vec = embedder(text)
             blob = vec.tobytes()
             # Embedding can be slow, so it runs outside the lock; the write then
-            # re-verifies the content under BEGIN IMMEDIATE and only stores the
-            # vector if nothing changed during the embed. A concurrent seed edit
-            # that landed meanwhile has already invalidated the row's model_id,
-            # so skipping here leaves it a target for the next pass rather than
-            # overwriting that invalidation with a vector for the old text.
+            # re-verifies the raw content and timestamp under BEGIN IMMEDIATE.
+            # It only stores the vector if neither changed during the embed. A
+            # concurrent seed edit that landed meanwhile has already invalidated
+            # the row's model_id, so skipping here leaves it a target for the
+            # next pass rather than overwriting that invalidation with a vector
+            # for the old text.
             write_conn.execute("BEGIN IMMEDIATE")
             try:
-                current = write_conn.execute("SELECT content FROM memories WHERE id = ?", (memory_id,)).fetchone()
-                if current is None or current[0] != content:
+                current = write_conn.execute(
+                    "SELECT content, source_timestamp FROM memories WHERE id = ?", (memory_id,)
+                ).fetchone()
+                if current is None or current[0] != content or current[1] != source_timestamp:
                     write_conn.rollback()
                     continue
                 # INSERT OR REPLACE, not UPDATE: a target may have no embedding

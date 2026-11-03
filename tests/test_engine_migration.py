@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from poppy.db import connect
+from poppy.engine.bloom import BloomEngine
 from poppy.engine.migration import (
     MigrateFilters,
     count_targets,
@@ -173,6 +174,69 @@ def test_migrate_re_embeds_stale_rows_only(tmp_path: Path) -> None:
     assert final.unknown == 0
 
 
+@pytest.mark.parametrize(
+    "source_timestamp",
+    ["2026-07-01T23:30:00+00:00", "2026-07-02T01:30:00+02:00", "2026-07-01T23:30:00"],
+)
+@pytest.mark.parametrize("write_method", ["ingest", "supersede"])
+def test_migrate_conversation_matches_fresh_bloom_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_timestamp: str, write_method: str
+) -> None:
+    monkeypatch.setattr(BloomEngine, "_embed", _FakeEngine._embed)
+    db = tmp_path / "memories.db"
+    engine = BloomEngine(db_path=db)
+    memory = _make_memory("conversation", '[{"speaker": "A", "text": "hi"}, {"speaker": "B", "text": "yo"}]')
+    memory.source.timestamp = datetime.fromisoformat(source_timestamp)
+    if write_method == "supersede":
+        engine.ingest(_make_memory("old", "old content"))
+        engine.supersede("old", memory)
+    else:
+        engine.ingest(memory)
+
+    with connect(db) as conn:
+        fresh_vector = conn.execute("SELECT embedding FROM memory_embeddings WHERE id = ?", (memory.id,)).fetchone()[0]
+        expected_text = "Conversation on July 01, 2026 at 11:30 PM between A and B.\n\nA: hi\nB: yo"
+        assert fresh_vector == _FakeEngine()._embed(expected_text).tobytes()
+        conn.execute("UPDATE memory_embeddings SET model_id = 'other'")
+        # Seed edits can leave raw text here, so migration must derive its own text.
+        conn.execute("UPDATE memories SET enriched_content = content")
+
+    assert migrate(engine, db, MigrateFilters()) == 1
+    with connect(db) as conn:
+        migrated = conn.execute(
+            "SELECT embedding, model_id FROM memory_embeddings WHERE id = ?", (memory.id,)
+        ).fetchone()
+    assert migrated[0] == fresh_vector
+    assert migrated[1] == engine.model_id
+
+
+@pytest.mark.parametrize("content", ['[{"speaker": "A", "text": "hi"}, {"speaker": "B", "text": "yo"}]', "plain text"])
+def test_migrate_embedding_less_row_matches_fresh_bloom_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str
+) -> None:
+    monkeypatch.setattr(BloomEngine, "_embed", _FakeEngine._embed)
+    memory = _make_memory("m1", content)
+    memory.source.timestamp = datetime.fromisoformat("2026-07-02T01:30:00+02:00")
+    fresh_db = tmp_path / "fresh.db"
+    BloomEngine(db_path=fresh_db).ingest(memory)
+    with connect(fresh_db) as conn:
+        fresh_vector = conn.execute("SELECT embedding FROM memory_embeddings WHERE id = ?", (memory.id,)).fetchone()[0]
+
+    db = tmp_path / "seed.db"
+    SeedEngine(db_path=db).ingest(memory)
+    engine = BloomEngine(db_path=db)
+    with connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0] == 0
+
+    assert migrate(engine, db, MigrateFilters()) == 1
+    with connect(db) as conn:
+        migrated = conn.execute(
+            "SELECT embedding, model_id FROM memory_embeddings WHERE id = ?", (memory.id,)
+        ).fetchone()
+    assert migrated[0] == fresh_vector
+    assert migrated[1] == engine.model_id
+
+
 def test_migrate_is_idempotent_on_clean_db(tmp_path: Path) -> None:
     db = tmp_path / "memories.db"
     seed = [
@@ -266,8 +330,11 @@ def test_list_targets_orders_by_created_at(tmp_path: Path) -> None:
     assert ids == ["old", "mid", "new"]
 
 
-def test_migrate_skips_a_row_changed_during_embed(tmp_path: Path, monkeypatch) -> None:
-    """If content changes while _embed runs, the vector is not written."""
+@pytest.mark.parametrize(
+    "column, value", [("content", "NEW content"), ("source_timestamp", "2026-07-01T23:30:00+00:00")]
+)
+def test_migrate_skips_a_row_changed_during_embed(tmp_path: Path, monkeypatch, column: str, value: str) -> None:
+    """If an embedding input changes while _embed runs, the vector is not written."""
     db = tmp_path / "memories.db"
     _seed_with_baseline_and_attach_embeddings(
         db, [(_make_memory("m0", "kept"), "fake-bi-encoder-v1", np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))]
@@ -278,7 +345,7 @@ def test_migrate_skips_a_row_changed_during_embed(tmp_path: Path, monkeypatch) -
         def _embed(self, text: str) -> np.ndarray:
             # Simulate a concurrent seed edit landing while this embed runs.
             conn = connect(db)
-            conn.execute("UPDATE memories SET content = ? WHERE id = ?", ("NEW content", "m1"))
+            conn.execute(f"UPDATE memories SET {column} = ? WHERE id = ?", (value, "m1"))
             conn.commit()
             conn.close()
             return super()._embed(text)
