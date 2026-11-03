@@ -101,11 +101,16 @@ def _speaker_of(turn: dict) -> str | None:
     return speaker if isinstance(speaker, str) and speaker else None
 
 
+def _text_of(turn: dict) -> str | None:
+    text = turn.get("text")
+    return text if isinstance(text, str) and text else None
+
+
 def _enrich_full_content(content: str, session_timestamp: str | None = None) -> str:
     """Render turn lists with a preamble while preserving other list content."""
     try:
         turns = json.loads(content)
-        if not isinstance(turns, list) or not any(isinstance(turn, dict) for turn in turns):
+        if not isinstance(turns, list) or not any(isinstance(turn, dict) and _text_of(turn) for turn in turns):
             return content
     except (json.JSONDecodeError, TypeError):
         return content
@@ -114,7 +119,7 @@ def _enrich_full_content(content: str, session_timestamp: str | None = None) -> 
     speakers = []
     seen: set[str] = set()
     for turn in turns:
-        if not isinstance(turn, dict):
+        if not isinstance(turn, dict) or _text_of(turn) is None:
             continue
         speaker = _speaker_of(turn) or "Unknown"
         if speaker not in seen:
@@ -142,12 +147,12 @@ def _enrich_full_content(content: str, session_timestamp: str | None = None) -> 
     lines.append("")
 
     for turn in turns:
-        if not isinstance(turn, dict):
+        if not isinstance(turn, dict) or _text_of(turn) is None:
             lines.append(turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False))
             continue
         speaker = _speaker_of(turn) or "Unknown"
         dia_id = turn.get("dia_id", "")
-        text = turn.get("text", "")
+        text = _text_of(turn)
         if dia_id and text:
             lines.append(f"{dia_id} {speaker}: {text}")
         elif text:

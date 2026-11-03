@@ -46,7 +46,7 @@ def test_cold_offline_load_raises_actionable(monkeypatch: pytest.MonkeyPatch, tm
     _patch_ctors(monkeypatch, boom)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
 
-    with pytest.raises(ModelUnavailableError, match="keyword-only search"):
+    with pytest.raises(ModelUnavailableError, match="one-time model download"):
         fe._load_fastembed("bi", BI, tmp_path)
 
 
@@ -69,7 +69,7 @@ def test_local_only_missing_model_never_calls_constructor(monkeypatch, tmp_path)
     _patch_ctors(monkeypatch, unexpected)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: False)
 
-    with pytest.raises(ModelUnavailableError, match="Connect to the internet.*keyword-only search"):
+    with pytest.raises(ModelUnavailableError, match="Connect to the internet for the one-time model download"):
         fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
 
 
@@ -81,7 +81,7 @@ def test_local_only_cached_failure_includes_remediation(monkeypatch, tmp_path):
     _patch_ctors(monkeypatch, fail)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: True)
 
-    with pytest.raises(ModelUnavailableError, match="broken cached model.*keyword-only search"):
+    with pytest.raises(ModelUnavailableError, match="broken cached model.*one-time model download"):
         fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
 
 

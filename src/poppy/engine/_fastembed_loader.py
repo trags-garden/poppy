@@ -6,8 +6,8 @@ Two guarantees:
   ``local_files_only=True`` so no network HEAD fires (works fully offline once
   cached). An uncached model downloads normally.
 * A cold cache with no network raises :class:`poppy.errors.ModelUnavailableError`
-  with an actionable message instead of a raw huggingface_hub traceback; runtime
-  selection falls back to keyword-only search.
+  with a message requesting a connection for the one-time download instead of a
+  raw huggingface_hub traceback. The operation reports the error to the caller.
 
 On top of loading, :class:`FastembedModels` lazy-loads each encoder and starts a
 daemon timer after the first load. The timer releases both ONNX sessions after
@@ -92,8 +92,7 @@ def announce_first_run_download(model_names: Sequence[str]) -> None:
 def _model_unavailable(model_name: str, exc: Exception) -> ModelUnavailableError:
     return ModelUnavailableError(
         f"Couldn't load ONNX retrieval model {model_name!r} ({type(exc).__name__}: {exc}). "
-        "Connect to the internet for the one-time model download. "
-        "Poppy uses keyword-only search until the models are available."
+        "Connect to the internet for the one-time model download."
     )
 
 

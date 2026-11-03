@@ -31,11 +31,12 @@ def get_engine(
     delegate_models_to_daemon: bool = False,
     error_sink: Callable[[str], None] | None = None,
 ) -> RetrievalEngine:
-    """Build the full pipeline, falling back to keyword search on broken dependencies.
+    """Build the full pipeline, falling back to keyword search on dependency import errors.
 
     Legacy engine settings have no effect. Models load on first use so commands
     that only access storage do not need a model cache or network connection.
-    Model availability and store errors propagate rather than hiding a failure.
+    With dependencies installed, an uncached model needs a connection to download
+    on first use; an offline load reports an error. Store errors also propagate.
     """
     if os.environ.get("POPPY_TEST_FAIL_ON_ENGINE") == "1":
         raise RuntimeError("POPPY_TEST_FAIL_ON_ENGINE: local engine construction is forbidden")

@@ -103,7 +103,7 @@ that was already open does not see Poppy until you quit and reopen it.
   coding-agent CLI you already have. See
   [Zero-touch capture](#zero-touch-capture).
 - **One retrieval pipeline**: hybrid search and reranking run locally, with a
-  built-in keyword-only fallback when models are unavailable. See [Engines](#engines).
+  built-in keyword-only fallback when ML dependencies cannot be imported. See [Engines](#engines).
 
 ```bash
 poppy remember "we always use uv for python deps" --type preference
@@ -350,10 +350,11 @@ Poppy uses one retrieval pipeline: `bloom` combines FTS5 keyword search and
 bge-small embeddings with reciprocal rank fusion, then applies a cross-encoder
 rerank. Models run locally through ONNX and download once on first use.
 
-When models or their dependencies cannot load, Poppy automatically uses its
-built-in keyword-only fallback (`seed`). Connect once to download the models;
-after that, full retrieval works offline. Hooks always use keyword-only search
-to avoid loading models during latency-sensitive reads. Old `engine` settings
+When ML dependencies cannot be imported, Poppy automatically uses its built-in
+keyword-only fallback (`seed`). With dependencies installed, an operation that
+needs an uncached model requires a connection to download it and reports an
+error if offline. After the download, full retrieval works offline. Hooks always
+use keyword-only search to avoid loading models during latency-sensitive reads. Old `engine` settings
 are ignored; there is no engine to choose.
 
 The daemon automatically fills in missing or outdated embeddings in batches of

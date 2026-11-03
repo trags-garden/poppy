@@ -64,8 +64,8 @@ def _maybe_print_engine_fallback_notice(
         pass
 
     click.echo(
-        f"Poppy's retrieval models are unavailable ({reason}); running keyword-only search. "
-        "Connect once to download the models, or reinstall poppy-memory if dependencies cannot load.",
+        f"Poppy's ML dependencies cannot be imported ({reason}); running keyword-only search. "
+        "Reinstall poppy-memory to restore full retrieval.",
         err=True,
     )
 
@@ -582,9 +582,10 @@ def engines(ctx: click.Context):
         if not e.deps_ok and e.deps_error:
             click.echo(f"          missing: {e.deps_error}")
     click.echo()
-    click.echo("Poppy uses one retrieval pipeline, with automatic keyword-only fallback.")
+    click.echo("Poppy uses one retrieval pipeline, with keyword-only fallback when ML dependencies cannot be imported.")
+    click.echo("With dependencies installed, uncached models need a connection to download on first use.")
     if active == "seed":
-        click.echo("Keyword-only fallback is in use because the retrieval dependencies cannot load.")
+        click.echo("Keyword-only fallback is in use because the ML dependencies cannot be imported.")
 
 
 @engines.command("use")
@@ -644,8 +645,8 @@ def migrate_engine(
     engine = _get_engine()
     if engine.model_id is None:
         raise click.ClickException(
-            "Poppy is running keyword-only search. Connect once to download the models "
-            "or repair the reported dependency error, then rerun `poppy migrate-engine`."
+            "Poppy is running keyword-only search. Repair the reported dependency import error, "
+            "then rerun `poppy migrate-engine`."
         )
 
     filters = MigrateFilters(

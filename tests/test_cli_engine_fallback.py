@@ -37,7 +37,9 @@ def test_human_cli_reports_fallback_once_per_day(tmp_path: Path, monkeypatch: py
     _make_bloom_unavailable(monkeypatch)
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
-    notice = "Poppy's retrieval models are unavailable (the onnx runtime failed to load); running keyword-only search."
+    notice = (
+        "Poppy's ML dependencies cannot be imported (the onnx runtime failed to load); running keyword-only search."
+    )
 
     first = runner.invoke(cli, ["stats"], env=env)
     second = runner.invoke(cli, ["stats"], env=env)

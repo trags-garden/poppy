@@ -23,6 +23,13 @@ from poppy.runtime import get_engine
 
 CONVERSATION = '[{"speaker": "A", "text": "hi"}, {"speaker": "B", "text": "yo"}]'
 TEXT_LIST = '["Never deploy on Friday"]'
+RULE_LIST = '[{"rule": "Never deploy on Friday"}]'
+MESSAGE_LIST = '[{"role": "user", "content": "Never deploy on Friday"}]'
+MIXED_LIST = (
+    '[{"speaker": "A", "text": "hello"}, "Never deploy on Friday", 42, null, ["nested text"], '
+    '{"rule": "Keep café text"}, {"role": "user", "content": "Keep message text"}, '
+    '{"text": "", "rule": "Keep empty turn text"}, {"text": 42, "rule": "Keep invalid turn text"}]'
+)
 
 
 @pytest.fixture
@@ -57,7 +64,7 @@ def test_daemon_backfill_matches_fresh_ingest_and_updates_fts(tmp_path, engine):
 @pytest.mark.parametrize("write_path", ["fresh", "backfill"])
 @pytest.mark.parametrize(
     "content",
-    [TEXT_LIST, '[{"speaker": "A", "text": "hello"}, "Never deploy on Friday", 42, null, ["nested text"]]'],
+    [TEXT_LIST, RULE_LIST, MESSAGE_LIST, MIXED_LIST],
 )
 def test_json_list_text_stays_searchable_by_keyword(tmp_path, engine, write_path, content):
     memory = _make_memory("list", content)
@@ -70,24 +77,28 @@ def test_json_list_text_stays_searchable_by_keyword(tmp_path, engine, write_path
 
     assert [match.memory.id for match in seed.retrieve("Friday")] == [memory.id]
     indexed = _full_row(engine._db_path, memory.id)[0]
-    if content == TEXT_LIST:
+    if content != MIXED_LIST:
         assert indexed == content
     else:
         assert indexed.startswith("Conversation on ")
-        assert 'A: hello\nNever deploy on Friday\n42\nnull\n["nested text"]' in indexed
+        assert (
+            'A: hello\nNever deploy on Friday\n42\nnull\n["nested text"]\n'
+            '{"rule": "Keep café text"}\n{"role": "user", "content": "Keep message text"}\n'
+            '{"text": "", "rule": "Keep empty turn text"}\n{"text": 42, "rule": "Keep invalid turn text"}'
+        ) in indexed
 
 
-@pytest.mark.parametrize("content", [TEXT_LIST, CONVERSATION])
+@pytest.mark.parametrize("content", [TEXT_LIST, RULE_LIST, MESSAGE_LIST, CONVERSATION])
 @pytest.mark.parametrize("write_path", ["backfill", "manual"])
 def test_current_model_damaged_enrichment_is_repaired(tmp_path, engine, content, write_path):
     memory = _make_memory("damaged", content)
     engine.ingest(memory)
     expected = _full_row(engine._db_path, memory.id)
-    damaged = "Conversation on July 01, 2026." if content == TEXT_LIST else content
+    damaged = content if content == CONVERSATION else "Conversation on July 01, 2026."
     with connect(engine._db_path) as conn:
         conn.execute("UPDATE memories SET enriched_content = ?", (damaged,))
         conn.execute("UPDATE memory_embeddings SET embedding = ?", (_FakeEngine()._embed(damaged).tobytes(),))
-    keyword = "Friday" if content == TEXT_LIST else "Conversation"
+    keyword = "Conversation" if content == CONVERSATION else "Friday"
     assert SeedEngine(engine._db_path).retrieve(keyword) == []
 
     if write_path == "manual":
