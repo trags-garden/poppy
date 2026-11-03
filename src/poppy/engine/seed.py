@@ -452,7 +452,7 @@ class SeedEngine(RetrievalEngine):
                 if filters.min_confidence and mem.confidence < filters.min_confidence:
                     continue
             score = abs(row["rank"]) / (1.0 + abs(row["rank"]))
-            results.append(ScoredMemory(memory=mem, score=score))
+            results.append(ScoredMemory(memory=mem, score=score, keyword_only=True))
             if len(results) >= limit:
                 break
         return results

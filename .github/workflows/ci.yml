@@ -131,12 +131,16 @@ jobs:
           ERR=/tmp/telemetry-smoke/stderr.txt
           : > "$ERR"
           timeout 15 "$P" telemetry on 2>> "$ERR" || exit 1
-          # `engines use` and `--version` emit no event; `remember` and `recall`
-          # do, so they exercise the atexit flush. Warm the interpreter/model
-          # cache with the first emitting command, then measure the second: its
+          # Poppy runs one retrieval pipeline, so first use downloads the ONNX
+          # models. Do that once up front, outside the stderr check, so the
+          # measured commands below exercise telemetry rather than the download.
+          # A write loads the embedder and a search loads the reranker, so warm both.
+          timeout 180 "$P" remember "warm the model cache" --type fact > /dev/null 2>&1 || exit 1
+          timeout 180 "$P" recall "warm" > /dev/null 2>&1 || exit 1
+          # `--version` emits no event; `remember` and `recall` do, so they
+          # exercise the atexit flush. Measure the second emitting command: its
           # cost is dominated by the flush, so a regression to the old multi-
           # second exit delay trips the duration check, not only the traceback.
-          timeout 15 "$P" engines use seed 2>> "$ERR"
           timeout 15 "$P" --version 2>> "$ERR"
           timeout 10 "$P" remember "telemetry smoke" --type fact 2>> "$ERR"
           start=$(date +%s)
@@ -148,7 +152,10 @@ jobs:
             exit 1
           fi
           echo "--- stderr ---"; cat "$ERR"
-          if [ -s "$ERR" ]; then
+          # onnxruntime logs a hardware-probe warning each time it loads a model
+          # on these runners; it comes from the runtime, not from Poppy.
+          grep -v 'W:onnxruntime:' "$ERR" > "$ERR.poppy" || true
+          if [ -s "$ERR.poppy" ]; then
             echo "::error::telemetry-on commands wrote to stderr"
             exit 1
           fi

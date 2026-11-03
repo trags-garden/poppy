@@ -328,7 +328,7 @@ def test_setup_with_the_plugin_records_the_plugin_path(tmp_path, monkeypatch):
 
 def _doctor(env: dict) -> str:
     runner = CliRunner()
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     return result.output
 

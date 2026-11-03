@@ -18,6 +18,7 @@ import pytest
 
 from poppy.db import connect
 from poppy.engine.bloom import BloomEngine
+from poppy.engine.interface import RetrievalEngine
 from poppy.engine.migration import (
     MigrateFilters,
     count_targets,
@@ -26,7 +27,7 @@ from poppy.engine.migration import (
     stale_stats,
     sweep_orphans,
 )
-from poppy.engine.seed import SeedEngine, _migrate_embedding_model_id
+from poppy.engine.seed import SeedEngine, _migrate_embedding_model_id, _migrate_enriched_content
 from poppy.models import Memory, Source
 
 
@@ -35,6 +36,7 @@ class _FakeEngine:
     """Minimal stand-in for a RetrievalEngine that tags embeddings."""
 
     model_id: str = "fake-bi-encoder-v1"
+    embed_text_for = RetrievalEngine.embed_text_for
 
     def _embed(self, text: str) -> np.ndarray:
         # Deterministic 4-dim vector keyed off the content's hash so swaps are
@@ -76,6 +78,7 @@ def _seed_with_baseline_and_attach_embeddings(
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE IF NOT EXISTS memory_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL)")
     _migrate_embedding_model_id(conn)
+    _migrate_enriched_content(conn)
     for memory, model_id, vec in rows:
         conn.execute(
             "INSERT OR REPLACE INTO memory_embeddings (id, embedding, model_id) VALUES (?, ?, ?)",
@@ -208,6 +211,11 @@ def test_migrate_conversation_matches_fresh_bloom_write(
         ).fetchone()
     assert migrated[0] == fresh_vector
     assert migrated[1] == engine.model_id
+    with connect(db) as conn:
+        assert (
+            conn.execute("SELECT enriched_content FROM memories WHERE id = ?", (memory.id,)).fetchone()[0]
+            == expected_text
+        )
 
 
 @pytest.mark.parametrize("content", ['[{"speaker": "A", "text": "hi"}, {"speaker": "B", "text": "yo"}]', "plain text"])
@@ -245,6 +253,27 @@ def test_migrate_is_idempotent_on_clean_db(tmp_path: Path) -> None:
     _seed_with_baseline_and_attach_embeddings(db, seed)
 
     assert migrate(_FakeEngine(), db, MigrateFilters()) == 0
+
+
+def test_migrate_missing_store_does_not_create_it(tmp_path):
+    db = tmp_path / "missing.db"
+
+    assert migrate(_FakeEngine(), db, MigrateFilters()) == 0
+    assert not db.exists()
+
+
+def test_migrate_empty_batch_leaves_enrichment_untouched(tmp_path, monkeypatch):
+    monkeypatch.setattr(BloomEngine, "_embed", _FakeEngine._embed)
+    engine = BloomEngine(tmp_path / "memories.db")
+    memory = _make_memory("conversation", '[{"speaker": "A", "text": "hello"}]')
+    engine.ingest(memory)
+    with connect(engine._db_path) as conn:
+        conn.execute("UPDATE memories SET enriched_content = content")
+
+    assert migrate(engine, engine._db_path, MigrateFilters(), limit=0) == 0
+    with connect(engine._db_path) as conn:
+        assert conn.execute("SELECT enriched_content FROM memories").fetchone()[0] == memory.content
+        assert conn.execute("SELECT model_id FROM memory_embeddings").fetchone()[0] == engine.model_id
 
 
 def test_migrate_rejects_engine_without_model_id(tmp_path: Path) -> None:

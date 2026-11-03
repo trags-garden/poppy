@@ -46,7 +46,7 @@ def test_cold_offline_load_raises_actionable(monkeypatch: pytest.MonkeyPatch, tm
     _patch_ctors(monkeypatch, boom)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
 
-    with pytest.raises(ModelUnavailableError, match="poppy engines use seed"):
+    with pytest.raises(ModelUnavailableError, match="one-time model download"):
         fe._load_fastembed("bi", BI, tmp_path)
 
 
@@ -69,7 +69,7 @@ def test_local_only_missing_model_never_calls_constructor(monkeypatch, tmp_path)
     _patch_ctors(monkeypatch, unexpected)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: False)
 
-    with pytest.raises(ModelUnavailableError, match="Connect to the internet.*poppy engines use seed"):
+    with pytest.raises(ModelUnavailableError, match="Connect to the internet for the one-time model download"):
         fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
 
 
@@ -81,7 +81,7 @@ def test_local_only_cached_failure_includes_remediation(monkeypatch, tmp_path):
     _patch_ctors(monkeypatch, fail)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: True)
 
-    with pytest.raises(ModelUnavailableError, match="broken cached model.*poppy engines use seed"):
+    with pytest.raises(ModelUnavailableError, match="broken cached model.*one-time model download"):
         fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
 
 
@@ -102,6 +102,25 @@ def test_local_health_check_reuses_loaded_models(monkeypatch, tmp_path, capsys, 
     assert models.rerank("test", ["doc"]) == [1.0]
     assert calls == [BI, fe.CROSS_ENCODER]
     assert "downloading" not in capsys.readouterr().err
+
+
+def test_runtime_health_check_allows_one_time_model_download(monkeypatch, tmp_path, real_model_health):
+    calls = []
+
+    def load(model_name, **kwargs):
+        assert kwargs["local_files_only"] is False
+        calls.append(model_name)
+        return _FakeBi() if model_name == BI else _FakeCross()
+
+    _patch_ctors(monkeypatch, load)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: False)
+    models = fe.FastembedModels(cache_dir=tmp_path, idle_timeout_s=0)
+    models.check_available(download=True)
+    models.check_available(download=True)
+
+    assert calls == [BI, fe.CROSS_ENCODER]
+    assert models.embed("test").shape == (4,)
+    assert models.rerank("test", ["doc"]) == [1.0]
 
 
 @pytest.mark.parametrize("cached", [True, False])
@@ -386,3 +405,13 @@ def test_timer_is_daemon_and_exits_after_unload(monkeypatch: pytest.MonkeyPatch,
     assert models._cross is None
     assert not thread.is_alive()
     assert models._unload_thread is None
+
+
+def test_is_fastembed_model_cached_matches_mixed_case_repo_folder(tmp_path: Path) -> None:
+    # The upstream repo id is mixed case; a case-sensitive filesystem keeps that
+    # spelling, so the check must not depend on the lower-case form.
+    from poppy.engine._model_cache import is_fastembed_model_cached
+
+    (tmp_path / "models--Qdrant--bge-small-en-v1.5-onnx-Q").mkdir()
+    assert is_fastembed_model_cached("BAAI/bge-small-en-v1.5", tmp_path)
+    assert not is_fastembed_model_cached("Xenova/ms-marco-MiniLM-L-6-v2", tmp_path)

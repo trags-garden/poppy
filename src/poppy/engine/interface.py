@@ -39,8 +39,12 @@ class RetrievalEngine(ABC):
     # rather than feeding meaningless cross-model cosine scores into RRF.
     model_id: str | None = None
 
-    def check_models(self) -> None:
-        """Verify required local models without downloading. Model-free engines do nothing."""
+    def check_models(self, *, download: bool = False) -> None:
+        """Verify required models, optionally downloading them. Model-free engines do nothing."""
+
+    def embed_text_for(self, content: str, source_timestamp: str | None) -> str:
+        """Render the text stored in the keyword index and passed to the embedder."""
+        return content
 
     @abstractmethod
     def ingest(self, memory: Memory) -> str:

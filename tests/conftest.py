@@ -18,11 +18,16 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _available_doctor_models(monkeypatch):
-    """Keep integration checks independent of the cache; model health has its own tests."""
+    """Keep model construction deterministic without changing when models load."""
+    from test_engine_bloom import _FakeBiEncoder, _FakeCrossEncoder
+
     from poppy.engine._fastembed_loader import FastembedModels
 
     original = FastembedModels.check_available
-    monkeypatch.setattr(FastembedModels, "check_available", lambda self: None)
+
+    monkeypatch.setattr(FastembedModels, "check_available", lambda self, **kwargs: None)
+    monkeypatch.setattr("fastembed.TextEmbedding", lambda *args, **kwargs: _FakeBiEncoder())
+    monkeypatch.setattr("fastembed.rerank.cross_encoder.TextCrossEncoder", lambda *args, **kwargs: _FakeCrossEncoder())
     return original
 
 

@@ -342,7 +342,7 @@ def test_remember_check_with_supersedes_is_dry_run(tmp_path):
 
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     runner.invoke(cli, ["remember", "old fact"], env=env)
     mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
 
@@ -470,7 +470,6 @@ def test_sync_run_without_a_key_suggests_setup_first(tmp_path):
 def test_forget_then_restore(tmp_path, ttl):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
-    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
     args = ["remember", "restore this memory"]
     if ttl is not None:
         args.extend(["--ttl", ttl])
@@ -493,7 +492,6 @@ def test_forget_then_restore(tmp_path, ttl):
 def test_restore_memory_not_in_trash(tmp_path, live):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
-    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
     mem_id = "mem_unknown"
     if live:
         assert runner.invoke(cli, ["remember", "still live"], env=env).exit_code == 0
@@ -507,7 +505,6 @@ def test_restore_memory_not_in_trash(tmp_path, live):
 def test_forget_expired_memory(tmp_path):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
-    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
     args = ["remember", "already expired", "--expires-at", "2020-01-01T00:00:00+00:00"]
     assert runner.invoke(cli, args, env=env).exit_code == 0
     mem_id = json.loads(runner.invoke(cli, ["list", "--json", "--include-expired"], env=env).output)[0]["id"]
@@ -520,7 +517,6 @@ def test_forget_expired_memory(tmp_path):
 def test_restore_expired_memory(tmp_path, monkeypatch):
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
-    assert runner.invoke(cli, ["engines", "use", "seed"], env=env).exit_code == 0
     assert runner.invoke(cli, ["remember", "temporary memory", "--ttl", "1d"], env=env).exit_code == 0
     mem_id = json.loads(runner.invoke(cli, ["list", "--json"], env=env).output)[0]["id"]
     forgotten = runner.invoke(cli, ["forget", mem_id, "--yes"], env=env)
@@ -642,7 +638,7 @@ def test_setup_claude_code(tmp_path, config_dir, relative_mcp_path):
     env["CLAUDE_CONFIG_DIR"] = str(claude_dir) if config_dir else None
 
     runner = CliRunner()
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(
         cli,
         ["setup", "claude-code"],
@@ -866,7 +862,7 @@ def test_doctor_reports_capture_consent_pending(tmp_path, monkeypatch):
     monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     assert "auto-capture" in result.output
     assert "poppy autocapture on --global" in result.output
@@ -932,7 +928,7 @@ def test_doctor_lines_never_leave_a_dot_comma_artifact(tmp_path, monkeypatch):
     monkeypatch.delenv("POPPY_CONSOLIDATE", raising=False)
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     assert ".," not in result.output
 
@@ -944,7 +940,7 @@ def test_doctor_reports_last_capture(tmp_path):
     journal.record(tmp_path, session_id="s1", project="poppy", count=3, items=[])
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     assert "last capture" in result.output
     assert "3 stored for poppy" in result.output
@@ -969,7 +965,7 @@ def test_doctor_reports_codex_hooks_and_capture_liveness(tmp_path):
         # here (deterministic, no host-CLI-on-PATH dependency).
         "POPPY_CONSOLIDATE": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     no_capture = runner.invoke(cli, ["doctor"], env=env)
     assert no_capture.exit_code == 0, no_capture.output
@@ -1048,7 +1044,7 @@ def test_doctor_reports_cursor_hooks_account_flag_and_capture_liveness(tmp_path)
         # here (deterministic, no host-CLI-on-PATH dependency).
         "POPPY_CONSOLIDATE": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     no_capture = runner.invoke(cli, ["doctor"], env=env)
     assert no_capture.exit_code == 0, no_capture.output
@@ -1081,7 +1077,7 @@ def test_doctor_warns_unknown_cursor_event_disables_all_hooks(tmp_path):
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    CliRunner().invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = CliRunner().invoke(cli, ["doctor"], env=env)
 
@@ -1114,7 +1110,7 @@ def test_doctor_warns_invalid_cursor_hooks_json(tmp_path):
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    CliRunner().invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = CliRunner().invoke(cli, ["doctor"], env=env)
 
@@ -1130,7 +1126,7 @@ def test_doctor_reports_capture_state(tmp_path):
     set_watermark(tmp_path, "s1", 4)
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path), "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     assert "capture state" in result.output
     assert "1 session(s) tracked" in result.output
@@ -1150,7 +1146,7 @@ def test_doctor_checks_hermes_soul_md_guidance(tmp_path):
         "POPPY_DIR": str(tmp_path / ".poppy"),
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     missing_result = runner.invoke(cli, ["doctor"], env=env)
     assert missing_result.exit_code == 0
@@ -1176,7 +1172,7 @@ def test_main_renders_model_unavailable_cleanly(monkeypatch, capsys):
     def boom():
         raise ModelUnavailableError(
             "Couldn't load retrieval model 'BAAI/bge-small-en-v1.5'. Connect to the internet "
-            "for the one-time model download, or run `poppy engines use seed` for offline "
+            "for the one-time model download. Poppy uses "
             "keyword-only search."
         )
 
@@ -1186,7 +1182,7 @@ def test_main_renders_model_unavailable_cleanly(monkeypatch, capsys):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert err.startswith("poppy: ")
-    assert "poppy engines use seed" in err
+    assert "one-time model download" in err
     assert "Traceback" not in err
     assert len(err.strip().splitlines()) == 1
 
@@ -1204,7 +1200,7 @@ def test_main_model_unavailable_from_engine_load_path(monkeypatch, capsys):
     def boom(_poppy_dir, **_kwargs):
         raise ModelUnavailableError(
             "Couldn't load retrieval model 'BAAI/bge-small-en-v1.5'. Connect to the internet "
-            "for the one-time model download, or run `poppy engines use seed` for offline "
+            "for the one-time model download. Poppy uses "
             "keyword-only search."
         )
 
@@ -1257,7 +1253,7 @@ def test_doctor_skips_codex_section_when_codex_absent(tmp_path):
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     assert result.exit_code == 0, result.output
     assert "Codex hooks.json" not in result.output
@@ -1273,7 +1269,7 @@ def test_doctor_skips_cursor_section_when_cursor_absent(tmp_path):
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = runner.invoke(cli, ["doctor"], env=env)
 
@@ -1297,7 +1293,7 @@ def test_doctor_shows_codex_section_when_codex_present(tmp_path):
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     assert result.exit_code == 0, result.output
     assert "Codex hooks.json" in result.output
@@ -1319,7 +1315,7 @@ def test_doctor_skips_codex_section_when_config_present_but_no_poppy(tmp_path):
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     result = runner.invoke(cli, ["doctor"], env=env)
     assert result.exit_code == 0, result.output
     assert "Codex hooks.json" not in result.output
@@ -1360,7 +1356,7 @@ def test_doctor_clean_after_fresh_cursor_setup(tmp_path):
     (the user chose Cursor)."""
     runner = CliRunner()
     env = _fresh_setup_env(tmp_path)
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     setup = runner.invoke(cli, ["setup", "cursor"], env=env)
     assert setup.exit_code == 0, setup.output
@@ -1380,7 +1376,7 @@ def test_doctor_clean_after_fresh_codex_setup(tmp_path):
     """Done-when: `poppy setup codex` then `poppy doctor` prints ZERO WARN."""
     runner = CliRunner()
     env = _fresh_setup_env(tmp_path)
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     setup = runner.invoke(cli, ["setup", "codex"], env=env)
     assert setup.exit_code == 0, setup.output
@@ -1397,7 +1393,7 @@ def test_doctor_clean_after_fresh_claude_code_setup(tmp_path):
     ZERO WARN (consent stays pending non-interactively → INFO, not WARN)."""
     runner = CliRunner()
     env = _fresh_setup_env(tmp_path)
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     setup = runner.invoke(cli, ["setup", "claude-code"], env=env)
     assert setup.exit_code == 0, setup.output
@@ -1415,7 +1411,7 @@ def test_doctor_fails_when_hook_command_cannot_resolve(tmp_path, client):
     since every event then dies with "command not found"."""
     runner = CliRunner()
     env = _fresh_setup_env(tmp_path)
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     setup = runner.invoke(cli, ["setup", client], env=env)
     assert setup.exit_code == 0, setup.output
 
@@ -1448,7 +1444,7 @@ def test_doctor_warns_when_hooks_use_bare_poppy_that_resolves_here(tmp_path):
     may still be missing for the client: WARN and point at setup."""
     runner = CliRunner()
     env = _fresh_setup_env(tmp_path)
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
     assert runner.invoke(cli, ["setup", "claude-code"], env=env).exit_code == 0
 
     bin_dir = tmp_path / "bin"
@@ -1485,7 +1481,7 @@ def test_doctor_daemon_section_silent_without_daemon(tmp_path):
     is running — a default (embedded) install shows no daemon lines."""
     runner = CliRunner()
     env = _fresh_setup_env(tmp_path)
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     doctor = runner.invoke(cli, ["doctor"], env=env)
     assert doctor.exit_code == 0, doctor.output
@@ -1520,7 +1516,7 @@ def test_doctor_warns_when_client_points_at_dead_daemon(tmp_path):
         "POPPY_SYSTEMD_USER_DIR": str(tmp_path / "no-systemd"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = runner.invoke(cli, ["doctor"], env=env)
     # Daemon health checks ran despite no agent/lock/liveness...
@@ -1549,7 +1545,7 @@ def test_doctor_warns_when_poppy_client_mcp_entry_deleted(tmp_path):
         "POPPY_DIR": str(tmp_path / ".poppy"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = runner.invoke(cli, ["doctor"], env=env)
     assert result.exit_code == 0, result.output
@@ -1589,7 +1585,7 @@ def test_doctor_client_daemon_reachability_is_per_port(tmp_path, monkeypatch):
         "POPPY_SYSTEMD_USER_DIR": str(tmp_path / "no-systemd"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    CliRunner().invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = CliRunner().invoke(cli, ["doctor"], env=env)
     # The configured daemon (7680) answers, so its health line is OK...
@@ -1620,7 +1616,7 @@ def test_doctor_survives_malformed_client_daemon_url(tmp_path):
         "POPPY_SYSTEMD_USER_DIR": str(tmp_path / "no-systemd"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = runner.invoke(cli, ["doctor"], env=env)
     # Did not crash: later diagnostics still printed, no traceback.
@@ -1678,7 +1674,7 @@ def test_doctor_warns_when_client_daemon_token_is_stale(tmp_path, monkeypatch):
         "POPPY_SYSTEMD_USER_DIR": str(tmp_path / "no-systemd"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    CliRunner().invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = CliRunner().invoke(cli, ["doctor"], env=env)
     # Cursor's stale token → 401 → WARN naming the token; Codex's current token → OK.
@@ -1748,7 +1744,7 @@ def test_doctor_rejects_substring_loopback_daemon_url(tmp_path):
         "POPPY_SYSTEMD_USER_DIR": str(tmp_path / "no-systemd"),
         "POPPY_TELEMETRY_OFF": "1",
     }
-    runner.invoke(cli, ["config", "set", "engine", "seed"], env=env)
+    Path(env["POPPY_DIR"]).mkdir(parents=True, exist_ok=True)
 
     result = runner.invoke(cli, ["doctor"], env=env)
     assert result.exception is None, result.output

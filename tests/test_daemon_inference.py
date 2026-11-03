@@ -174,7 +174,6 @@ def test_daemon_models_falls_back_when_token_cannot_be_loaded(tmp_path, monkeypa
 
 def test_compact_capture_uses_daemon_without_local_model_load(tmp_path, monkeypatch):
     cfg = PoppyConfig(poppy_dir=tmp_path)
-    cfg.set("engine", "bloom")
     save_config(cfg)
     (tmp_path / "daemon.token").write_text("secret\n")
     daemon_models = _FakeModels()

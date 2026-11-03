@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
+import anyio
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -21,11 +22,33 @@ from starlette.types import ASGIApp
 
 from poppy import __version__
 from poppy.engine._model_holder import model_runtime_status
+from poppy.engine.interface import RetrievalEngine
+from poppy.engine.migration import backfill
+from poppy.errors import ModelUnavailableError
 from poppy.mcp_server.auth import bearer_token_matches, load_daemon_token
 from poppy.paths import ensure_poppy_dir
 
 ALREADY_RUNNING_MESSAGE = "poppy daemon already running (lock held)"
 DAEMON_LOCK_FILENAME = "daemon.lock"
+BACKFILL_INTERVAL_S = 60
+
+
+def _backfill_once(engine: RetrievalEngine, poppy_dir: Path) -> int:
+    return backfill(engine, poppy_dir / "memories.db")
+
+
+async def _backfill_loop(engine: RetrievalEngine, poppy_dir: Path) -> None:
+    # The daemon owns this trigger so neither hook reads nor foreground writes
+    # pay for old memories. Each pass scans and embeds at most 32 rows, on a
+    # worker thread so model loading cannot block the request loop.
+    while True:
+        try:
+            await anyio.to_thread.run_sync(_backfill_once, engine, poppy_dir)
+        except ModelUnavailableError:
+            pass
+        except Exception as exc:
+            print(f"Daemon backfill failed: {type(exc).__name__}", file=sys.stderr)
+        await anyio.sleep(BACKFILL_INTERVAL_S)
 
 
 def _log_inference_failure(exc: Exception, stage: str) -> None:
@@ -179,7 +202,13 @@ def create_http_app(
     @asynccontextmanager
     async def lifespan(_app: Starlette):
         async with mcp_app.router.lifespan_context(mcp_app):
-            yield
+            async with anyio.create_task_group() as tasks:
+                if isinstance(engine, RetrievalEngine):
+                    tasks.start_soon(_backfill_loop, engine, poppy_dir)
+                try:
+                    yield
+                finally:
+                    tasks.cancel_scope.cancel()
 
     return Starlette(
         routes=[

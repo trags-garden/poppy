@@ -285,6 +285,8 @@ async def test_daemon_down_without_agent_runs_working_local_stdio_server(tmp_pat
         "POPPY_DAEMON_PORT": "1",
         "POPPY_LAUNCH_AGENTS_DIR": str(tmp_path / "agents"),
         "POPPY_TELEMETRY_OFF": "1",
+        "HF_HUB_OFFLINE": "1",
+        "POPPY_FASTEMBED_CACHE": str(tmp_path / "models"),
     }
     params = StdioServerParameters(command=str(executable), args=["serve"], env=env, cwd=Path.cwd())
 

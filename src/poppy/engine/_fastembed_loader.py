@@ -6,8 +6,9 @@ Two guarantees:
   ``local_files_only=True`` so no network HEAD fires (works fully offline once
   cached). An uncached model downloads normally.
 * A cold cache with no network raises :class:`poppy.errors.ModelUnavailableError`
-  with an actionable message instead of a raw huggingface_hub traceback; the CLI
-  entrypoint renders it as one line.
+  with a message requesting a connection for the one-time download instead of a
+  raw huggingface_hub traceback. Writes and searches use keyword-only fallback;
+  model checks and embedding backfill still receive the error.
 
 On top of loading, :class:`FastembedModels` lazy-loads each encoder and starts a
 daemon timer after the first load. The timer releases both ONNX sessions after
@@ -92,8 +93,7 @@ def announce_first_run_download(model_names: Sequence[str]) -> None:
 def _model_unavailable(model_name: str, exc: Exception) -> ModelUnavailableError:
     return ModelUnavailableError(
         f"Couldn't load ONNX retrieval model {model_name!r} ({type(exc).__name__}: {exc}). "
-        "Connect to the internet for the one-time model download, or run "
-        "`poppy engines use seed` for offline keyword-only search."
+        "Connect to the internet for the one-time model download."
     )
 
 
@@ -115,7 +115,7 @@ def _load_fastembed(kind: str, model_name: str, cache_dir: Path, *, local_files_
     except ImportError as exc:  # pragma: no cover - fastembed is a base dependency
         raise ImportError(
             "fastembed is not installed. It ships in the base `poppy-memory` install; "
-            "reinstall it, or run `poppy engines use seed` for keyword-only search."
+            "reinstall it to restore full retrieval. Poppy uses keyword-only search until then."
         ) from exc
 
     _silence_fastembed_logs()
@@ -173,12 +173,16 @@ class FastembedModels(IdleUnloadingModels):
 
     # --- inference ---------------------------------------------------------
 
-    def check_available(self) -> None:
-        """Load each missing encoder locally, keeping it resident for subsequent use."""
+    def check_available(self, *, download: bool = False) -> None:
+        """Load each missing encoder, using only local files unless downloads are allowed."""
         with self._lock:
             for attr, kind, name in (("_bi", "bi", BI_ENCODER), ("_cross", "cross", CROSS_ENCODER)):
                 if getattr(self, attr) is None:
-                    model = _load_fastembed(kind, name, self._cache_dir, local_files_only=True)
+                    model = (
+                        self._model(kind)
+                        if download
+                        else _load_fastembed(kind, name, self._cache_dir, local_files_only=True)
+                    )
                     setattr(self, attr, model)
                     self._last_use = self._clock()
                     self._start_timer_locked()

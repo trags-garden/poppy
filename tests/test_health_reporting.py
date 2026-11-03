@@ -21,7 +21,7 @@ def test_doctor_reports_model_load_failure(tmp_path, monkeypatch, failed_kind, r
     monkeypatch.setenv("HF_ENDPOINT", "http://127.0.0.1:9")
     monkeypatch.setattr(doctor, "check_version", lambda ctx: None)
     engine = BloomEngine(tmp_path / "memories.db")
-    monkeypatch.setattr(main, "_get_engine", lambda: engine)
+    monkeypatch.setattr(main, "_get_engine", lambda **kwargs: engine)
 
     def fail_loader(kind, model_name, cache_dir, *, local_files_only=False):
         assert local_files_only
@@ -35,8 +35,10 @@ def test_doctor_reports_model_load_failure(tmp_path, monkeypatch, failed_kind, r
 
     result = CliRunner().invoke(main.cli, ["doctor"])
 
-    assert result.exit_code == 1, result.output
-    assert f"engine: FAIL, {failed.value}" in result.output
+    assert "engine: WARN, models unavailable" in result.output
+    assert str(failed.value) in result.output
+    assert "saving memories and searching with keyword-only search" in result.output
+    assert "The daemon embeds these memories once models are available" in result.output
     assert "fake offline loader failure" in result.output
     assert "engine: OK" not in result.output
 
@@ -57,15 +59,38 @@ def test_doctor_reports_available_engine(tmp_path, monkeypatch, capsys, engine_c
         return object()
 
     monkeypatch.setattr(fe, "_load_fastembed", load)
-    monkeypatch.setattr(main, "_get_engine", lambda: engine)
+    monkeypatch.setattr(main, "_get_engine", lambda **kwargs: engine)
     ctx = doctor.DoctorContext()
     ctx.poppy_dir = tmp_path
     doctor.check_engine(ctx)
     doctor.check_engine(ctx)
 
     assert ctx.ok
-    assert "engine: OK" in capsys.readouterr().out
+    expected = "engine: OK" if engine_class is BloomEngine else "engine: WARN, keyword-only fallback"
+    assert expected in capsys.readouterr().out
     assert calls == (["bi", "cross"] if engine_class is BloomEngine else [])
+
+
+def test_doctor_checks_models_without_downloading(tmp_path, monkeypatch, capsys, real_model_health):
+    calls = []
+
+    def unavailable(kind, name, cache_dir, *, local_files_only=False):
+        assert local_files_only
+        calls.append(kind)
+        raise fe._model_unavailable(name, FileNotFoundError("not cached"))
+
+    monkeypatch.setenv("POPPY_DIR", str(tmp_path))
+    monkeypatch.setattr(fe, "_load_fastembed", unavailable)
+    ctx = doctor.DoctorContext()
+    ctx.poppy_dir = tmp_path
+    doctor.check_engine(ctx)
+
+    output = capsys.readouterr().out
+    assert ctx.ok
+    assert "engine: WARN, models unavailable" in output
+    assert "Connect to the internet for the one-time model download" in output
+    assert "engines use" not in output
+    assert calls == ["bi"]
 
 
 def _marked_store(tmp_path: Path) -> None:

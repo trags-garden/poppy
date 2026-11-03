@@ -59,3 +59,5 @@ class Filters:
 class ScoredMemory:
     memory: Memory
     score: float
+    # Keyword ranks are not cross-encoder logits and cannot use semantic floors.
+    keyword_only: bool = False

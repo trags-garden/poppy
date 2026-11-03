@@ -100,8 +100,8 @@ class PoppyConfig:
     # Auto-sync to Trags after every local write. "on" (default) | "off".
     # Only active when trags_api_key is set.
     auto_sync: str = "on"
-    # Retrieval engine for recall/remember on the runtime surface. Validated
-    # against the registry in the engine key's parser. See `poppy engines`.
+    # Retained only to preserve old settings when saving unrelated config changes.
+    # Runtime always uses the full pipeline, regardless of this value.
     engine: str = "bloom"
     # Anonymous usage telemetry. None = unanswered (off); True/False = an
     # explicit choice from the first-run prompt or `poppy telemetry on|off`.
@@ -316,22 +316,6 @@ def _parse_trags_api_url(value: str, key: str) -> str:
     return value
 
 
-def _parse_engine(value: str, key: str) -> str:
-    # Lazy import — keeps the registry off the hot path for callers that never
-    # touch the engine setting. Legacy names (petal, speaker_closet, best,
-    # baseline) map silently to their current builtin equivalents.
-    from poppy.engine.registry import canonical_name, known_names  # noqa: PLC0415
-
-    v = canonical_name(value.strip())
-    valid = known_names()
-    if v not in valid:
-        raise ValueError(
-            f"engine must be one of {len(valid)} known engines, got {value!r}. "
-            f"Run `poppy engines` for the full list with descriptions."
-        )
-    return v
-
-
 def _parse_score(value: str, key: str) -> float:
     try:
         score = float(value)
@@ -448,16 +432,9 @@ def _load_redaction(config: "PoppyConfig", data: dict) -> None:
 
 
 def _load_engine(config: "PoppyConfig", data: dict) -> None:
-    # No registry validation here — load_config sits on the hot path for every
-    # CLI invocation. The runtime falls back gracefully if the stored name is
-    # unknown. Legacy names from older installs map silently
-    # (petal/speaker_closet/best -> bloom, baseline -> seed).
+    # Preserve the setting without interpreting it or rewriting the file.
     if "engine" in data:
-        v = str(data["engine"]).strip()
-        if v:
-            from poppy.engine.registry import canonical_name  # noqa: PLC0415
-
-            config.engine = canonical_name(v)
+        config.engine = str(data["engine"])
 
 
 def _load_update_check(config: "PoppyConfig", data: dict) -> None:
@@ -647,7 +624,7 @@ _REGISTRY: tuple[ConfigKey, ...] = (
         parse=_choice_parser("auto-sync", _AUTO_SYNC_VALUES),
         load=_choice_loader("auto_sync", _AUTO_SYNC_VALUES),
     ),
-    _key("engine", settings_name="engine", default="bloom", parse=_parse_engine, load=_load_engine),
+    _key("engine", default="bloom", load=_load_engine),
     _key(
         "telemetry_enabled",
         settings_name="telemetry",

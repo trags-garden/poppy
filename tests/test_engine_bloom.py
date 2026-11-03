@@ -54,7 +54,7 @@ class _FakeBiEncoder:
 class _FakeCrossEncoder:
     """fastembed TextCrossEncoder stand-in: .rerank(query, docs) -> scores."""
 
-    def rerank(self, query, docs):
+    def rerank(self, query, docs, **kwargs):
         return [float(len(d)) for d in docs]
 
 
