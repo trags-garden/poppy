@@ -131,10 +131,12 @@ jobs:
           ERR=/tmp/telemetry-smoke/stderr.txt
           : > "$ERR"
           timeout 15 "$P" telemetry on 2>> "$ERR" || exit 1
-          # Poppy runs one retrieval pipeline, so the first write downloads the
-          # ONNX models. Do that once up front, outside the stderr check, so the
+          # Poppy runs one retrieval pipeline, so first use downloads the ONNX
+          # models. Do that once up front, outside the stderr check, so the
           # measured commands below exercise telemetry rather than the download.
-          timeout 180 "$P" remember "warm the model cache" --type fact 2> /dev/null || exit 1
+          # A write loads the embedder and a search loads the reranker, so warm both.
+          timeout 180 "$P" remember "warm the model cache" --type fact > /dev/null 2>&1 || exit 1
+          timeout 180 "$P" recall "warm" > /dev/null 2>&1 || exit 1
           # `--version` emits no event; `remember` and `recall` do, so they
           # exercise the atexit flush. Measure the second emitting command: its
           # cost is dominated by the flush, so a regression to the old multi-
