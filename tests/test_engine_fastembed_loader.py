@@ -405,3 +405,13 @@ def test_timer_is_daemon_and_exits_after_unload(monkeypatch: pytest.MonkeyPatch,
     assert models._cross is None
     assert not thread.is_alive()
     assert models._unload_thread is None
+
+
+def test_is_fastembed_model_cached_matches_mixed_case_repo_folder(tmp_path: Path) -> None:
+    # The upstream repo id is mixed case; a case-sensitive filesystem keeps that
+    # spelling, so the check must not depend on the lower-case form.
+    from poppy.engine._model_cache import is_fastembed_model_cached
+
+    (tmp_path / "models--Qdrant--bge-small-en-v1.5-onnx-Q").mkdir()
+    assert is_fastembed_model_cached("BAAI/bge-small-en-v1.5", tmp_path)
+    assert not is_fastembed_model_cached("Xenova/ms-marco-MiniLM-L-6-v2", tmp_path)

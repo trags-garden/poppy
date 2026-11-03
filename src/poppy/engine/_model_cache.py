@@ -64,4 +64,13 @@ def is_fastembed_model_cached(model_name: str, cache_dir: Path | None = None) ->
     """
     cache = cache_dir or fastembed_cache_dir()
     hf_repo = FASTEMBED_HF_SOURCE.get(model_name, model_name)
-    return (cache / ("models--" + hf_repo.replace("/", "--"))).is_dir()
+    expected = "models--" + hf_repo.replace("/", "--")
+    if (cache / expected).is_dir():
+        return True
+    # The upstream repo id is mixed case (``Qdrant/...-onnx-Q``) while older
+    # downloads used lower case. Compare case-insensitively so a cached model
+    # is found on case-sensitive filesystems too.
+    try:
+        return any(p.is_dir() and p.name.lower() == expected.lower() for p in cache.iterdir())
+    except OSError:
+        return False
