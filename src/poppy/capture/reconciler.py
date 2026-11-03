@@ -174,8 +174,7 @@ def find_candidates(
     The engine controls whether the default score floor applies; an explicit
     min_score always takes precedence.
     """
-    if min_score is None and engine.apply_candidate_score_floor:
-        min_score = CANDIDATE_MIN_SCORE
+    use_default_floor = min_score is None and engine.apply_candidate_score_floor
     filters = Filters(project=new_memory.project, memory_type=new_memory.memory_type)
     seen: set[str] = {new_memory.id}
     out: list[Candidate] = []
@@ -187,7 +186,8 @@ def find_candidates(
     for s in scored:
         if s.memory.id in seen:
             continue
-        if min_score is not None and s.score is not None and s.score < min_score:
+        floor = CANDIDATE_MIN_SCORE if use_default_floor and not s.keyword_only else min_score
+        if floor is not None and s.score is not None and s.score < floor:
             continue
         out.append(Candidate(memory=s.memory, score=s.score if s.score is not None else 0.0))
         seen.add(s.memory.id)

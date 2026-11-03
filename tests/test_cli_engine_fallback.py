@@ -51,6 +51,29 @@ def test_human_cli_reports_fallback_once_per_day(tmp_path: Path, monkeypatch: py
     assert (tmp_path / _ENGINE_FALLBACK_NOTICE_FILE).is_file()
 
 
+def test_human_cli_reports_lazy_model_fallback_once_per_day(tmp_path, monkeypatch):
+    from poppy.engine import _fastembed_loader as fe
+
+    def unavailable(*args, **kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: False)
+    monkeypatch.setattr("fastembed.TextEmbedding", unavailable)
+    runner = CliRunner()
+    env = {"POPPY_DIR": str(tmp_path)}
+
+    saved = runner.invoke(cli, ["remember", "offline keyword memory"], env=env)
+    recalled = runner.invoke(cli, ["recall", "keyword"], env=env)
+
+    assert saved.exit_code == recalled.exit_code == 0, saved.output + recalled.output
+    assert "saving memories and running keyword-only search" in saved.stderr
+    assert "once models are available" in saved.stderr
+    assert "Reinstall" not in saved.stderr
+    assert "keyword-only search" not in recalled.stderr
+    assert "offline keyword memory" in recalled.stdout
+    assert (tmp_path / _ENGINE_FALLBACK_NOTICE_FILE).is_file()
+
+
 def test_changed_fallback_pair_renotifies_same_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The throttle keys on what substituted for what, so a same-day change in
     the fallback pair warns again instead of hiding a new degradation."""

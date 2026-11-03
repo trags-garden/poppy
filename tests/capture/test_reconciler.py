@@ -47,13 +47,26 @@ def engine(tmp_path: Path) -> SeedEngine:
 
 
 @pytest.mark.parametrize("min_score", [None, 0.0, 0.30])
-def test_seed_conflict_candidates_keep_common_term_match(engine: SeedEngine, min_score: float | None) -> None:
+@pytest.mark.parametrize("offline", [False, True])
+def test_keyword_conflict_candidates_keep_common_term_match(
+    engine: SeedEngine, min_score: float | None, offline: bool, monkeypatch
+) -> None:
     engine.ingest(_mk("conflict", "Do not use SQLite in production", project="p", memory_type="fact"))
     for i in range(5):
         engine.ingest(_mk(f"release{i}", f"Release note number {i}", project="p", memory_type="fact"))
     for i in range(10):
         engine.ingest(_mk(f"other{i}", "Use SQLite in production", project="other", memory_type="fact"))
     new = _mk("new", "Use SQLite in production", project="p", memory_type="fact")
+
+    if offline:
+        from poppy.errors import ModelUnavailableError
+
+        engine = BloomEngine(engine._db_path)
+
+        def unavailable(text):
+            raise ModelUnavailableError("models unavailable")
+
+        monkeypatch.setattr(engine, "_embed", unavailable)
 
     # Common terms have near-zero FTS scores even for a real match.
     matches = engine.retrieve(new.content, filters=Filters(project="p", memory_type="fact"))

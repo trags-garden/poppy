@@ -236,9 +236,12 @@ its writer replaces the file atomically through an owner-only temporary file uni
 - **Engine.** An internal retrieval backend behind `RetrievalEngine`. The
   product uses the `bloom` pipeline: keyword and vector search followed by a
   cross-encoder rerank. Model-free `seed` serves hooks and automatic fallback
-  when ML dependencies cannot be imported. With dependencies installed, models
-  load on first use; an uncached model requires a connection to download, and
-  the operation reports an error if offline.
+  when ML dependencies or models are unavailable. Models load lazily on first
+  use. Offline with no downloaded models, writes and searches use `seed` for
+  that operation on the same database. Each call retries the full pipeline
+  without a restart, and the daemon embeds memories saved without embeddings
+  once models are available. Other errors still propagate. Keyword scores skip
+  semantic score floors without changing the engine's shared state.
 - **Write gate.** The `write.gate` lock that orders multi-step writes across
   processes; see the locks table.
 - **Backstop.** The end-of-session and post-compaction captures that pick up

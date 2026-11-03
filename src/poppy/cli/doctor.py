@@ -646,6 +646,7 @@ def check_encryption(ctx: DoctorContext) -> None:
 
 def check_engine(ctx: DoctorContext) -> None:
     from poppy.cli import main as _main
+    from poppy.errors import ModelUnavailableError
 
     line = ctx.line
     poppy_dir = ctx.poppy_dir
@@ -662,7 +663,7 @@ def check_engine(ctx: DoctorContext) -> None:
                 "engine",
                 "WARN",
                 f"keyword-only fallback ({s.memory_count} memories)",
-                hint="connect once to download the models, or repair the reported dependency error",
+                hint="repair the reported dependency error to restore full retrieval",
             )
         else:
             line("engine", "OK", engine_msg)
@@ -676,6 +677,13 @@ def check_engine(ctx: DoctorContext) -> None:
                     f"({drift.missing} never embedded, compatible={drift.compatible})",
                     hint="the daemon embeds these automatically; run `poppy migrate-engine` to do it now",
                 )
+    except ModelUnavailableError as exc:
+        line(
+            "engine",
+            "WARN",
+            "models unavailable; saving memories and searching with keyword-only search",
+            hint=f"{exc} The daemon embeds these memories once models are available.",
+        )
     except Exception as exc:
         line("engine", "FAIL", str(exc))
 

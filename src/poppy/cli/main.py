@@ -63,27 +63,32 @@ def _maybe_print_engine_fallback_notice(
     except OSError:
         pass
 
-    click.echo(
-        f"Poppy's ML dependencies cannot be imported ({reason}); running keyword-only search. "
-        "Reinstall poppy-memory to restore full retrieval.",
-        err=True,
-    )
+    if error.startswith(f"{configured}: ModelUnavailableError:"):
+        message = (
+            f"Poppy's retrieval models are unavailable ({reason}); saving memories and running keyword-only search. "
+            "The daemon embeds these memories once models are available."
+        )
+    else:
+        message = (
+            f"Poppy's ML dependencies cannot be imported ({reason}); running keyword-only search. "
+            "Reinstall poppy-memory to restore full retrieval."
+        )
+    click.echo(message, err=True)
 
 
 def _get_engine() -> RetrievalEngine:
     poppy_dir = _get_poppy_dir()
     configured = "bloom"
-    errors: list[str] = []
-    engine = _runtime_get_engine(poppy_dir, error_sink=errors.append)
-    active = getattr(engine, "_engine_name", configured)
-    if errors and active != configured:
+
+    def report_fallback(error: str) -> None:
         _maybe_print_engine_fallback_notice(
             poppy_dir,
             configured=configured,
-            active=active,
-            error=errors[0],
+            active="seed",
+            error=error,
         )
-    return engine
+
+    return _runtime_get_engine(poppy_dir, error_sink=report_fallback)
 
 
 def _parse_since_option(since: str | None) -> datetime.datetime | None:
@@ -582,8 +587,11 @@ def engines(ctx: click.Context):
         if not e.deps_ok and e.deps_error:
             click.echo(f"          missing: {e.deps_error}")
     click.echo()
-    click.echo("Poppy uses one retrieval pipeline, with keyword-only fallback when ML dependencies cannot be imported.")
-    click.echo("With dependencies installed, uncached models need a connection to download on first use.")
+    click.echo(
+        "Poppy uses one retrieval pipeline, with keyword-only fallback when dependencies or models are unavailable."
+    )
+    click.echo("Offline with no downloaded models, Poppy saves and searches with keyword-only search.")
+    click.echo("The next call retries the full pipeline; the daemon embeds memories once models are available.")
     if active == "seed":
         click.echo("Keyword-only fallback is in use because the ML dependencies cannot be imported.")
 
@@ -2472,8 +2480,8 @@ def doctor():
 def main() -> None:
     """Console-script entrypoint.
 
-    Wraps the click group so expected operational failures (e.g. retrieval
-    models unavailable offline with a cold cache) render as a one-line
+    Wraps the click group so expected operational failures (e.g. unavailable
+    models during manual embedding migration) render as a one-line
     actionable message instead of a raw traceback. Imported lazily from
     ``poppy.errors`` (which is import-cheap, no ML deps) so a deps-missing
     install still runs.

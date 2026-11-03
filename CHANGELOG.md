@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Poppy now uses one retrieval pipeline, with keyword-only fallback when ML dependencies cannot be imported; engine choice has been retired. With dependencies installed, an uncached model still requires a connection to download on first use.
+- Poppy now uses one retrieval pipeline, with keyword-only fallback when ML dependencies or models are unavailable; engine choice has been retired. Offline with no downloaded models, Poppy saves and searches with keyword-only search and embeds those memories once models are available. The next call retries the full pipeline without a restart.
 - Old `engine` settings are ignored and can stay in your config file.
 - Memories written through hooks or the keyword-only fallback get embedded automatically by the daemon once models are available.
 

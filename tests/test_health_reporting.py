@@ -35,8 +35,10 @@ def test_doctor_reports_model_load_failure(tmp_path, monkeypatch, failed_kind, r
 
     result = CliRunner().invoke(main.cli, ["doctor"])
 
-    assert result.exit_code == 1, result.output
-    assert f"engine: FAIL, {failed.value}" in result.output
+    assert "engine: WARN, models unavailable" in result.output
+    assert str(failed.value) in result.output
+    assert "saving memories and searching with keyword-only search" in result.output
+    assert "The daemon embeds these memories once models are available" in result.output
     assert "fake offline loader failure" in result.output
     assert "engine: OK" not in result.output
 
@@ -84,8 +86,8 @@ def test_doctor_checks_models_without_downloading(tmp_path, monkeypatch, capsys,
     doctor.check_engine(ctx)
 
     output = capsys.readouterr().out
-    assert not ctx.ok
-    assert "engine: FAIL" in output
+    assert ctx.ok
+    assert "engine: WARN, models unavailable" in output
     assert "Connect to the internet for the one-time model download" in output
     assert "engines use" not in output
     assert calls == ["bi"]

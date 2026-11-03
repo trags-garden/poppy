@@ -11,7 +11,8 @@ import logging
 import re
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from poppy.engine._timestamps import (
     utc_iso,
 )
 from poppy.engine.interface import ConsolidationResult, EngineStats, RetrievalEngine
+from poppy.errors import ModelUnavailableError
 from poppy.models import Filters, Memory, ScoredMemory, Source
 
 logger = logging.getLogger(__name__)
@@ -197,6 +199,7 @@ class HybridEngine(RetrievalEngine):
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
+        self._model_error_sink: Callable[[ModelUnavailableError], None] | None = None
         # One connection, usable from any thread (the UI serves requests on a
         # pool, and sync runs on its own), so every write sequence is serialized
         # on this lock. Without it two threads mistake each other for nested
@@ -245,6 +248,20 @@ class HybridEngine(RetrievalEngine):
     def _rerank(self, query: str, docs: list[str]) -> list[float]:
         """Return one relevance score per doc (higher = more relevant)."""
         raise NotImplementedError
+
+    @contextmanager
+    def _keyword_fallback(self, exc: ModelUnavailableError) -> Iterator[RetrievalEngine]:
+        from poppy.engine.seed import SeedEngine
+
+        # Fall back per operation so the engine keeps its model identity for
+        # backfill and retries lazy model loading on the next request.
+        if self._model_error_sink is not None:
+            self._model_error_sink(exc)
+        seed = SeedEngine(self._db_path)
+        try:
+            yield seed
+        finally:
+            seed._conn.close()
 
     # --- row mapping / filtering ------------------------------------------
 
@@ -376,7 +393,11 @@ class HybridEngine(RetrievalEngine):
         self, old_id: str, memory: Memory, *, before_delete: Callable[[sqlite3.Connection], None] | None = None
     ) -> str:
         enriched = self.embed_text_for(memory.content, memory.source.timestamp.isoformat())
-        embedding = self._embed(enriched)
+        try:
+            embedding = self._embed(enriched)
+        except ModelUnavailableError as exc:
+            with self._keyword_fallback(exc) as seed:
+                return seed.supersede(old_id, memory, before_delete=before_delete)
         with self._lock, write_txn(self._conn):
             if before_delete is not None:
                 before_delete(self._conn)
@@ -387,7 +408,11 @@ class HybridEngine(RetrievalEngine):
         """Store one memory with its full-content index and embedding."""
         enriched = self.embed_text_for(memory.content, memory.source.timestamp.isoformat())
         # Model loading may fail. Do it before taking the database write lock.
-        embedding = self._embed(enriched)
+        try:
+            embedding = self._embed(enriched)
+        except ModelUnavailableError as exc:
+            with self._keyword_fallback(exc) as seed:
+                return seed.ingest(memory)
         return self._ingest_prepared(memory, enriched, embedding)
 
     def _ingest_prepared(self, memory: Memory, enriched: str, embedding: np.ndarray) -> str:
@@ -418,11 +443,15 @@ class HybridEngine(RetrievalEngine):
     # --- retrieval ---------------------------------------------------------
 
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
-        candidates = self._hybrid_retrieve(query, filters, k=FIRST_STAGE_K)
-        if not candidates:
-            return []
+        try:
+            candidates = self._hybrid_retrieve(query, filters, k=FIRST_STAGE_K)
+            if not candidates:
+                return []
 
-        scores = self._rerank(query, [c.memory.content for c in candidates])
+            scores = self._rerank(query, [c.memory.content for c in candidates])
+        except ModelUnavailableError as exc:
+            with self._keyword_fallback(exc) as seed:
+                return seed.retrieve(query, filters=filters, limit=limit)
 
         reranked = [ScoredMemory(memory=c.memory, score=float(s)) for c, s in zip(candidates, scores)]
         reranked.sort(key=lambda x: x.score, reverse=True)

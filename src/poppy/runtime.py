@@ -31,12 +31,14 @@ def get_engine(
     delegate_models_to_daemon: bool = False,
     error_sink: Callable[[str], None] | None = None,
 ) -> RetrievalEngine:
-    """Build the full pipeline, falling back to keyword search on dependency import errors.
+    """Build the full pipeline with keyword-only fallback for unavailable models.
 
     Legacy engine settings have no effect. Models load on first use so commands
     that only access storage do not need a model cache or network connection.
-    With dependencies installed, an uncached model needs a connection to download
-    on first use; an offline load reports an error. Store errors also propagate.
+    Missing dependencies use SeedEngine. An offline, uncached model makes that
+    write or search use keyword-only search; the next call retries the full
+    pipeline. The daemon embeds those memories once models are available.
+    Store errors and other model failures propagate.
     """
     if os.environ.get("POPPY_TEST_FAIL_ON_ENGINE") == "1":
         raise RuntimeError("POPPY_TEST_FAIL_ON_ENGINE: local engine construction is forbidden")
@@ -50,11 +52,14 @@ def get_engine(
     db_path = poppy_dir / "memories.db"
 
     try:
-        return resolve_engine("bloom", db_path, delegate_models_to_daemon=delegate_models_to_daemon)
+        engine = resolve_engine("bloom", db_path, delegate_models_to_daemon=delegate_models_to_daemon)
     except ImportError as exc:
         if error_sink is not None:
             error_sink(_engine_failure_description("bloom", exc))
         return resolve_engine("seed", db_path)
+    if error_sink is not None:
+        engine._model_error_sink = lambda exc: error_sink(_engine_failure_description("bloom", exc))
+    return engine
 
 
 def get_fast_engine(poppy_dir: Path | None = None) -> RetrievalEngine:

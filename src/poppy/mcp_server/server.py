@@ -249,7 +249,7 @@ class PoppyMcpServer:
 
         min_score = load_config(self._poppy_dir).recall_min_score
         if self._engine.apply_recall_score_floor:
-            results = [r for r in results if clears_floor(r.score, min_score)]
+            results = [r for r in results if r.keyword_only or clears_floor(r.score, min_score)]
 
         # Deterministic order: unrounded score desc, newest first on exact ties,
         # then id. Stable multi-key sort applied least-significant key first.
@@ -303,7 +303,7 @@ class PoppyMcpServer:
 
         min_score = load_config(self._poppy_dir).recall_min_score
         if self._engine.apply_recall_score_floor:
-            results = [r for r in results if clears_floor(r.score, min_score)]
+            results = [r for r in results if r.keyword_only or clears_floor(r.score, min_score)]
         return {
             "results": [
                 {

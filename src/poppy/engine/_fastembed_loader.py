@@ -7,7 +7,8 @@ Two guarantees:
   cached). An uncached model downloads normally.
 * A cold cache with no network raises :class:`poppy.errors.ModelUnavailableError`
   with a message requesting a connection for the one-time download instead of a
-  raw huggingface_hub traceback. The operation reports the error to the caller.
+  raw huggingface_hub traceback. Writes and searches use keyword-only fallback;
+  model checks and embedding backfill still receive the error.
 
 On top of loading, :class:`FastembedModels` lazy-loads each encoder and starts a
 daemon timer after the first load. The timer releases both ONNX sessions after

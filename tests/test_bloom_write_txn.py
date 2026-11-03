@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from poppy.engine.bloom import BloomEngine
-from poppy.engine.seed import SeedEngine
+from poppy.engine.seed import SEED_INVALIDATED_MODEL_ID, SeedEngine
 from poppy.errors import ModelUnavailableError
 from poppy.lifecycle import supersede_memory
 from poppy.models import Memory, Source
@@ -123,36 +123,49 @@ def _assert_another_process_can_write(db_path: Path) -> None:
         conn.close()
 
 
-def _fail_embed(monkeypatch: pytest.MonkeyPatch, engine: BloomEngine) -> None:
-    """The real failure mode: the encoder is unavailable when a write needs it."""
+def _fail_embed(
+    monkeypatch: pytest.MonkeyPatch, engine: BloomEngine, error_type: type[Exception] = ModelUnavailableError
+) -> None:
+    """Model unavailability permits keyword writes; other failures must propagate."""
 
     def boom(text: str):
-        raise ModelUnavailableError("model cache is cold and the network is unavailable")
+        raise error_type("embedding failed")
 
     monkeypatch.setattr(engine, "_embed", boom)
 
 
-def test_ingest_that_cannot_embed_leaves_the_store_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed fresh ingest commits nothing and holds no lock."""
+@pytest.mark.parametrize("error_type", [ModelUnavailableError, RuntimeError])
+def test_ingest_that_cannot_embed_leaves_the_store_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    """A model load failure never leaves a write lock held."""
     db = tmp_path / "poppy.db"
     engine = _bloom(db)
     engine.ingest(_memory("mem_keep", _turns(OLD_TEXT)))
     before = _family(db, "mem_keep")
     assert len(before) == 1
 
-    _fail_embed(monkeypatch, engine)
-    with pytest.raises(ModelUnavailableError):
+    _fail_embed(monkeypatch, engine, error_type)
+    if error_type is ModelUnavailableError:
         engine.ingest(_memory("mem_new", "a plain fact"))
+        assert _family(db, "mem_new") == [("mem_new", "a plain fact", "a plain fact")]
+        assert _embedding_ids(db, "mem_new") == []
+    else:
+        with pytest.raises(error_type):
+            engine.ingest(_memory("mem_new", "a plain fact"))
+        assert _rows(db, "SELECT id FROM memories WHERE id = 'mem_new'") == []
 
     assert engine._conn.in_transaction is False
     _assert_another_process_can_write(db)
-    assert _rows(db, "SELECT id FROM memories WHERE id = 'mem_new'") == []
     assert _family(db, "mem_keep") == before
     engine._conn.close()
 
 
-def test_failed_content_edit_keeps_memory_and_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An embedding failure leaves the existing memory and search index intact."""
+@pytest.mark.parametrize("error_type", [ModelUnavailableError, RuntimeError])
+def test_content_edit_handles_embedding_failure_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    """Unavailable models allow edits; other failures preserve the old text and index."""
     db = tmp_path / "poppy.db"
     engine = _bloom(db)
     engine.ingest(_memory("mem_edit", _turns(OLD_TEXT)))
@@ -160,16 +173,20 @@ def test_failed_content_edit_keeps_memory_and_index(tmp_path: Path, monkeypatch:
     assert len(before) == 1
     assert sum(OLD_TEXT in row[2] for row in before) == 1
 
-    _fail_embed(monkeypatch, engine)
-    with pytest.raises(ModelUnavailableError):
+    _fail_embed(monkeypatch, engine, error_type)
+    if error_type is ModelUnavailableError:
         engine.ingest(_memory("mem_edit", _turns(NEW_TEXT)))
+        assert _family(db, "mem_edit") == [("mem_edit", _turns(NEW_TEXT), _turns(NEW_TEXT))]
+        assert _rows(db, "SELECT model_id FROM memory_embeddings") == [(SEED_INVALIDATED_MODEL_ID,)]
+        assert _rows(db, "SELECT id FROM memory_fts WHERE content LIKE ?", (f"%{OLD_TEXT}%",)) == []
+        assert _rows(db, "SELECT id FROM memory_fts WHERE content LIKE ?", (f"%{NEW_TEXT}%",)) == [("mem_edit",)]
+    else:
+        with pytest.raises(error_type):
+            engine.ingest(_memory("mem_edit", _turns(NEW_TEXT)))
+        assert _family(db, "mem_edit") == before
 
     assert engine._conn.in_transaction is False
     _assert_another_process_can_write(db)
-    after = _family(db, "mem_edit")
-    assert after == before
-    assert len(after) == 1
-    assert all(NEW_TEXT not in row[1] for row in after)
     engine._conn.close()
 
 
@@ -320,7 +337,8 @@ def test_a_failed_write_cannot_erase_another_threads_write(tmp_path: Path, monke
     engine._conn.close()
 
 
-def test_supersede_embed_failure_preserves_live_memory(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error_type", [ModelUnavailableError, RuntimeError])
+def test_supersede_handles_embedding_failure_atomically(tmp_path, monkeypatch, error_type):
     db = tmp_path / "memories.db"
     engine = _bloom(db)
     old = _memory("old", OLD_TEXT)
@@ -330,17 +348,25 @@ def test_supersede_embed_failure_preserves_live_memory(tmp_path, monkeypatch):
     before = _rows(db, "SELECT * FROM memories")
     vectors = _rows(db, "SELECT * FROM memory_embeddings")
     index = _rows(db, "SELECT * FROM memory_fts")
-    _fail_embed(monkeypatch, engine)
+    _fail_embed(monkeypatch, engine, error_type)
 
-    with pytest.raises(ModelUnavailableError):
+    if error_type is ModelUnavailableError:
         supersede_memory(engine, _memory("new", NEW_TEXT), old.id, poppy_dir=tmp_path)
+        assert engine.get(old.id) is None
+        assert engine.get("new").content == NEW_TEXT
+        assert _rows(db, "SELECT * FROM memory_embeddings") == []
+        assert _rows(db, "SELECT id, content FROM memory_fts") == [("new", NEW_TEXT)]
+        assert _rows(db, "SELECT id, superseded_by FROM ui_tombstones") == [(old.id, "new")]
+    else:
+        with pytest.raises(error_type):
+            supersede_memory(engine, _memory("new", NEW_TEXT), old.id, poppy_dir=tmp_path)
+        assert engine.get(old.id) == old
+        assert engine.get("new") is None
+        assert _rows(db, "SELECT * FROM memories") == before
+        assert _rows(db, "SELECT * FROM memory_embeddings") == vectors
+        assert _rows(db, "SELECT * FROM memory_fts") == index
+        assert _rows(db, "SELECT * FROM ui_tombstones") == []
 
-    assert engine.get(old.id) == old
-    assert engine.get("new") is None
-    assert _rows(db, "SELECT * FROM memories") == before
-    assert _rows(db, "SELECT * FROM memory_embeddings") == vectors
-    assert _rows(db, "SELECT * FROM memory_fts") == index
-    assert _rows(db, "SELECT * FROM ui_tombstones") == []
     assert engine._conn.in_transaction is False
     _assert_another_process_can_write(db)
     engine._conn.close()
