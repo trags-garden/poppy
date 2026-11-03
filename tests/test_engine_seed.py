@@ -72,6 +72,13 @@ def test_retrieve_fts(tmp_path):
     assert results[0].memory.id == "mem_001"
 
 
+@pytest.mark.parametrize("limit", [0, -1])
+def test_retrieve_non_positive_limit_returns_nothing(tmp_path, limit):
+    engine = SeedEngine(db_path=tmp_path / "test.db")
+    engine.ingest(_make_memory("mem_001", "always use Pydantic validation on FastAPI endpoints"))
+    assert engine.retrieve("Pydantic", limit=limit) == []
+
+
 def test_retrieve_no_results(tmp_path):
     engine = SeedEngine(db_path=tmp_path / "test.db")
     engine.ingest(_make_memory("mem_001", "use black formatter"))
@@ -95,6 +102,87 @@ def test_retrieve_with_type_filter(tmp_path):
 
     results = engine.retrieve("FastAPI", filters=Filters(memory_type="decision"))
     assert all(r.memory.memory_type == "decision" for r in results)
+
+
+@pytest.mark.parametrize("excluded_by", ["project", "memory_type", "expiry", "since", "min_confidence", "timestamp"])
+def test_retrieve_filters_before_candidate_limit(tmp_path, excluded_by):
+    engine = SeedEngine(db_path=tmp_path / "test.db")
+    now = datetime.datetime.now(datetime.UTC)
+    filters = Filters()
+    if excluded_by == "project":
+        filters.project = "quiet"
+    elif excluded_by == "memory_type":
+        filters.memory_type = "decision"
+    elif excluded_by == "since":
+        filters.since = now
+    elif excluded_by == "min_confidence":
+        filters.min_confidence = 0.8
+
+    for i in range(40):
+        memory = _make_memory(f"noisy_{i}", "keyword", project="noisy")
+        if excluded_by == "expiry":
+            memory.expires_at = now - datetime.timedelta(days=1)
+        elif excluded_by == "since":
+            memory.created_at = now - datetime.timedelta(days=1)
+        elif excluded_by == "min_confidence":
+            memory.confidence = 0.5
+        engine.ingest(memory)
+    if excluded_by == "timestamp":
+        with engine._conn:
+            engine._conn.execute("UPDATE memories SET source_timestamp = 'unreadable'")
+
+    target = _make_memory("quiet", "keyword " + "padding " * 200, memory_type="decision", project="quiet")
+    target.created_at = now
+    target.confidence = 0.8
+    engine.ingest(target)
+
+    # The matching row ranks below the original thirty-candidate window.
+    candidates = engine._conn.execute(
+        "SELECT id FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT 30", ('"keyword"',)
+    ).fetchall()
+    assert "quiet" not in {row["id"] for row in candidates}
+    assert [m.id for m in engine.list_all(filters=Filters(project="quiet"))] == ["quiet"]
+    assert [r.memory.id for r in engine.retrieve("keyword", filters=filters)] == ["quiet"]
+    engine.delete("quiet")
+    assert engine.retrieve("keyword", filters=filters) == []
+    engine._conn.close()
+
+
+def test_retrieve_preserves_offset_timestamp_filters(tmp_path):
+    engine = SeedEngine(db_path=tmp_path / "test.db")
+    now = datetime.datetime.now(datetime.UTC)
+    for mid in ("live", "old", "expired"):
+        engine.ingest(_make_memory(mid, "keyword"))
+    # Direct writes can retain non-UTC offsets even after the store's migration.
+    with engine._conn:
+        engine._conn.execute(
+            "UPDATE memories SET created_at = ?",
+            (
+                (now + datetime.timedelta(hours=1))
+                .astimezone(datetime.timezone(datetime.timedelta(hours=-12)))
+                .isoformat(),
+            ),
+        )
+        engine._conn.execute(
+            "UPDATE memories SET created_at = ? WHERE id = 'old'",
+            (
+                (now - datetime.timedelta(hours=1))
+                .astimezone(datetime.timezone(datetime.timedelta(hours=14)))
+                .isoformat(),
+            ),
+        )
+        for mid, hours, offset in (("live", 1, -12), ("expired", -1, 14)):
+            expires_at = (now + datetime.timedelta(hours=hours)).astimezone(
+                datetime.timezone(datetime.timedelta(hours=offset))
+            )
+            engine._conn.execute("UPDATE memories SET expires_at = ? WHERE id = ?", (expires_at.isoformat(), mid))
+
+    assert [r.memory.id for r in engine.retrieve("keyword", filters=Filters(since=now))] == ["live"]
+    assert {r.memory.id for r in engine.retrieve("keyword", filters=Filters(since=now, include_expired=True))} == {
+        "live",
+        "expired",
+    }
+    engine._conn.close()
 
 
 def test_delete(tmp_path):

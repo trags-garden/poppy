@@ -416,48 +416,64 @@ class SeedEngine(RetrievalEngine):
             return self.ingest(memory)
 
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
+        # SQLite reads a negative LIMIT as "no limit", which would keep the
+        # refill loop below from ever seeing the end of the matches.
+        if limit <= 0:
+            return []
         escaped_query = '"' + query.replace('"', '""') + '"'
-        with self._lock:
-            try:
-                rows = self._conn.execute(
-                    """SELECT m.*, rank FROM memory_fts fts
-                       JOIN memories m ON fts.id = m.id
-                       WHERE memory_fts MATCH ?
-                       ORDER BY rank
-                       LIMIT ?""",
-                    (escaped_query, limit * 3),
-                ).fetchall()
-            except Exception as exc:
-                # Only FTS syntax errors mean the query cannot match anything.
-                if type(exc).__name__ != "OperationalError" or not str(exc).startswith("fts5:"):
-                    raise
-                return []
-
+        clauses = ["memory_fts MATCH ?"]
+        params: list = [escaped_query]
+        if filters:
+            if filters.project:
+                clauses.append("m.project = ?")
+                params.append(filters.project)
+            if filters.memory_type:
+                clauses.append("m.memory_type = ?")
+                params.append(filters.memory_type)
+        sql = (
+            "SELECT m.*, rank FROM memory_fts fts JOIN memories m ON fts.id = m.id WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY rank LIMIT ?"
+        )
         now = datetime.now(timezone.utc)
         include_expired = bool(filters and filters.include_expired)
-        results = []
-        for row in rows:
-            try:
-                mem = self._row_to_memory(row)
-            except InvalidTimestampError:
-                logger.debug("Skipping memory %s with an unreadable timestamp", row["id"], exc_info=True)
-                continue
-            if not include_expired and mem.expires_at is not None and mem.expires_at <= now:
-                continue
-            if filters:
-                if filters.project and mem.project != filters.project:
+        candidate_limit = limit * 3
+        while True:
+            with self._lock:
+                try:
+                    rows = self._conn.execute(sql, [*params, candidate_limit]).fetchall()
+                except Exception as exc:
+                    # Only FTS syntax errors mean the query cannot match anything.
+                    if type(exc).__name__ != "OperationalError" or not str(exc).startswith("fts5:"):
+                        raise
+                    return []
+
+            results = []
+            for row in rows:
+                try:
+                    mem = self._row_to_memory(row)
+                except InvalidTimestampError:
+                    logger.debug("Skipping memory %s with an unreadable timestamp", row["id"], exc_info=True)
                     continue
-                if filters.memory_type and mem.memory_type != filters.memory_type:
+                if not include_expired and mem.expires_at is not None and mem.expires_at <= now:
                     continue
-                if filters.since and mem.created_at < filters.since:
-                    continue
-                if filters.min_confidence and mem.confidence < filters.min_confidence:
-                    continue
-            score = abs(row["rank"]) / (1.0 + abs(row["rank"]))
-            results.append(ScoredMemory(memory=mem, score=score, keyword_only=True))
-            if len(results) >= limit:
-                break
-        return results
+                if filters:
+                    if filters.since and mem.created_at < filters.since:
+                        continue
+                    if filters.min_confidence and mem.confidence < filters.min_confidence:
+                        continue
+                score = abs(row["rank"]) / (1.0 + abs(row["rank"]))
+                results.append(ScoredMemory(memory=mem, score=score, keyword_only=True))
+                if len(results) >= limit:
+                    return results
+            if len(rows) < candidate_limit:
+                return results
+            # Parsed timestamps preserve offset and microsecond comparisons;
+            # nullable confidence keeps its Python comparison semantics too.
+            # Refill when those checks or unreadable rows consume the window.
+            # shortcut: each refill rescans from the first match; switch to
+            # OFFSET paging if keyword-only stores get large.
+            candidate_limit *= 2
 
     def get(self, memory_id: str) -> Memory | None:
         with self._lock:

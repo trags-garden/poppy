@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP edit and forget no longer stall other requests while waiting for another writer.
 - Sync now clears expired Trash entries even when an upload hits the memory limit.
 - Automatic capture now saves a new memory when the memory it was replacing has disappeared.
+- Keyword-only recall now finds matching memories even when higher-ranked matches are excluded by filters.
+- The first-use model download notice stays quiet in offline mode and no longer promises a successful download.
 - On case-sensitive filesystems such as most Linux setups, Poppy now recognises an already downloaded embedding model, so it no longer reports a first-run download on every command.
 - `poppy migrate-engine` now repairs old text enrichment and embeds the same text a fresh write does.
 - JSON lists that aren't conversations keep their text searchable, including after automatic backfill.
