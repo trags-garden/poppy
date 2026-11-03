@@ -414,6 +414,10 @@ class SeedEngine(RetrievalEngine):
             return self.ingest(memory)
 
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
+        # SQLite reads a negative LIMIT as "no limit", which would keep the
+        # refill loop below from ever seeing the end of the matches.
+        if limit <= 0:
+            return []
         escaped_query = '"' + query.replace('"', '""') + '"'
         clauses = ["memory_fts MATCH ?"]
         params: list = [escaped_query]
@@ -460,11 +464,13 @@ class SeedEngine(RetrievalEngine):
                 results.append(ScoredMemory(memory=mem, score=score, keyword_only=True))
                 if len(results) >= limit:
                     return results
-            if len(rows) < candidate_limit or not rows:
+            if len(rows) < candidate_limit:
                 return results
             # Parsed timestamps preserve offset and microsecond comparisons;
             # nullable confidence keeps its Python comparison semantics too.
             # Refill when those checks or unreadable rows consume the window.
+            # shortcut: each refill rescans from the first match; switch to
+            # OFFSET paging if keyword-only stores get large.
             candidate_limit *= 2
 
     def get(self, memory_id: str) -> Memory | None:

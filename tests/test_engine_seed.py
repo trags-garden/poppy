@@ -72,6 +72,13 @@ def test_retrieve_fts(tmp_path):
     assert results[0].memory.id == "mem_001"
 
 
+@pytest.mark.parametrize("limit", [0, -1])
+def test_retrieve_non_positive_limit_returns_nothing(tmp_path, limit):
+    engine = SeedEngine(db_path=tmp_path / "test.db")
+    engine.ingest(_make_memory("mem_001", "always use Pydantic validation on FastAPI endpoints"))
+    assert engine.retrieve("Pydantic", limit=limit) == []
+
+
 def test_retrieve_no_results(tmp_path):
     engine = SeedEngine(db_path=tmp_path / "test.db")
     engine.ingest(_make_memory("mem_001", "use black formatter"))
