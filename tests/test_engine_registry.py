@@ -6,12 +6,12 @@ behavior against those names directly.
 
 import builtins
 import json
-import sqlite3
 
 import pytest
 
 import poppy.engine.registry as registry
 from poppy.config import PoppyConfig, load_config, save_config
+from poppy.engine._fastembed_loader import FastembedModels
 from poppy.engine.bloom import BloomEngine
 from poppy.engine.registry import EngineInfo, canonical_name, known_names, list_engines, resolve_engine
 from poppy.engine.seed import SeedEngine
@@ -131,25 +131,37 @@ def test_runtime_reports_configured_engine_failure_when_fallback_succeeds(tmp_pa
     assert errors == ["bloom: ImportError: engine construction failed"]
 
 
-def test_runtime_offline_models_fall_back_before_a_write(tmp_path, monkeypatch):
-    connections = []
+@pytest.mark.parametrize(
+    "exc", [ModelUnavailableError("Connect once to download the models."), RuntimeError("corrupt cached model")]
+)
+def test_runtime_defers_model_failure_until_first_embed(tmp_path, monkeypatch, exc):
+    loads = []
 
-    def unavailable(self, *, download=False):
-        assert download
-        connections.append(self._conn)
-        raise ModelUnavailableError("Connect once to download the models.")
+    def unavailable(self, kind):
+        loads.append(kind)
+        raise exc
 
-    monkeypatch.setattr(BloomEngine, "check_models", unavailable)
+    def unexpected_check(*args, **kwargs):
+        pytest.fail("engine construction must leave models lazy")
+
+    monkeypatch.setattr(BloomEngine, "check_models", unexpected_check)
+    monkeypatch.setattr(FastembedModels, "_load_model", unavailable)
     errors = []
     engine = get_engine(tmp_path, error_sink=errors.append)
 
-    assert isinstance(engine, SeedEngine)
-    assert "ModelUnavailableError" in errors[0]
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-        connections[0].execute("SELECT 1")
+    assert isinstance(engine, BloomEngine)
+    assert engine.stats().memory_count == 0
+    assert engine.list_all() == []
+    assert errors == loads == []
+    with pytest.raises(type(exc), match=str(exc)):
+        engine._embed("first use")
+    assert loads == ["bi"]
+    assert engine._models._bi is None
 
 
-@pytest.mark.parametrize("exc", [ValueError("bad schema"), OSError("disk failure")])
+@pytest.mark.parametrize(
+    "exc", [ValueError("bad schema"), OSError("disk failure"), ModelUnavailableError("models unavailable")]
+)
 def test_runtime_never_hides_store_errors(tmp_path, monkeypatch, exc):
     def fail(*args, **kwargs):
         raise exc
@@ -218,6 +230,17 @@ def test_load_config_preserves_legacy_engine_name_silently(tmp_path, capsys):
     cfg = load_config(tmp_path)
     assert cfg.engine == "speaker_closet"
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("value", [None, 42, False, ["seed"], {"name": "seed"}])
+def test_load_config_coerces_legacy_engine_value_to_string(tmp_path, value):
+    original = json.dumps({"engine": value})
+    path = tmp_path / "config.json"
+    path.write_text(original)
+
+    assert load_config(tmp_path).engine == str(value)
+    assert isinstance(get_engine(tmp_path), BloomEngine)
+    assert path.read_text() == original
 
 
 def test_load_config_preserves_petal(tmp_path, capsys):

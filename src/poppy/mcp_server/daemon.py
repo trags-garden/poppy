@@ -24,6 +24,7 @@ from poppy import __version__
 from poppy.engine._model_holder import model_runtime_status
 from poppy.engine.interface import RetrievalEngine
 from poppy.engine.migration import backfill
+from poppy.errors import ModelUnavailableError
 from poppy.mcp_server.auth import bearer_token_matches, load_daemon_token
 from poppy.paths import ensure_poppy_dir
 
@@ -40,32 +41,14 @@ async def _backfill_loop(engine: RetrievalEngine, poppy_dir: Path) -> None:
     # The daemon owns this trigger so neither hook reads nor foreground writes
     # pay for old memories. Each pass scans and embeds at most 32 rows, on a
     # worker thread so model loading cannot block the request loop.
-    from poppy.runtime import get_engine
-
-    original = engine
-
-    def run_pass() -> None:
-        nonlocal engine
-        # A daemon started offline retries here and retains recovered models
-        # across passes rather than loading a fresh pair every minute.
-        if engine.model_id is None:
-            candidate = get_engine(poppy_dir)
-            if candidate.model_id is None:
-                candidate._conn.close()
-                return
-            engine = candidate
-        _backfill_once(engine, poppy_dir)
-
-    try:
-        while True:
-            try:
-                await anyio.to_thread.run_sync(run_pass)
-            except Exception as exc:
-                print(f"Daemon backfill failed: {type(exc).__name__}", file=sys.stderr)
-            await anyio.sleep(BACKFILL_INTERVAL_S)
-    finally:
-        if engine is not original:
-            engine._conn.close()
+    while True:
+        try:
+            await anyio.to_thread.run_sync(_backfill_once, engine, poppy_dir)
+        except ModelUnavailableError:
+            pass
+        except Exception as exc:
+            print(f"Daemon backfill failed: {type(exc).__name__}", file=sys.stderr)
+        await anyio.sleep(BACKFILL_INTERVAL_S)
 
 
 def _log_inference_failure(exc: Exception, stage: str) -> None:

@@ -651,7 +651,7 @@ def check_engine(ctx: DoctorContext) -> None:
     poppy_dir = ctx.poppy_dir
 
     try:
-        engine = _main._get_engine(download_models=False)
+        engine = _main._get_engine()
         s = engine.stats()
         engine.check_models()
         from poppy.engine.migration import stale_stats as _stale_stats

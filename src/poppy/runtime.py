@@ -6,7 +6,6 @@ from pathlib import Path
 
 from poppy.engine.interface import RetrievalEngine
 from poppy.engine.seed import SeedEngine
-from poppy.errors import ModelUnavailableError
 from poppy.paths import ensure_poppy_dir
 
 
@@ -30,14 +29,13 @@ def get_engine(
     poppy_dir: Path | None = None,
     *,
     delegate_models_to_daemon: bool = False,
-    download_models: bool = True,
     error_sink: Callable[[str], None] | None = None,
 ) -> RetrievalEngine:
-    """Build the full pipeline, falling back to keyword search when models cannot load.
+    """Build the full pipeline, falling back to keyword search on broken dependencies.
 
-    Legacy engine settings have no effect. Model checks happen here so an
-    offline cold cache falls back before a read or write starts. Database and
-    other unexpected errors still propagate rather than hiding a broken store.
+    Legacy engine settings have no effect. Models load on first use so commands
+    that only access storage do not need a model cache or network connection.
+    Model availability and store errors propagate rather than hiding a failure.
     """
     if os.environ.get("POPPY_TEST_FAIL_ON_ENGINE") == "1":
         raise RuntimeError("POPPY_TEST_FAIL_ON_ENGINE: local engine construction is forbidden")
@@ -50,21 +48,12 @@ def get_engine(
     load_config(poppy_dir)
     db_path = poppy_dir / "memories.db"
 
-    engine = None
     try:
-        engine = resolve_engine("bloom", db_path, delegate_models_to_daemon=delegate_models_to_daemon)
-        engine.check_models(download=download_models)
-        return engine
-    except (ImportError, ModelUnavailableError) as exc:
+        return resolve_engine("bloom", db_path, delegate_models_to_daemon=delegate_models_to_daemon)
+    except ImportError as exc:
         if error_sink is not None:
             error_sink(_engine_failure_description("bloom", exc))
-        if engine is not None:
-            engine._conn.close()
         return resolve_engine("seed", db_path)
-    except Exception:
-        if engine is not None:
-            engine._conn.close()
-        raise
 
 
 def get_fast_engine(poppy_dir: Path | None = None) -> RetrievalEngine:

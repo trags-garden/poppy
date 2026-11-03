@@ -11,7 +11,8 @@ daemon backfills use the same migration path as the manual command.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -20,6 +21,9 @@ from poppy.db import apply_row_factory
 from poppy.db import connect as connect_db
 from poppy.engine._timestamps import migration_applied, record_migration
 from poppy.engine.interface import RetrievalEngine
+from poppy.errors import ModelUnavailableError
+
+logger = logging.getLogger(__name__)
 
 BACKFILL_LIMIT = 32
 ENRICHMENT_REPAIR = "full_content_embeddings_v1"
@@ -188,8 +192,10 @@ def _build_where_clause(model_id: str, filters: MigrateFilters) -> tuple[str, li
     return where, params
 
 
-def count_targets(db_path: Path, model_id: str, filters: MigrateFilters) -> int:
-    """Count rows matching the migration filters, without re-embedding any."""
+def count_targets(
+    db_path: Path, model_id: str, filters: MigrateFilters, *, engine: RetrievalEngine | None = None
+) -> int:
+    """Count migration targets, including pending text repairs when an engine is supplied."""
     if not db_path.exists():
         return 0
     conn = connect_db(db_path)
@@ -204,7 +210,19 @@ def count_targets(db_path: Path, model_id: str, filters: MigrateFilters) -> int:
         apply_row_factory(conn)
         where, params = _build_where_clause(model_id, filters)
         sql = f"SELECT COUNT(*) FROM memories m LEFT JOIN memory_embeddings e ON m.id = e.id WHERE {where}"
-        return conn.execute(sql, params).fetchone()[0]
+        total = conn.execute(sql, params).fetchone()[0]
+        if engine is not None and not filters.include_compatible and not migration_applied(conn, ENRICHMENT_REPAIR):
+            # Count text repairs without invalidating vectors, so a dry run
+            # describes the same work as migration without changing the store.
+            where, params = _build_where_clause(model_id, replace(filters, include_compatible=True))
+            rows = conn.execute(
+                "SELECT m.content, m.source_timestamp, m.enriched_content FROM memories m "
+                "JOIN memory_embeddings e ON m.id = e.id "
+                f"WHERE {where} AND e.model_id = ?",
+                [*params, model_id],
+            )
+            total += sum(enriched != engine.embed_text_for(content, timestamp) for content, timestamp, enriched in rows)
+        return total
     finally:
         conn.close()
 
@@ -273,6 +291,9 @@ def migrate(
             f"engine {type(engine).__name__} declares model_id={engine.model_id!r} "
             "but exposes no _embed(text) method; migration cannot proceed."
         )
+    if not db_path.exists() or (limit is not None and limit <= 0):
+        return 0
+    _repair_enrichment(engine, db_path, limit)
     targets = (
         list_targets(db_path, engine.model_id, filters)
         if limit is None
@@ -296,9 +317,15 @@ def migrate(
             if row is None:
                 continue
             content, source_timestamp = row
-            text = engine.embed_text_for(content, source_timestamp)
-            vec = embedder(text)
-            blob = vec.tobytes()
+            try:
+                text = engine.embed_text_for(content, source_timestamp)
+                vec = embedder(text)
+                blob = vec.tobytes()
+            except ModelUnavailableError:
+                raise
+            except Exception as exc:
+                logger.warning("Memory %s: %s", memory_id, type(exc).__name__)
+                continue
             # Embedding can be slow, so it runs outside the lock; the write then
             # re-verifies the raw content and timestamp under BEGIN IMMEDIATE.
             # It only stores the vector if neither changed during the embed. A
@@ -336,8 +363,8 @@ def migrate(
         write_conn.close()
 
 
-def _repair_enrichment(engine: RetrievalEngine, db_path: Path, limit: int) -> None:
-    """Invalidate old raw-text vectors, scanning at most ``limit`` rows per pass."""
+def _repair_enrichment(engine: RetrievalEngine, db_path: Path, limit: int | None) -> None:
+    """Invalidate mismatched text vectors, optionally bounding the resumable scan."""
     conn = connect_db(db_path)
     try:
         if migration_applied(conn, ENRICHMENT_REPAIR):
@@ -358,7 +385,7 @@ def _repair_enrichment(engine: RetrievalEngine, db_path: Path, limit: int) -> No
             rows = conn.execute(
                 "SELECT rowid, id, content, source_timestamp, enriched_content FROM memories "
                 "WHERE rowid > ? ORDER BY rowid LIMIT ?",
-                (cursor[0] if cursor else 0, limit),
+                (cursor[0] if cursor else 0, limit if limit is not None else -1),
             ).fetchall()
             for _, memory_id, content, source_timestamp, enriched in rows:
                 if enriched != engine.embed_text_for(content, source_timestamp):
@@ -370,7 +397,7 @@ def _repair_enrichment(engine: RetrievalEngine, db_path: Path, limit: int) -> No
                         "WHERE id = ? AND model_id = ?",
                         (memory_id, engine.model_id),
                     )
-            if len(rows) < limit:
+            if limit is None or len(rows) < limit:
                 record_migration(conn, ENRICHMENT_REPAIR)
                 conn.execute("DELETE FROM poppy_backfill_state WHERE name = ?", (ENRICHMENT_REPAIR,))
             else:
@@ -390,5 +417,4 @@ def backfill(engine: RetrievalEngine, db_path: Path, *, limit: int = BACKFILL_LI
     """Restore a bounded batch of memories, including a resumable one-time text repair."""
     if engine.model_id is None or limit <= 0:
         return 0
-    _repair_enrichment(engine, db_path, limit)
     return migrate(engine, db_path, MigrateFilters(), limit=limit)

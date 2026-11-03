@@ -18,20 +18,16 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _available_doctor_models(monkeypatch):
-    """Use deterministic runtime models; model loading and health have their own tests."""
+    """Keep model construction deterministic without changing when models load."""
     from test_engine_bloom import _FakeBiEncoder, _FakeCrossEncoder
 
     from poppy.engine._fastembed_loader import FastembedModels
 
     original = FastembedModels.check_available
 
-    def available(self, *, download=False):
-        if download:
-            self._bi = _FakeBiEncoder()
-            self._cross = _FakeCrossEncoder()
-            self._cross_injected = True
-
-    monkeypatch.setattr(FastembedModels, "check_available", available)
+    monkeypatch.setattr(FastembedModels, "check_available", lambda self, **kwargs: None)
+    monkeypatch.setattr("fastembed.TextEmbedding", lambda *args, **kwargs: _FakeBiEncoder())
+    monkeypatch.setattr("fastembed.rerank.cross_encoder.TextCrossEncoder", lambda *args, **kwargs: _FakeCrossEncoder())
     return original
 
 

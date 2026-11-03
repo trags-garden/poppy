@@ -4,17 +4,25 @@ import threading
 
 import anyio
 import pytest
+from click.testing import CliRunner
 from starlette.applications import Starlette
+from test_engine_bloom import _FakeBiEncoder, _FakeCrossEncoder
 from test_engine_migration import _FakeEngine, _make_memory
 
+from poppy.cli.main import cli
 from poppy.db import connect
+from poppy.engine._fastembed_loader import FastembedModels
 from poppy.engine._timestamps import migration_applied
 from poppy.engine.bloom import BloomEngine
 from poppy.engine.migration import BACKFILL_LIMIT, ENRICHMENT_REPAIR, backfill
 from poppy.engine.seed import SeedEngine
+from poppy.errors import ModelUnavailableError
 from poppy.mcp_server import daemon
+from poppy.mcp_server.server import PoppyMcpServer
+from poppy.runtime import get_engine
 
 CONVERSATION = '[{"speaker": "A", "text": "hi"}, {"speaker": "B", "text": "yo"}]'
+TEXT_LIST = '["Never deploy on Friday"]'
 
 
 @pytest.fixture
@@ -44,6 +52,65 @@ def test_daemon_backfill_matches_fresh_ingest_and_updates_fts(tmp_path, engine):
         assert conn.execute("SELECT id FROM memory_fts WHERE memory_fts MATCH 'Conversation'").fetchall() == [
             (memory.id,)
         ]
+
+
+@pytest.mark.parametrize("write_path", ["fresh", "backfill"])
+@pytest.mark.parametrize(
+    "content",
+    [TEXT_LIST, '[{"speaker": "A", "text": "hello"}, "Never deploy on Friday", 42, null, ["nested text"]]'],
+)
+def test_json_list_text_stays_searchable_by_keyword(tmp_path, engine, write_path, content):
+    memory = _make_memory("list", content)
+    seed = SeedEngine(engine._db_path)
+    if write_path == "fresh":
+        engine.ingest(memory)
+    else:
+        seed.ingest(memory)
+        assert daemon._backfill_once(engine, tmp_path) == 1
+
+    assert [match.memory.id for match in seed.retrieve("Friday")] == [memory.id]
+    indexed = _full_row(engine._db_path, memory.id)[0]
+    if content == TEXT_LIST:
+        assert indexed == content
+    else:
+        assert indexed.startswith("Conversation on ")
+        assert 'A: hello\nNever deploy on Friday\n42\nnull\n["nested text"]' in indexed
+
+
+@pytest.mark.parametrize("content", [TEXT_LIST, CONVERSATION])
+@pytest.mark.parametrize("write_path", ["backfill", "manual"])
+def test_current_model_damaged_enrichment_is_repaired(tmp_path, engine, content, write_path):
+    memory = _make_memory("damaged", content)
+    engine.ingest(memory)
+    expected = _full_row(engine._db_path, memory.id)
+    damaged = "Conversation on July 01, 2026." if content == TEXT_LIST else content
+    with connect(engine._db_path) as conn:
+        conn.execute("UPDATE memories SET enriched_content = ?", (damaged,))
+        conn.execute("UPDATE memory_embeddings SET embedding = ?", (_FakeEngine()._embed(damaged).tobytes(),))
+    keyword = "Friday" if content == TEXT_LIST else "Conversation"
+    assert SeedEngine(engine._db_path).retrieve(keyword) == []
+
+    if write_path == "manual":
+        env = {"POPPY_DIR": str(tmp_path)}
+        before = _full_row(engine._db_path, memory.id)
+        dry_run = CliRunner().invoke(cli, ["migrate-engine", "--dry-run"], env=env)
+        assert dry_run.exit_code == 0, dry_run.output
+        assert "Target: 1 memories" in dry_run.output
+        assert _full_row(engine._db_path, memory.id) == before
+        with connect(engine._db_path) as conn:
+            assert not migration_applied(conn, ENRICHMENT_REPAIR)
+        result = CliRunner().invoke(cli, ["migrate-engine"], env=env)
+        assert result.exit_code == 0, result.output
+        assert "Target: 1 memories" in result.output
+        assert "Re-embedded 1 memories." in result.output
+    else:
+        assert daemon._backfill_once(engine, tmp_path) == 1
+
+    assert _full_row(engine._db_path, memory.id) == expected
+    assert [match.memory.id for match in SeedEngine(engine._db_path).retrieve(keyword)] == [memory.id]
+    with connect(engine._db_path) as conn:
+        assert migration_applied(conn, ENRICHMENT_REPAIR)
+    assert daemon._backfill_once(engine, tmp_path) == 0
 
 
 @pytest.mark.parametrize("model_id", [None, "old-model", "seed-invalidated"])
@@ -121,10 +188,10 @@ def test_repair_scan_resumes_and_failed_embedding_remains_a_target(engine, monke
     embed = engine._embed
 
     def unavailable(text):
-        raise OSError("model temporarily unavailable")
+        raise ModelUnavailableError("model temporarily unavailable")
 
     monkeypatch.setattr(engine, "_embed", unavailable)
-    with pytest.raises(OSError, match="temporarily unavailable"):
+    with pytest.raises(ModelUnavailableError, match="temporarily unavailable"):
         backfill(engine, engine._db_path, limit=2)
     with connect(engine._db_path) as conn:
         assert migration_applied(conn, ENRICHMENT_REPAIR)
@@ -132,6 +199,47 @@ def test_repair_scan_resumes_and_failed_embedding_remains_a_target(engine, monke
     monkeypatch.setattr(engine, "_embed", embed)
     assert backfill(engine, engine._db_path, limit=2) == 1
     assert backfill(engine, engine._db_path, limit=2) == 0
+
+
+def test_backfill_skips_bad_row_and_logs_only_id_and_exception_type(engine, monkeypatch, caplog):
+    seed = SeedEngine(engine._db_path)
+    seed.ingest(_make_memory("bad", "private memory text", created_days_ago=1))
+    seed.ingest(_make_memory("good", "searchable memory"))
+    embed = engine._embed
+    attempts = []
+
+    def fail_one(text):
+        attempts.append(text)
+        if text == "private memory text":
+            raise ValueError("failed to embed private memory text")
+        return embed(text)
+
+    monkeypatch.setattr(engine, "_embed", fail_one)
+    assert backfill(engine, engine._db_path, limit=2) == 1
+    assert attempts == ["private memory text", "searchable memory"]
+    assert _full_row(engine._db_path, "bad") is None
+    assert _full_row(engine._db_path, "good")[2] == engine.model_id
+    assert [record.getMessage() for record in caplog.records] == ["Memory bad: ValueError"]
+    assert all(record.exc_info is None for record in caplog.records)
+
+    monkeypatch.setattr(engine, "_embed", embed)
+    assert backfill(engine, engine._db_path, limit=2) == 1
+
+
+def test_manual_migration_finishes_a_partially_scanned_enrichment_repair(tmp_path, engine):
+    for i in range(BACKFILL_LIMIT + 3):
+        engine.ingest(_make_memory(f"m{i}", CONVERSATION))
+    with connect(engine._db_path) as conn:
+        conn.execute("UPDATE memories SET enriched_content = content")
+    assert backfill(engine, engine._db_path, limit=2) == 2
+
+    result = CliRunner().invoke(cli, ["migrate-engine"], env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code == 0, result.output
+    assert f"Re-embedded {BACKFILL_LIMIT + 1} memories." in result.output
+    with connect(engine._db_path) as conn:
+        assert migration_applied(conn, ENRICHMENT_REPAIR)
+        assert conn.execute("SELECT COUNT(*) FROM memories WHERE enriched_content = content").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
@@ -154,14 +262,33 @@ async def test_daemon_lifespan_runs_backfill_on_a_worker_thread(tmp_path, engine
 
 
 @pytest.mark.asyncio
-async def test_daemon_retries_offline_start_and_reuses_recovered_models(tmp_path, engine, monkeypatch):
-    seed = SeedEngine(engine._db_path)
+async def test_daemon_retries_offline_start_and_serves_full_pipeline_with_same_engine(tmp_path, monkeypatch, capsys):
+    seed = SeedEngine(tmp_path / "memories.db")
     seed.ingest(_make_memory("offline", CONVERSATION))
-    resolutions = []
+    available = False
+    loads = []
+    reranks = []
 
-    def resolve(poppy_dir):
-        resolutions.append(poppy_dir)
-        return engine
+    class CrossEncoder(_FakeCrossEncoder):
+        def rerank(self, query, docs, **kwargs):
+            reranks.append((query, docs))
+            return super().rerank(query, docs, **kwargs)
+
+    def load(self, kind):
+        loads.append(kind)
+        if not available:
+            raise ModelUnavailableError("models unavailable")
+        return _FakeBiEncoder() if kind == "bi" else CrossEncoder()
+
+    monkeypatch.setattr(FastembedModels, "_load_model", load)
+    engine = get_engine(tmp_path)
+    server = PoppyMcpServer(poppy_dir=tmp_path, engine=engine)
+    assert loads == []
+
+    def unexpected_construction(*args, **kwargs):
+        pytest.fail("backfill must use the engine serving requests")
+
+    monkeypatch.setattr("poppy.runtime.get_engine", unexpected_construction)
 
     class Finished(Exception):
         pass
@@ -169,14 +296,44 @@ async def test_daemon_retries_offline_start_and_reuses_recovered_models(tmp_path
     pauses = []
 
     async def pause(seconds):
+        nonlocal available
         pauses.append(seconds)
+        assert seconds == daemon.BACKFILL_INTERVAL_S
+        available = True
         if len(pauses) == 2:
             raise Finished
 
-    monkeypatch.setattr("poppy.runtime.get_engine", resolve)
+    monkeypatch.setattr(daemon.anyio, "sleep", pause)
+    with pytest.raises(Finished):
+        await daemon._backfill_loop(engine, tmp_path)
+
+    assert _full_row(engine._db_path, "offline")[2] == engine.model_id
+    result = await server.handle_recall(query="unrelated query")
+    assert [memory["id"] for memory in result["memories"]] == ["offline"]
+    assert server._engine is engine
+    assert loads == ["bi", "bi", "cross"]
+    assert reranks == [("unrelated query", [_full_row(engine._db_path, "offline")[0]])]
+    assert "Daemon backfill failed" not in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_daemon_backfill_quietly_skips_model_free_engine(tmp_path, monkeypatch, capsys):
+    seed = SeedEngine(tmp_path / "memories.db")
+    seed.ingest(_make_memory("keyword", "keyword memory"))
+
+    def unexpected_construction(*args, **kwargs):
+        pytest.fail("a model-free engine must not be replaced during backfill")
+
+    class Finished(Exception):
+        pass
+
+    async def pause(seconds):
+        raise Finished
+
+    monkeypatch.setattr("poppy.runtime.get_engine", unexpected_construction)
     monkeypatch.setattr(daemon.anyio, "sleep", pause)
     with pytest.raises(Finished):
         await daemon._backfill_loop(seed, tmp_path)
 
-    assert resolutions == [tmp_path]
-    assert _full_row(engine._db_path, "offline")[2] == engine.model_id
+    assert seed.stats().memory_count == 1
+    assert capsys.readouterr().err == ""

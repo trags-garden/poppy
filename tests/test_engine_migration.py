@@ -255,6 +255,27 @@ def test_migrate_is_idempotent_on_clean_db(tmp_path: Path) -> None:
     assert migrate(_FakeEngine(), db, MigrateFilters()) == 0
 
 
+def test_migrate_missing_store_does_not_create_it(tmp_path):
+    db = tmp_path / "missing.db"
+
+    assert migrate(_FakeEngine(), db, MigrateFilters()) == 0
+    assert not db.exists()
+
+
+def test_migrate_empty_batch_leaves_enrichment_untouched(tmp_path, monkeypatch):
+    monkeypatch.setattr(BloomEngine, "_embed", _FakeEngine._embed)
+    engine = BloomEngine(tmp_path / "memories.db")
+    memory = _make_memory("conversation", '[{"speaker": "A", "text": "hello"}]')
+    engine.ingest(memory)
+    with connect(engine._db_path) as conn:
+        conn.execute("UPDATE memories SET enriched_content = content")
+
+    assert migrate(engine, engine._db_path, MigrateFilters(), limit=0) == 0
+    with connect(engine._db_path) as conn:
+        assert conn.execute("SELECT enriched_content FROM memories").fetchone()[0] == memory.content
+        assert conn.execute("SELECT model_id FROM memory_embeddings").fetchone()[0] == engine.model_id
+
+
 def test_migrate_rejects_engine_without_model_id(tmp_path: Path) -> None:
     db = tmp_path / "memories.db"
     SeedEngine(db_path=db).ingest(_make_memory("m1", "alpha"))

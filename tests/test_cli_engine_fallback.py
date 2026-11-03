@@ -97,6 +97,48 @@ def test_hook_and_serve_never_report_engine_fallback(tmp_path: Path, monkeypatch
     assert not (tmp_path / _ENGINE_FALLBACK_NOTICE_FILE).exists()
 
 
+def test_serve_constructs_pipeline_without_model_access(tmp_path, monkeypatch):
+    from poppy.engine._fastembed_loader import FastembedModels
+    from poppy.engine.bloom import BloomEngine
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("starting the server must leave model loading to first use")
+
+    def run(server, **kwargs):
+        assert isinstance(server._poppy_engine, BloomEngine)
+        assert server._poppy_engine._models._bi is None
+        assert server._poppy_engine._models._cross is None
+
+    monkeypatch.setattr(BloomEngine, "check_models", unexpected)
+    monkeypatch.setattr(FastembedModels, "_load_model", unexpected)
+    monkeypatch.setattr(FastMCP, "run", run)
+
+    result = CliRunner().invoke(cli, ["serve", "--no-daemon"], env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("args", [["list"], ["stats"], ["forget", "stored", "--yes"], ["expire", "--yes"]])
+def test_storage_commands_do_not_check_or_load_models(tmp_path, monkeypatch, args):
+    from test_engine_migration import _make_memory
+
+    from poppy.engine._fastembed_loader import FastembedModels
+    from poppy.engine.bloom import BloomEngine
+    from poppy.engine.seed import SeedEngine
+
+    SeedEngine(tmp_path / "memories.db").ingest(_make_memory("stored", "stored memory"))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("storage-only commands must not access models")
+
+    monkeypatch.setattr(BloomEngine, "check_models", unexpected)
+    monkeypatch.setattr(FastembedModels, "_load_model", unexpected)
+
+    result = CliRunner().invoke(cli, args, env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code == 0, result.output
+
+
 def test_corrupt_unwritable_throttle_never_breaks_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _make_bloom_unavailable(monkeypatch)
     notice_path = tmp_path / _ENGINE_FALLBACK_NOTICE_FILE
@@ -144,19 +186,24 @@ def test_retired_use_migrate_points_to_manual_command(tmp_path):
     assert not (tmp_path / "config.json").exists()
 
 
-def test_engines_shows_pipeline_dependencies_and_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("deps_ok", [True, False])
+def test_engines_shows_pipeline_dependencies_and_fallback(tmp_path, monkeypatch, deps_ok):
     from poppy.engine.registry import EngineInfo
 
     monkeypatch.setattr(
         registry,
         "list_engines",
         lambda: [
-            EngineInfo("bloom", "Retrieval pipeline", True, False, "missing onnxruntime"),
+            EngineInfo("bloom", "Retrieval pipeline", True, deps_ok, None if deps_ok else "missing onnxruntime"),
             EngineInfo("seed", "Built-in keyword-only fallback", True, True, None),
         ],
     )
     result = CliRunner().invoke(cli, ["engines"], env={"POPPY_DIR": str(tmp_path)})
     assert result.exit_code == 0, result.output
-    assert "bloom" in result.output and "missing onnxruntime" in result.output
+    active = next(line for line in result.output.splitlines() if "★" in line)
+    assert ("bloom" if deps_ok else "seed") in active
+    if not deps_ok:
+        assert "missing onnxruntime" in result.output
+        assert "Keyword-only fallback is in use" in result.output
     assert "keyword-only fallback" in result.output
     assert "Switch with" not in result.output

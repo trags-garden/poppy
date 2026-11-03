@@ -102,23 +102,18 @@ def _speaker_of(turn: dict) -> str | None:
 
 
 def _enrich_full_content(content: str, session_timestamp: str | None = None) -> str:
-    """Champion's enrichment — full session with all speakers."""
+    """Render turn lists with a preamble while preserving other list content."""
     try:
         turns = json.loads(content)
-        if not isinstance(turns, list):
+        if not isinstance(turns, list) or not any(isinstance(turn, dict) for turn in turns):
             return content
     except (json.JSONDecodeError, TypeError):
         return content
 
-    # ``speaker_of`` falls back to "Unknown" for anything that is not a
-    # non-empty string. Whatever JSON is in the store reaches here — a list, a
-    # dict, a number — and enrichment must degrade, not raise: a TypeError here
-    # would take down every ingest of that memory.
+    # Speaker metadata can be malformed; it must not prevent storing the text.
     speakers = []
     seen: set[str] = set()
     for turn in turns:
-        # Skipped in the rendering loop below too: counting a non-dict turn here
-        # would name a speaker in the preamble that has no lines under it.
         if not isinstance(turn, dict):
             continue
         speaker = _speaker_of(turn) or "Unknown"
@@ -148,6 +143,7 @@ def _enrich_full_content(content: str, session_timestamp: str | None = None) -> 
 
     for turn in turns:
         if not isinstance(turn, dict):
+            lines.append(turn if isinstance(turn, str) else json.dumps(turn, ensure_ascii=False))
             continue
         speaker = _speaker_of(turn) or "Unknown"
         dia_id = turn.get("dia_id", "")

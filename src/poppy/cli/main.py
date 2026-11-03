@@ -70,11 +70,11 @@ def _maybe_print_engine_fallback_notice(
     )
 
 
-def _get_engine(*, download_models: bool = True) -> RetrievalEngine:
+def _get_engine() -> RetrievalEngine:
     poppy_dir = _get_poppy_dir()
     configured = "bloom"
     errors: list[str] = []
-    engine = _runtime_get_engine(poppy_dir, error_sink=errors.append, download_models=download_models)
+    engine = _runtime_get_engine(poppy_dir, error_sink=errors.append)
     active = getattr(engine, "_engine_name", configured)
     if errors and active != configured:
         _maybe_print_engine_fallback_notice(
@@ -572,9 +572,10 @@ def engines(ctx: click.Context):
     from poppy.engine.registry import list_engines
 
     rows = list_engines()
+    active = "bloom" if any(e.name == "bloom" and e.deps_ok for e in rows) else "seed"
     name_w = max(len(e.name) for e in rows)
     for e in rows:
-        marker = "★" if e.name == "bloom" else " "
+        marker = "★" if e.name == active else " "
         ok = "✓" if e.deps_ok else "✗"
         tag = "  (built-in)" if e.builtin else ""
         click.echo(f" {marker} {ok}  {e.name:<{name_w}}{tag}  {e.description}")
@@ -582,6 +583,8 @@ def engines(ctx: click.Context):
             click.echo(f"          missing: {e.deps_error}")
     click.echo()
     click.echo("Poppy uses one retrieval pipeline, with automatic keyword-only fallback.")
+    if active == "seed":
+        click.echo("Keyword-only fallback is in use because the retrieval dependencies cannot load.")
 
 
 @engines.command("use")
@@ -621,12 +624,12 @@ def migrate_engine(
     include_compatible: bool,
     dry_run: bool,
 ):
-    """Re-embed memories so their vectors match the active engine.
+    """Repair indexed text and re-embed memories with the retrieval models.
 
-    Without filters: re-embeds every row whose model_id differs from the
-    active engine's bi-encoder (or is NULL from a legacy DB). With filters:
-    only the matching subset. Idempotent and resumable: each row is
-    committed individually, so Ctrl+C and rerun continues where it left off.
+    Without filters: repairs old text enrichment and re-embeds missing or
+    outdated vectors. With filters: only the matching subset is re-embedded.
+    Idempotent and resumable: each row is committed individually, so Ctrl+C
+    and rerun continues where it left off.
     """
     from poppy.engine.migration import (
         MigrateFilters,
@@ -652,7 +655,7 @@ def migrate_engine(
         include_compatible=include_compatible,
     )
     db_path = poppy_dir / "memories.db"
-    target = count_targets(db_path, engine.model_id, filters)
+    target = count_targets(db_path, engine.model_id, filters, engine=engine)
     click.echo(f"Target: {target} memories under model_id={engine.model_id!r}")
     if dry_run:
         return

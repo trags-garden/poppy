@@ -84,8 +84,10 @@ def test_doctor_checks_models_without_downloading(tmp_path, monkeypatch, capsys,
     doctor.check_engine(ctx)
 
     output = capsys.readouterr().out
-    assert "keyword-only fallback" in output
-    assert "connect once to download the models" in output
+    assert not ctx.ok
+    assert "engine: FAIL" in output
+    assert "Connect to the internet for the one-time model download" in output
+    assert "keyword-only search" in output
     assert "engines use" not in output
     assert calls == ["bi"]
 

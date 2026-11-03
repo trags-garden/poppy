@@ -434,7 +434,7 @@ def _load_redaction(config: "PoppyConfig", data: dict) -> None:
 def _load_engine(config: "PoppyConfig", data: dict) -> None:
     # Preserve the setting without interpreting it or rewriting the file.
     if "engine" in data:
-        config.engine = data["engine"]
+        config.engine = str(data["engine"])
 
 
 def _load_update_check(config: "PoppyConfig", data: dict) -> None:
