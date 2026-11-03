@@ -102,9 +102,8 @@ that was already open does not see Poppy until you quit and reopen it.
   durable memories from your sessions automatically, locally, using the
   coding-agent CLI you already have. See
   [Zero-touch capture](#zero-touch-capture).
-- **Interchangeable engines**: retrieval runs on a swappable local engine;
-  the default, `bloom`, is a hybrid two-stage engine, with a zero-dependency
-  full-text fallback (`seed`). See [Engines](#engines).
+- **One retrieval pipeline**: hybrid search and reranking run locally, with a
+  built-in keyword-only fallback when models are unavailable. See [Engines](#engines).
 
 ```bash
 poppy remember "we always use uv for python deps" --type preference
@@ -347,25 +346,22 @@ remains an explicit environment override in both directions; setting it to
 
 ## Engines
 
-Retrieval runs on one of two engines. Switch any time with
-`poppy engines use <name>` (`--migrate` re-embeds your existing memories for
-the new engine):
+Poppy uses one retrieval pipeline: `bloom` combines FTS5 keyword search and
+bge-small embeddings with reciprocal rank fusion, then applies a cross-encoder
+rerank. Models run locally through ONNX and download once on first use.
 
-| Name | What it is |
-|---|---|
-| `bloom` | Default. Hybrid (FTS5 + bge-small embeddings + RRF) into a cross-encoder rerank. Runs on local ONNX models, so a plain `pip install poppy-memory` has everything it needs. |
-| `seed`  | FTS5 only. No ML deps, no model downloads. The floor, and the automatic fallback when `bloom` cannot start. |
+When models or their dependencies cannot load, Poppy automatically uses its
+built-in keyword-only fallback (`seed`). Connect once to download the models;
+after that, full retrieval works offline. Hooks always use keyword-only search
+to avoid loading models during latency-sensitive reads. Old `engine` settings
+are ignored; there is no engine to choose.
 
-`bloom` is where retrieval work lands, so its architecture can change between
-releases; `seed` is a stable anchor that doesn't change under you. No engine
-changes silently: every change ships in a release with notes, and `poppy stats`
-shows the exact architecture you're running as `engine vX.Y.Z`.
-
-Because a release can change the embedding model, your stored vectors may need
-refreshing: run `poppy migrate-engine` after switching engines, or if recall
-quality dips after a `bloom` upgrade. Memories whose vectors don't match the
-active engine stay searchable by keyword in the meantime. Nothing is lost, and
-`poppy doctor` tells you how many are waiting.
+The daemon automatically fills in missing or outdated embeddings in batches of
+32 memories each minute, including enriched conversation text for keyword search.
+It also repairs older conversation rows that were embedded from raw text. If
+the daemon is not running, `poppy migrate-engine` provides the manual path;
+`--all` forces a full rebuild. Memories remain searchable by keyword while they
+wait, and `poppy doctor` reports missing or outdated embeddings.
 
 ## Commands
 
@@ -379,9 +375,8 @@ active engine stay searchable by keyword in the meantime. Nothing is lost, and
 | `poppy restore MEMORY_ID` | | Restore a forgotten memory from Trash. Trash keeps it for at least 7 days; a memory whose own expiry has passed is not restored. |
 | `poppy expire` | `--yes` | List memories whose TTL has passed; `--yes` purges them. |
 | `poppy stats` | | Show memory stats. |
-| `poppy engines` | | List the engine catalog with the active engine starred. |
-| `poppy engines use NAME` | `--migrate` | Switch the active retrieval engine. |
-| `poppy migrate-engine` | `--project`, `--memory-type`, `--since`, `--all`, `--dry-run` | Re-embed memories so their vectors match the active engine. |
+| `poppy engines` | | Show the retrieval pipeline, dependency status, and keyword-only fallback. |
+| `poppy migrate-engine` | `--project`, `--memory-type`, `--since`, `--all`, `--dry-run` | Refresh embeddings and enriched keyword text manually. |
 | `poppy config set KEY VALUE` | | Set a config value. |
 | `poppy autocapture` | `status`, `on`, `off`, `--global`, `--project`, `--yes` | Show or change automatic capture at project or global scope. See [Zero-touch capture](#zero-touch-capture). |
 | `poppy consent` | `--enable`, `--disable`, `--status` | Legacy visible consent command; still works while callers migrate to `poppy autocapture`. |

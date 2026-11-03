@@ -5,13 +5,17 @@ behavior against those names directly.
 """
 
 import builtins
+import json
+import sqlite3
 
 import pytest
 
 import poppy.engine.registry as registry
 from poppy.config import PoppyConfig, load_config, save_config
+from poppy.engine.bloom import BloomEngine
 from poppy.engine.registry import EngineInfo, canonical_name, known_names, list_engines, resolve_engine
 from poppy.engine.seed import SeedEngine
+from poppy.errors import ModelUnavailableError
 from poppy.runtime import get_engine
 
 
@@ -72,17 +76,14 @@ def test_resolve_unknown_engine_raises_valueerror(tmp_path):
         resolve_engine("no_such_engine_xyz", tmp_path / "t.db")
 
 
-def test_config_set_engine_validates_against_registry(tmp_path):
+def test_engine_is_no_longer_a_settable_config_key(tmp_path):
     cfg = PoppyConfig(poppy_dir=tmp_path)
-    cfg.set("engine", "seed")
-    assert cfg.engine == "seed"
-    with pytest.raises(ValueError, match="engine must be one of"):
-        cfg.set("engine", "no_such_engine_xyz")
+    with pytest.raises(ValueError, match="Unknown config key"):
+        cfg.set("engine", "seed")
 
 
 def test_config_save_load_roundtrip_engine(tmp_path):
-    cfg = PoppyConfig(poppy_dir=tmp_path)
-    cfg.set("engine", "seed")
+    cfg = PoppyConfig(poppy_dir=tmp_path, engine="seed")
     save_config(cfg)
     loaded = load_config(tmp_path)
     assert loaded.engine == "seed"
@@ -98,26 +99,17 @@ def test_config_save_omits_engine_when_default(tmp_path):
     assert '"engine"' not in raw
 
 
-def test_runtime_get_engine_honors_config(tmp_path):
-    cfg = PoppyConfig(poppy_dir=tmp_path)
-    cfg.set("engine", "seed")
-    save_config(cfg)
+@pytest.mark.parametrize("name", ["seed", "petal", "speaker_closet", "best", "baseline", "sprout", "unknown"])
+def test_runtime_ignores_old_engine_settings_without_rewriting(tmp_path, capsys, name):
+    path = tmp_path / "config.json"
+    original = json.dumps({"engine": name})
+    path.write_text(original)
+
+    assert load_config(tmp_path).engine == name
     eng = get_engine(tmp_path)
-    assert isinstance(eng, SeedEngine)
 
-
-def test_runtime_falls_back_when_chosen_engine_fails(tmp_path, monkeypatch, capsys):
-    """A stored engine name that no longer resolves must not crash the runtime.
-
-    We simulate this by writing a config entry directly (bypassing the set()
-    validator that would otherwise reject the unknown name) and then asserting
-    that get_engine() falls back without raising.
-    """
-    (tmp_path / "config.json").write_text('{"engine": "no_such_engine_xyz"}')
-    eng = get_engine(tmp_path)
-    # Should be BloomEngine, or the SeedEngine floor — either way, not a crash.
-    # Runtime surfaces stay silent unless they explicitly opt in via error_sink.
-    assert eng is not None
+    assert isinstance(eng, BloomEngine)
+    assert path.read_text() == original
     assert capsys.readouterr().err == ""
 
 
@@ -137,6 +129,34 @@ def test_runtime_reports_configured_engine_failure_when_fallback_succeeds(tmp_pa
 
     assert engine is fallback
     assert errors == ["bloom: ImportError: engine construction failed"]
+
+
+def test_runtime_offline_models_fall_back_before_a_write(tmp_path, monkeypatch):
+    connections = []
+
+    def unavailable(self, *, download=False):
+        assert download
+        connections.append(self._conn)
+        raise ModelUnavailableError("Connect once to download the models.")
+
+    monkeypatch.setattr(BloomEngine, "check_models", unavailable)
+    errors = []
+    engine = get_engine(tmp_path, error_sink=errors.append)
+
+    assert isinstance(engine, SeedEngine)
+    assert "ModelUnavailableError" in errors[0]
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+
+
+@pytest.mark.parametrize("exc", [ValueError("bad schema"), OSError("disk failure")])
+def test_runtime_never_hides_store_errors(tmp_path, monkeypatch, exc):
+    def fail(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(registry, "resolve_engine", fail)
+    with pytest.raises(type(exc), match=str(exc)):
+        get_engine(tmp_path)
 
 
 # ---------- legacy engine-name fallback mapping ----------
@@ -172,7 +192,7 @@ def test_sprout_maps_to_bloom_with_a_notice(capsys):
     assert canonical_name("sprout") == "bloom"
     err = capsys.readouterr().err
     assert "sprout" in err
-    assert "migrate-engine" in err
+    assert "automatically re-embedded" in err
     assert len(err.strip().splitlines()) == 1
 
     # Once per process, not once per lookup: this sits on the config hot path.
@@ -191,44 +211,24 @@ def test_resolve_engine_accepts_legacy_baseline(tmp_path):
     assert isinstance(eng, SeedEngine)
 
 
-def test_load_config_maps_legacy_engine_name_silently(tmp_path, capsys):
+def test_load_config_preserves_legacy_engine_name_silently(tmp_path, capsys):
     # A config.json written by an older install must keep working without
     # any warning on load.
     (tmp_path / "config.json").write_text('{"engine": "speaker_closet"}')
     cfg = load_config(tmp_path)
-    assert cfg.engine == "bloom"
+    assert cfg.engine == "speaker_closet"
     assert capsys.readouterr().err == ""
 
 
-def test_load_config_maps_petal_to_bloom(tmp_path, capsys):
+def test_load_config_preserves_petal(tmp_path, capsys):
     (tmp_path / "config.json").write_text('{"engine": "petal"}')
-    assert load_config(tmp_path).engine == "bloom"
+    assert load_config(tmp_path).engine == "petal"
     assert capsys.readouterr().err == ""
 
 
-def test_load_config_maps_legacy_baseline_to_seed(tmp_path):
+def test_load_config_preserves_legacy_baseline(tmp_path):
     (tmp_path / "config.json").write_text('{"engine": "baseline"}')
-    assert load_config(tmp_path).engine == "seed"
-
-
-def test_config_set_accepts_legacy_engine_name(tmp_path):
-    cfg = PoppyConfig(poppy_dir=tmp_path)
-    cfg.set("engine", "baseline")
-    assert cfg.engine == "seed"
-
-
-def test_config_set_accepts_retired_engine_name(tmp_path):
-    cfg = PoppyConfig(poppy_dir=tmp_path)
-    cfg.set("engine", "sprout")
-    assert cfg.engine == "bloom"
-
-
-def test_runtime_get_engine_with_legacy_baseline_config(tmp_path, capsys):
-    # End to end: a stored legacy name resolves silently, no fallback warning.
-    (tmp_path / "config.json").write_text('{"engine": "baseline"}')
-    eng = get_engine(tmp_path)
-    assert isinstance(eng, SeedEngine)
-    assert capsys.readouterr().err == ""
+    assert load_config(tmp_path).engine == "baseline"
 
 
 def test_known_names_matches_list_engines():

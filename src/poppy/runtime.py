@@ -6,6 +6,7 @@ from pathlib import Path
 
 from poppy.engine.interface import RetrievalEngine
 from poppy.engine.seed import SeedEngine
+from poppy.errors import ModelUnavailableError
 from poppy.paths import ensure_poppy_dir
 
 
@@ -29,26 +30,14 @@ def get_engine(
     poppy_dir: Path | None = None,
     *,
     delegate_models_to_daemon: bool = False,
+    download_models: bool = True,
     error_sink: Callable[[str], None] | None = None,
 ) -> RetrievalEngine:
-    """Build the active engine for the product surface.
+    """Build the full pipeline, falling back to keyword search when models cannot load.
 
-    Reads the engine choice from PoppyConfig (`poppy config set engine <name>`
-    / `poppy engines use <name>`). Default is ``bloom``.
-
-    Fallback semantics:
-
-    * ``ImportError`` / unknown name -> walk a best-first chain
-      ``bloom`` -> ``seed`` (skipping the one that just failed), reporting
-      failures through ``error_sink`` when supplied.
-    * ``ModelUnavailableError`` is deliberately NOT caught: an offline cold
-      cache on the selected (or fallen-to) embedding engine surfaces its own
-      actionable "connect to download / use seed" message instead of silently
-      degrading to keyword search.
-    * Any other exception (schema migration error, disk I/O, sqlite
-      corruption) is raised loud. Silent fallback would mask a broken DB by
-      serving toy FTS-only results from a different schema; the user must
-      see the failure.
+    Legacy engine settings have no effect. Model checks happen here so an
+    offline cold cache falls back before a read or write starts. Database and
+    other unexpected errors still propagate rather than hiding a broken store.
     """
     if os.environ.get("POPPY_TEST_FAIL_ON_ENGINE") == "1":
         raise RuntimeError("POPPY_TEST_FAIL_ON_ENGINE: local engine construction is forbidden")
@@ -58,30 +47,24 @@ def get_engine(
 
     poppy_dir = poppy_dir or get_poppy_dir()
     ensure_poppy_dir(poppy_dir)
+    load_config(poppy_dir)
     db_path = poppy_dir / "memories.db"
 
-    name = load_config(poppy_dir).engine
+    engine = None
     try:
-        return resolve_engine(name, db_path, delegate_models_to_daemon=delegate_models_to_daemon)
-    except (ImportError, ValueError) as e:
+        engine = resolve_engine("bloom", db_path, delegate_models_to_daemon=delegate_models_to_daemon)
+        engine.check_models(download=download_models)
+        return engine
+    except (ImportError, ModelUnavailableError) as exc:
         if error_sink is not None:
-            error_sink(_engine_failure_description(name, e))
-        # Best-first substitutes: bloom is the full hybrid retrieval engine; seed is
-        # the guaranteed FTS-only floor.
-        last_exc: Exception = e
-        for candidate in ("bloom", "seed"):
-            if candidate == name:
-                continue
-            try:
-                return resolve_engine(candidate, db_path, delegate_models_to_daemon=delegate_models_to_daemon)
-            except (ImportError, ValueError) as ex:
-                if error_sink is not None:
-                    error_sink(_engine_failure_description(candidate, ex))
-                last_exc = ex
-                continue
-        # seed never raises ImportError/ValueError, so this is effectively
-        # unreachable; keep it defensive rather than swallow the failure.
-        raise last_exc
+            error_sink(_engine_failure_description("bloom", exc))
+        if engine is not None:
+            engine._conn.close()
+        return resolve_engine("seed", db_path)
+    except Exception:
+        if engine is not None:
+            engine._conn.close()
+        raise
 
 
 def get_fast_engine(poppy_dir: Path | None = None) -> RetrievalEngine:

@@ -18,6 +18,7 @@ import pytest
 
 from poppy.db import connect
 from poppy.engine.bloom import BloomEngine
+from poppy.engine.interface import RetrievalEngine
 from poppy.engine.migration import (
     MigrateFilters,
     count_targets,
@@ -26,7 +27,7 @@ from poppy.engine.migration import (
     stale_stats,
     sweep_orphans,
 )
-from poppy.engine.seed import SeedEngine, _migrate_embedding_model_id
+from poppy.engine.seed import SeedEngine, _migrate_embedding_model_id, _migrate_enriched_content
 from poppy.models import Memory, Source
 
 
@@ -35,6 +36,7 @@ class _FakeEngine:
     """Minimal stand-in for a RetrievalEngine that tags embeddings."""
 
     model_id: str = "fake-bi-encoder-v1"
+    embed_text_for = RetrievalEngine.embed_text_for
 
     def _embed(self, text: str) -> np.ndarray:
         # Deterministic 4-dim vector keyed off the content's hash so swaps are
@@ -76,6 +78,7 @@ def _seed_with_baseline_and_attach_embeddings(
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE IF NOT EXISTS memory_embeddings (id TEXT PRIMARY KEY, embedding BLOB NOT NULL)")
     _migrate_embedding_model_id(conn)
+    _migrate_enriched_content(conn)
     for memory, model_id, vec in rows:
         conn.execute(
             "INSERT OR REPLACE INTO memory_embeddings (id, embedding, model_id) VALUES (?, ?, ?)",
@@ -208,6 +211,11 @@ def test_migrate_conversation_matches_fresh_bloom_write(
         ).fetchone()
     assert migrated[0] == fresh_vector
     assert migrated[1] == engine.model_id
+    with connect(db) as conn:
+        assert (
+            conn.execute("SELECT enriched_content FROM memories WHERE id = ?", (memory.id,)).fetchone()[0]
+            == expected_text
+        )
 
 
 @pytest.mark.parametrize("content", ['[{"speaker": "A", "text": "hi"}, {"speaker": "B", "text": "yo"}]', "plain text"])

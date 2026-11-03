@@ -11,8 +11,9 @@ Models (all local, no API):
 Bloom tags every vector it writes with the ONNX ``model_id``
 (``BAAI/bge-small-en-v1.5-onnx``). The shared ``memory_embeddings`` table keys
 on model_id, so rows written by a different bi-encoder — including the torch
-engines Poppy shipped before 0.3.0 — go FTS-only until ``poppy migrate-engine``
-re-embeds them, and two vector spaces never mix inside RRF.
+engines Poppy shipped before 0.3.0 — use keyword-only search until the daemon
+backfills them (or ``poppy migrate-engine`` does it manually), and two vector
+spaces never mix inside RRF.
 """
 
 from __future__ import annotations
@@ -63,8 +64,8 @@ class BloomEngine(HybridEngine):
             rollback_and_close(self._conn)
             raise
 
-    def check_models(self) -> None:
-        self._models.check_available()
+    def check_models(self, *, download: bool = False) -> None:
+        self._models.check_available(download=download)
 
     def _embed(self, text: str) -> np.ndarray:
         return self._models.embed(text)

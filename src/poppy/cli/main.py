@@ -21,6 +21,7 @@ def _get_poppy_dir() -> Path:
 
 _ENGINE_FALLBACK_NOTICE_FILE = ".engine_fallback_notice"
 _ENGINE_FALLBACK_REASON_LIMIT = 160
+_ONE_PIPELINE_NOTICE = "Poppy now uses one retrieval pipeline; engine settings are ignored."
 
 
 def _fallback_reason(configured: str, description: str) -> str:
@@ -63,16 +64,17 @@ def _maybe_print_engine_fallback_notice(
         pass
 
     click.echo(
-        f"configured engine {configured!r} unavailable ({reason}), using {active!r}",
+        f"Poppy's retrieval models are unavailable ({reason}); running keyword-only search. "
+        "Connect once to download the models, or reinstall poppy-memory if dependencies cannot load.",
         err=True,
     )
 
 
-def _get_engine() -> RetrievalEngine:
+def _get_engine(*, download_models: bool = True) -> RetrievalEngine:
     poppy_dir = _get_poppy_dir()
-    configured = load_config(poppy_dir).engine
+    configured = "bloom"
     errors: list[str] = []
-    engine = _runtime_get_engine(poppy_dir, error_sink=errors.append)
+    engine = _runtime_get_engine(poppy_dir, error_sink=errors.append, download_models=download_models)
     active = getattr(engine, "_engine_name", configured)
     if errors and active != configured:
         _maybe_print_engine_fallback_notice(
@@ -564,27 +566,22 @@ def stats():
 @cli.group(invoke_without_command=True)
 @click.pass_context
 def engines(ctx: click.Context):
-    """List or switch the active retrieval engine.
-
-    With no subcommand, prints the catalog: name, description, dep status
-    (✓/✗), and ★ on the active engine.
-    """
+    """Show the retrieval pipeline, dependency status, and built-in fallback."""
     if ctx.invoked_subcommand is not None:
         return
     from poppy.engine.registry import list_engines
 
-    active = load_config(_get_poppy_dir()).engine
     rows = list_engines()
     name_w = max(len(e.name) for e in rows)
     for e in rows:
-        marker = "★" if e.name == active else " "
+        marker = "★" if e.name == "bloom" else " "
         ok = "✓" if e.deps_ok else "✗"
         tag = "  (built-in)" if e.builtin else ""
         click.echo(f" {marker} {ok}  {e.name:<{name_w}}{tag}  {e.description}")
         if not e.deps_ok and e.deps_error:
             click.echo(f"          missing: {e.deps_error}")
     click.echo()
-    click.echo(f"Active: {active}.  Switch with `poppy engines use <name>`.")
+    click.echo("Poppy uses one retrieval pipeline, with automatic keyword-only fallback.")
 
 
 @engines.command("use")
@@ -592,57 +589,13 @@ def engines(ctx: click.Context):
 @click.option(
     "--migrate",
     is_flag=True,
-    help="Re-embed existing memories with the new engine's bi-encoder before returning.",
+    help="Show how to re-embed existing memories with `poppy migrate-engine`.",
 )
 def engines_use(name: str, migrate: bool):
-    """Switch the active retrieval engine (writes to ~/.poppy/config.json).
-
-    Unless --migrate is given, embeddings produced by the previous engine
-    remain in memory_embeddings tagged with their original model_id. The new
-    engine ignores them for the cosine channel (FTS-only fallback for those
-    rows) until you run ``poppy migrate-engine``.
-    """
-    from poppy.engine.migration import stale_stats
-    from poppy.engine.registry import resolve_engine
-
-    poppy_dir = _get_poppy_dir()
-    try:
-        parsed = parse_setting("engine", name)
-    except ValueError as e:
-        raise click.ClickException(str(e)) from e
-    update_config(poppy_dir, lambda config: config_key("engine").apply(config, parsed))
-    click.echo(f"Set engine = {parsed}")
-
-    # Probe the new engine to learn its model_id, then count stale rows.
-    db_path = poppy_dir / "memories.db"
-    try:
-        new_engine = resolve_engine(parsed, db_path)
-    except (ImportError, ValueError) as exc:
-        click.echo(f"⚠  engine {parsed!r} unavailable here ({exc}); falling back at runtime.")
-        return
-
-    stats = stale_stats(db_path, new_engine.model_id)
-    if stats.needs_migration > 0:
-        click.echo(
-            f"⚠  {stats.needs_migration} memories are not embedded for this engine "
-            f"({stats.stale} stale, {stats.unknown} pre-tagging, {stats.missing} never embedded) "
-            f"and will use FTS-only recall until re-embedded."
-        )
-        if migrate:
-            click.echo(f"Re-embedding with {new_engine.model_id} ...")
-            from poppy.engine.migration import MigrateFilters
-            from poppy.engine.migration import migrate as run_migrate
-
-            with click.progressbar(length=stats.needs_migration, label="Migrating") as bar:
-
-                def _tick(done: int, total: int) -> None:
-                    bar.update(1)
-
-                run_migrate(new_engine, db_path, MigrateFilters(), on_progress=_tick)
-            click.echo("Done.")
-        else:
-            click.echo("Run `poppy migrate-engine` to re-embed (or rerun with --migrate).")
-    click.echo("Restart any running MCP server / Claude Code session to pick up the change.")
+    """Compatibility command: Poppy chooses its retrieval pipeline automatically."""
+    click.echo(_ONE_PIPELINE_NOTICE)
+    if migrate:
+        click.echo("Run `poppy migrate-engine` to re-embed existing memories.")
 
 
 @cli.command("migrate-engine")
@@ -688,8 +641,8 @@ def migrate_engine(
     engine = _get_engine()
     if engine.model_id is None:
         raise click.ClickException(
-            f"Active engine ({type(engine).__name__}) does not use embeddings; "
-            "switch to an embedding-based engine first (e.g. `poppy engines use bloom`)."
+            "Poppy is running keyword-only search. Connect once to download the models "
+            "or repair the reported dependency error, then rerun `poppy migrate-engine`."
         )
 
     filters = MigrateFilters(
@@ -746,6 +699,9 @@ def config():
 @click.argument("value")
 def config_set(key: str, value: str):
     """Set a config value."""
+    if key == "engine":
+        click.echo(_ONE_PIPELINE_NOTICE)
+        return
     poppy_dir = _get_poppy_dir()
     # Parse and validate BEFORE any I/O: load_config can migrate a plaintext key
     # into the keychain and rewrite config.json as a side effect, so a bad value

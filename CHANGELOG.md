@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Poppy now uses one retrieval pipeline; engine choice has been retired.
+- Old `engine` settings are ignored and can stay in your config file.
+- Memories written while offline get embedded automatically by the daemon once models are available.
+
 ### Fixed
 
 - `poppy migrate-engine` now embeds the same text a fresh write does, so migrated conversation-shaped memories match newly written ones.

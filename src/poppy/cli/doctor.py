@@ -651,26 +651,18 @@ def check_engine(ctx: DoctorContext) -> None:
     poppy_dir = ctx.poppy_dir
 
     try:
-        engine = _main._get_engine()
+        engine = _main._get_engine(download_models=False)
         s = engine.stats()
         engine.check_models()
-        # Surface two drift signals:
-        #   1. Configured engine != active engine, get_engine fell back due to
-        #      missing deps or an unknown name.
-        #   2. memory_embeddings rows tagged with a model_id that doesn't match
-        #      the active engine's bi-encoder (or with NULL legacy rows). Those
-        #      rows silently degrade to FTS-only recall.
-        from poppy.config import load_config as _load_config
         from poppy.engine.migration import stale_stats as _stale_stats
 
-        configured = _load_config(poppy_dir).engine
         engine_msg = f"{s.engine_name} v{s.engine_version} ({s.memory_count} memories)"
-        if configured != s.engine_name:
+        if engine.model_id is None:
             line(
                 "engine",
                 "WARN",
-                f"configured={configured!r}, active={s.engine_name!r}",
-                hint="install the configured engine's deps or `poppy engines use <name>`",
+                f"keyword-only fallback ({s.memory_count} memories)",
+                hint="connect once to download the models, or repair the reported dependency error",
             )
         else:
             line("engine", "OK", engine_msg)
@@ -682,7 +674,7 @@ def check_engine(ctx: DoctorContext) -> None:
                     "WARN",
                     f"{drift.needs_migration} memories need re-embedding "
                     f"({drift.missing} never embedded, compatible={drift.compatible})",
-                    hint="run `poppy migrate-engine` to re-embed",
+                    hint="the daemon embeds these automatically; run `poppy migrate-engine` to do it now",
                 )
     except Exception as exc:
         line("engine", "FAIL", str(exc))

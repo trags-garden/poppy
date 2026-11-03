@@ -94,6 +94,11 @@ class DaemonModels:
             raise DaemonInferenceUnavailable("daemon returned an invalid vector")
         return vector
 
+    def check_available(self, *, download: bool = False) -> None:
+        """Verify both inference routes before relying on the daemon's models."""
+        self.embed("")
+        self.rerank("", [""])
+
     def rerank(self, query: str, docs: list[str]) -> list[float]:
         self._verify()
         payload = self._json("POST", "/internal/rerank", json={"query": query, "docs": docs})
@@ -141,12 +146,15 @@ class DaemonFallbackModels:
                 self._local = self._local_factory()
         return self._local
 
-    def _call(self, method: str, *args: Any) -> Any:
+    def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         target = self._target()
         try:
-            return getattr(target, method)(*args)
+            return getattr(target, method)(*args, **kwargs)
         except DaemonInferenceUnavailable as exc:
-            return getattr(self._fall_back(exc), method)(*args)
+            return getattr(self._fall_back(exc), method)(*args, **kwargs)
+
+    def check_available(self, *, download: bool = False) -> None:
+        self._call("check_available", download=download)
 
     def embed(self, text: str) -> np.ndarray:
         return self._call("embed", text)

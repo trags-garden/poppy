@@ -425,7 +425,6 @@ _SETTABLE_SAMPLES = {
     "consolidate-api-key": ("sk-xyz", "sk-xyz"),
     "auto-supersede": ("auto", "auto"),
     "auto-sync": ("off", "off"),
-    "engine": ("seed", "seed"),
     "recall-min-score": ("0.4", 0.4),
     "session-start-min-score": ("0.6", 0.6),
     "update_check": ("off", False),

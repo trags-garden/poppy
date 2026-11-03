@@ -16,8 +16,8 @@ details, which this page does not repeat.
 | [`cli/doctor.py`](../src/poppy/cli/doctor.py) | `poppy doctor`: one function per check, walked by `run_doctor`. |
 | [`write_flow.py`](../src/poppy/write_flow.py) | The shared write core: `remember`, `forget`, `restore`. CLI, MCP and the dashboard are thin adapters over it. |
 | [`lifecycle.py`](../src/poppy/lifecycle.py) | Edit, supersede, and time-to-live parsing. |
-| [`engine/`](../src/poppy/engine/) | Retrieval. `interface.py` is the `RetrievalEngine` contract, `registry.py` maps names to engines, `seed.py` is keyword search on SQLite FTS5, `bloom.py` is a thin subclass of `_hybrid.py` (keywords plus vectors, then a cross-encoder rerank). Model loading lives in `_fastembed_loader.py`, `_model_holder.py` and `_model_cache.py`; `_daemon_models.py` borrows the daemon's loaded models over HTTP; `migration.py` re-embeds when the engine changes. |
-| [`runtime.py`](../src/poppy/runtime.py) | `get_engine` builds the configured engine and falls back from `bloom` to `seed`; `get_fast_engine` returns a model-free `seed` engine for hooks. |
+| [`engine/`](../src/poppy/engine/) | Retrieval. `interface.py` is the `RetrievalEngine` contract, `registry.py` keeps name resolution for research callers, `seed.py` is the internal SQLite FTS5 fallback, `bloom.py` is a thin subclass of `_hybrid.py` (keywords plus vectors, then a cross-encoder rerank). Model loading lives in `_fastembed_loader.py`, `_model_holder.py` and `_model_cache.py`; `_daemon_models.py` borrows the daemon's loaded models over HTTP; `migration.py` restores enriched text and embeddings together. |
+| [`runtime.py`](../src/poppy/runtime.py) | `get_engine` builds the single `bloom` pipeline, checks its models and falls back to `seed` when dependencies or models cannot load. Old `engine` settings are ignored. `get_fast_engine` returns model-free `seed` for hooks. |
 | [`tombstones.py`](../src/poppy/tombstones.py) | The Trash store (seven-day soft delete) and sync bookkeeping: which server knows which memory, and which deletions were sent. `ui/tombstones.py` is an alias kept for old imports. |
 | [`capture/`](../src/poppy/capture/) | Building blocks of automatic capture: consent policy, transcript readers, window and watermark, turn cadence, the per-session lock, the reconciler (dedupe against the store before writing), the orchestrator, journal, backend health, secret redaction, and the session banner. |
 | [`consolidation.py`](../src/poppy/consolidation.py) | The capture entry points (`consolidate_capture_event`, `consolidate_compact_event`, `consolidate_stop_event`) and the LLM backends behind `call_llm`: the host coding-agent CLI first, then an OpenAI-compatible endpoint. |
@@ -49,6 +49,19 @@ forget and restore.
 in process, or from the daemon through `engine/_daemon_models.py:DaemonModels`.
 MCP recall enters at `PoppyMcpServer.handle_recall`. Hooks recall through
 `runtime.py:get_fast_engine` so they never load a model.
+
+The daemon runs a background backfill pass at startup and each minute, outside
+hook reads and foreground writes. `engine/migration.py:backfill` scans at most
+32 rows for a one-time enrichment repair and embeds at most 32 migration targets
+per pass. Missing vectors and stale or invalidated model IDs are targets. The
+repair compares stored enrichment with `RetrievalEngine.embed_text_for`; it
+invalidates mismatches, persists its row cursor in `poppy_backfill_state`, and
+records completion as `full_content_embeddings_v1` in `poppy_migrations`.
+`migrate` computes embeddings outside the write lock, then rechecks content and
+source timestamp under `BEGIN IMMEDIATE`. It updates enriched text and the
+vector atomically; the memories UPDATE trigger refreshes FTS. `poppy migrate-engine`
+uses the same write path for manual refreshes, including installations without
+a running daemon.
 
 **capture (mid-session).** `cli/hooks.py:user_prompt_submit` →
 `cli/hooks.py:_maybe_fire_capture` (consent, cadence) →
@@ -157,8 +170,7 @@ removed. Today they are:
 - `engine/_daemon_models.py` imports `mcp_server/auth.py:load_daemon_token` at
   the top of the file, to read the daemon token. This is the only exception at
   module level.
-- `config.py` imports `engine/registry.py` (engine name checks) and
-  `keychain.py`, inside functions.
+- `config.py` imports `keychain.py` inside functions.
 - `db.py:connect` imports `encryption.py` inside the function, for an encrypted
   store.
 - `lifecycle.py` imports the Trash store inside `_supersede_memory`.
@@ -221,9 +233,9 @@ its writer replaces the file atomically through an owner-only temporary file uni
 - **Writer registry.** The `writers/` folder: each live long-running process
   holds a lock on its own file there, so an encryption migration can refuse to
   run under it.
-- **Engine.** A swappable retrieval backend behind `RetrievalEngine`. `seed` is
-  keyword search only and needs no models. `bloom`, the default, combines
-  keyword and vector search and reranks with a cross-encoder.
+- **Engine.** An internal retrieval backend behind `RetrievalEngine`. The
+  product uses the `bloom` pipeline: keyword and vector search followed by a
+  cross-encoder rerank. Model-free `seed` serves hooks and automatic fallback.
 - **Write gate.** The `write.gate` lock that orders multi-step writes across
   processes; see the locks table.
 - **Backstop.** The end-of-session and post-compaction captures that pick up

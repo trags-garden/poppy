@@ -37,7 +37,7 @@ def test_human_cli_reports_fallback_once_per_day(tmp_path: Path, monkeypatch: py
     _make_bloom_unavailable(monkeypatch)
     runner = CliRunner()
     env = {"POPPY_DIR": str(tmp_path)}
-    notice = "configured engine 'bloom' unavailable (the onnx runtime failed to load), using 'seed'"
+    notice = "Poppy's retrieval models are unavailable (the onnx runtime failed to load); running keyword-only search."
 
     first = runner.invoke(cli, ["stats"], env=env)
     second = runner.invoke(cli, ["stats"], env=env)
@@ -59,7 +59,7 @@ def test_changed_fallback_pair_renotifies_same_day(tmp_path: Path, monkeypatch: 
     result = CliRunner().invoke(cli, ["stats"], env={"POPPY_DIR": str(tmp_path)})
 
     assert result.exit_code == 0, result.output
-    assert "configured engine 'bloom' unavailable" in result.output
+    assert "running keyword-only search" in result.output
     assert (tmp_path / _ENGINE_FALLBACK_NOTICE_FILE).read_text().strip() == (
         f"{today} bloom->seed the onnx runtime failed to load"
     )
@@ -75,7 +75,7 @@ def test_changed_fallback_reason_renotifies_same_day(tmp_path: Path, monkeypatch
     result = CliRunner().invoke(cli, ["stats"], env={"POPPY_DIR": str(tmp_path)})
 
     assert result.exit_code == 0, result.output
-    assert "configured engine 'bloom' unavailable" in result.output
+    assert "running keyword-only search" in result.output
     assert (tmp_path / _ENGINE_FALLBACK_NOTICE_FILE).read_text().strip() == (
         f"{today} bloom->seed the onnx runtime failed to load"
     )
@@ -92,8 +92,8 @@ def test_hook_and_serve_never_report_engine_fallback(tmp_path: Path, monkeypatch
 
     assert hook_result.exit_code == 0, hook_result.output
     assert serve_result.exit_code == 0, serve_result.output
-    assert "configured engine 'bloom' unavailable" not in hook_result.output
-    assert "configured engine 'bloom' unavailable" not in serve_result.output
+    assert "running keyword-only search" not in hook_result.output
+    assert "running keyword-only search" not in serve_result.output
     assert not (tmp_path / _ENGINE_FALLBACK_NOTICE_FILE).exists()
 
 
@@ -113,4 +113,50 @@ def test_corrupt_unwritable_throttle_never_breaks_command(tmp_path: Path, monkey
     result = CliRunner().invoke(cli, ["stats"], env={"POPPY_DIR": str(tmp_path)})
 
     assert result.exit_code == 0, result.output
-    assert "configured engine 'bloom' unavailable" in result.output
+    assert "running keyword-only search" in result.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["engines", "use", "seed"], ["engines", "use", "unknown"], ["config", "set", "engine", "seed"]],
+)
+def test_retired_engine_commands_leave_config_and_pipeline_unchanged(tmp_path, args):
+    from poppy.engine.bloom import BloomEngine
+    from poppy.runtime import get_engine
+
+    path = tmp_path / "config.json"
+    original = '{"engine": "baseline", "auto_sync": "off"}'
+    path.write_text(original)
+
+    result = CliRunner().invoke(cli, args, env={"POPPY_DIR": str(tmp_path)})
+
+    assert result.exit_code == 0, result.output
+    assert "Poppy now uses one retrieval pipeline" in result.output
+    assert path.read_text() == original
+    assert isinstance(get_engine(tmp_path), BloomEngine)
+
+
+def test_retired_use_migrate_points_to_manual_command(tmp_path):
+    result = CliRunner().invoke(cli, ["engines", "use", "seed", "--migrate"], env={"POPPY_DIR": str(tmp_path)})
+    assert result.exit_code == 0, result.output
+    assert "one retrieval pipeline" in result.output
+    assert "poppy migrate-engine" in result.output
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_engines_shows_pipeline_dependencies_and_fallback(tmp_path, monkeypatch):
+    from poppy.engine.registry import EngineInfo
+
+    monkeypatch.setattr(
+        registry,
+        "list_engines",
+        lambda: [
+            EngineInfo("bloom", "Retrieval pipeline", True, False, "missing onnxruntime"),
+            EngineInfo("seed", "Built-in keyword-only fallback", True, True, None),
+        ],
+    )
+    result = CliRunner().invoke(cli, ["engines"], env={"POPPY_DIR": str(tmp_path)})
+    assert result.exit_code == 0, result.output
+    assert "bloom" in result.output and "missing onnxruntime" in result.output
+    assert "keyword-only fallback" in result.output
+    assert "Switch with" not in result.output

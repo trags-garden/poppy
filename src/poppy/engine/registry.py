@@ -1,4 +1,4 @@
-"""Engine registry — discoverable, swappable retrieval engines.
+"""Internal engine registry for the product pipeline and research callers.
 
 Two built-in engines, hardcoded:
 
@@ -9,9 +9,8 @@ Two built-in engines, hardcoded:
   - seed  — FTS5 only. No ML deps, no model downloads. The universal floor and
             the automatic fallback when bloom cannot start.
 
-Users pick via ``poppy config set engine <name>`` or
-``poppy engines use <name>``. The runtime reads the choice from PoppyConfig
-and dispatches through ``resolve_engine``.
+The runtime always requests bloom, with seed as its built-in fallback.
+Research callers can still construct either engine by name.
 """
 
 from __future__ import annotations
@@ -56,7 +55,7 @@ def canonical_name(name: str) -> str:
             _retired_notices_emitted.add(name)
             print(
                 f"poppy: engine {name!r} was removed in 0.3.0; using {target!r}. "
-                f"Memories embedded by {name!r} are keyword-only until you run `poppy migrate-engine`.",
+                f"Memories embedded by {name!r} use keyword-only search until automatically re-embedded.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -65,8 +64,8 @@ def canonical_name(name: str) -> str:
 
 
 _DESCRIPTIONS = {
-    "bloom": "Default: hybrid retrieval + cross-encoder rerank (local ONNX models).",
-    "seed": "FTS5 only, no ML deps, no model downloads.",
+    "bloom": "Retrieval pipeline: hybrid search + cross-encoder rerank (local ONNX models).",
+    "seed": "Built-in keyword-only fallback (FTS5); also used by hooks. No models.",
 }
 
 

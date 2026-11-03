@@ -46,7 +46,7 @@ def test_cold_offline_load_raises_actionable(monkeypatch: pytest.MonkeyPatch, tm
     _patch_ctors(monkeypatch, boom)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
 
-    with pytest.raises(ModelUnavailableError, match="poppy engines use seed"):
+    with pytest.raises(ModelUnavailableError, match="keyword-only search"):
         fe._load_fastembed("bi", BI, tmp_path)
 
 
@@ -69,7 +69,7 @@ def test_local_only_missing_model_never_calls_constructor(monkeypatch, tmp_path)
     _patch_ctors(monkeypatch, unexpected)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: False)
 
-    with pytest.raises(ModelUnavailableError, match="Connect to the internet.*poppy engines use seed"):
+    with pytest.raises(ModelUnavailableError, match="Connect to the internet.*keyword-only search"):
         fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
 
 
@@ -81,7 +81,7 @@ def test_local_only_cached_failure_includes_remediation(monkeypatch, tmp_path):
     _patch_ctors(monkeypatch, fail)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: True)
 
-    with pytest.raises(ModelUnavailableError, match="broken cached model.*poppy engines use seed"):
+    with pytest.raises(ModelUnavailableError, match="broken cached model.*keyword-only search"):
         fe._load_fastembed("bi", BI, tmp_path, local_files_only=True)
 
 
@@ -102,6 +102,25 @@ def test_local_health_check_reuses_loaded_models(monkeypatch, tmp_path, capsys, 
     assert models.rerank("test", ["doc"]) == [1.0]
     assert calls == [BI, fe.CROSS_ENCODER]
     assert "downloading" not in capsys.readouterr().err
+
+
+def test_runtime_health_check_allows_one_time_model_download(monkeypatch, tmp_path, real_model_health):
+    calls = []
+
+    def load(model_name, **kwargs):
+        assert kwargs["local_files_only"] is False
+        calls.append(model_name)
+        return _FakeBi() if model_name == BI else _FakeCross()
+
+    _patch_ctors(monkeypatch, load)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *args: False)
+    models = fe.FastembedModels(cache_dir=tmp_path, idle_timeout_s=0)
+    models.check_available(download=True)
+    models.check_available(download=True)
+
+    assert calls == [BI, fe.CROSS_ENCODER]
+    assert models.embed("test").shape == (4,)
+    assert models.rerank("test", ["doc"]) == [1.0]
 
 
 @pytest.mark.parametrize("cached", [True, False])
