@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy sync pull` now keeps a memory's creation date in step with the cloud copy.
+- MCP edit and forget no longer stall other requests while waiting for another writer.
+- Sync now clears expired Trash entries even when an upload hits the memory limit.
+- Automatic capture now saves a new memory when the memory it was replacing has disappeared.
 - Keyword-only recall now finds matching memories even when higher-ranked matches are excluded by filters.
 - The first-use model download notice stays quiet in offline mode and no longer promises a successful download.
 - On case-sensitive filesystems such as most Linux setups, Poppy now recognises an already downloaded embedding model, so it no longer reports a first-run download on every command.

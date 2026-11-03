@@ -1,4 +1,6 @@
+import asyncio
 import datetime as _dt
+import threading
 import uuid as _uuid
 from types import SimpleNamespace
 
@@ -117,6 +119,50 @@ async def test_forget(server):
 async def test_forget_nonexistent(server):
     result = await server.handle_forget(id="mem_nonexistent")
     assert result["deleted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["edit", "forget"])
+async def test_gated_writes_leave_event_loop_free(fast_server, monkeypatch, operation):
+    memory = _ingest(fast_server, "original note")
+    loop_thread = threading.get_ident()
+    loop_progressed = asyncio.Event()
+    release = threading.Event()
+
+    if operation == "edit":
+        from poppy.lifecycle import edit_memory as write
+
+        target = "poppy.lifecycle.edit_memory"
+        call = fast_server.handle_edit(id=memory.id, content="updated note")
+    else:
+        from poppy.write_flow import forget as write
+
+        target = "poppy.write_flow.forget"
+        call = fast_server.handle_forget(id=memory.id)
+
+    loop = asyncio.get_running_loop()
+
+    def gated_write(*args, **kwargs):
+        assert threading.get_ident() != loop_thread
+        loop.call_soon_threadsafe(loop_progressed.set)
+        assert release.wait(timeout=5)
+        return write(*args, **kwargs)
+
+    monkeypatch.setattr(target, gated_write)
+    task = asyncio.create_task(call)
+    try:
+        await asyncio.wait_for(loop_progressed.wait(), timeout=2)
+        assert not task.done()
+    finally:
+        release.set()
+        result = await task
+
+    if operation == "edit":
+        assert result["changed"] is True
+        assert fast_server._engine.get(memory.id).content == "updated note"
+    else:
+        assert result == {"deleted": True}
+        assert fast_server._engine.get(memory.id) is None
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from test_engine_bloom import _FakeBiEncoder, _FakeCrossEncoder
 
 from poppy.capture.reconciler import (
     Action,
+    Decision,
     decide,
     find_candidates,
     reconcile_and_ingest,
@@ -273,3 +274,57 @@ def test_supersede_is_reversible_tombstone_written(
     tomb = TombstoneStore(tmp_path / "memories.db").get("existing")
     assert tomb is not None, "superseded memory must be restorable from a tombstone"
     assert tomb.superseded_by == "new"
+
+
+@pytest.mark.parametrize("target_state", ["missing", "refused"])
+def test_supersede_target_failure_keeps_processing_batch(engine, monkeypatch, tmp_path, target_state):
+    engine.ingest(_mk("existing", "old decision"))
+    replacement = _mk("new", "replacement decision")
+    following = _mk("following", "another decision")
+
+    def decide_candidate(engine, candidate, **kwargs):
+        if candidate.id == replacement.id:
+            if target_state == "missing":
+                engine.delete("existing")
+            return Decision(Action.SUPERSEDE, candidate, target_id="existing")
+        return Decision(Action.ADD, candidate)
+
+    def refuse(*args, **kwargs):
+        raise ValueError("target cannot be superseded")
+
+    monkeypatch.setattr("poppy.capture.reconciler.decide", decide_candidate)
+    if target_state == "refused":
+        monkeypatch.setattr("poppy.capture.reconciler.supersede_memory", refuse)
+
+    summary = reconcile_and_ingest([replacement, following], engine=engine, cfg=PoppyConfig(), poppy_dir=tmp_path)
+
+    assert summary.superseded == 0
+    assert summary.added == (2 if target_state == "missing" else 1)
+    assert summary.skipped == (0 if target_state == "missing" else 1)
+    assert engine.get("following") == following
+    if target_state == "missing":
+        assert engine.get("new") == replacement
+        assert engine.get("existing") is None
+    else:
+        assert engine.get("new") is None
+        assert engine.get("existing") is not None
+
+
+def test_supersede_key_error_with_live_target_skips_item(engine, monkeypatch, tmp_path):
+    engine.ingest(_mk("existing", "old decision"))
+    replacement = _mk("new", "replacement decision")
+
+    def decide_candidate(engine, candidate, **kwargs):
+        return Decision(Action.SUPERSEDE, candidate, target_id="existing")
+
+    def broken(*args, **kwargs):
+        raise KeyError("unrelated")
+
+    monkeypatch.setattr("poppy.capture.reconciler.decide", decide_candidate)
+    monkeypatch.setattr("poppy.capture.reconciler.supersede_memory", broken)
+
+    summary = reconcile_and_ingest([replacement], engine=engine, cfg=PoppyConfig(), poppy_dir=tmp_path)
+
+    assert (summary.added, summary.skipped) == (0, 1)
+    assert engine.get("new") is None
+    assert engine.get("existing") is not None

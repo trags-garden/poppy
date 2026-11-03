@@ -970,7 +970,7 @@ def _apply_pulled_row(
         if local_tomb is not None:
             tombstone_preview[incoming.id] = None  # type: ignore[attr-defined]
         return "live"
-    engine.ingest(incoming)  # type: ignore[arg-type]
+    engine.ingest(incoming, use_incoming_created_at=True)  # type: ignore[arg-type]
     if local_tomb is not None:
         # The live row won over an older local tombstone: a restore
         # (or re-create) that happened elsewhere. Drop the stale
@@ -1217,29 +1217,30 @@ def sync(
         # window.
         _note_transport_progress(exc, pulled=pull_res.applied_live + pull_res.applied_tombstones, simulated=dry_run)
         raise
-    if not dry_run:
-        # AFTER push, never before. A tombstone is the only thing that carries a
-        # deletion to the cloud, so purging one that has not been sent leaves the
-        # cloud row live and the next pull re-ingests the forgotten memory.
-        # Sent marks, not the live watermark, prove a deletion is done. IDs
-        # this remote holds with an unsent deletion survive; IDs it does not
-        # hold have no pending work here, and a server the user stopped using
-        # no longer holds Trash open.
-        #
-        # This runs here because the local web UI's startup was otherwise the
-        # only caller, and a user who never opens the dashboard kept expired
-        # records forever.
-        try:
-            tombstones.purge_expired(
-                pushed_through=datetime.now(timezone.utc).isoformat(),
-                require_sent=True,
-                current_remote=client.base_url,
-            )
-        except Exception as exc:
-            # Housekeeping must never be what fails a sync; retried next cycle.
-            # Logged rather than silent so a store that never ages out is
-            # diagnosable.
-            logger.warning("deletion-record purge skipped: %s", exc)
+    finally:
+        if not dry_run:
+            # AFTER push, never before. A tombstone is the only thing that carries a
+            # deletion to the cloud, so purging one that has not been sent leaves the
+            # cloud row live and the next pull re-ingests the forgotten memory.
+            # Sent marks, not the live watermark, prove a deletion is done. IDs
+            # this remote holds with an unsent deletion survive; IDs it does not
+            # hold have no pending work here, and a server the user stopped using
+            # no longer holds Trash open.
+            #
+            # This runs here because the local web UI's startup was otherwise the
+            # only caller, and a user who never opens the dashboard kept expired
+            # records forever.
+            try:
+                tombstones.purge_expired(
+                    pushed_through=datetime.now(timezone.utc).isoformat(),
+                    require_sent=True,
+                    current_remote=client.base_url,
+                )
+            except Exception as exc:
+                # Housekeeping must never be what fails a sync; retried next cycle.
+                # Logged rather than silent so a store that never ages out is
+                # diagnosable.
+                logger.warning("deletion-record purge skipped: %s", exc)
 
     # No blanket clear here: pull and push each compare-and-clear ONLY the error
     # slots they observed and resolved (pull -> pull+auth, push -> push+auth),
