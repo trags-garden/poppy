@@ -78,7 +78,12 @@ def _silence_fastembed_logs() -> None:
 def announce_first_run_download(model_names: Sequence[str]) -> None:
     """Print a one-time stderr notice if any of ``model_names`` still needs downloading."""
     global _FIRST_RUN_NOTICE_SHOWN
-    if _FIRST_RUN_NOTICE_SHOWN or os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "ON", "YES", "TRUE"}:
+    # huggingface_hub treats either variable as offline mode, and fastembed strips
+    # whitespace before reading it; a download would be refused, so don't announce one.
+    if _FIRST_RUN_NOTICE_SHOWN or any(
+        os.environ.get(var, "").strip().upper() in {"1", "ON", "YES", "TRUE"}
+        for var in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    ):
         return
     _FIRST_RUN_NOTICE_SHOWN = True
     cold = [m for m in model_names if not is_fastembed_model_cached(m)]

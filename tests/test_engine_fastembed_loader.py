@@ -193,6 +193,7 @@ def test_removed_model_override_env_keeps_stock_loading(
 def test_first_run_notice_prints_once_for_cold_models(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], offline: str | None
 ) -> None:
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     if offline is None:
         monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     else:
@@ -204,11 +205,14 @@ def test_first_run_notice_prints_once_for_cold_models(
     assert err == "poppy: retrieval models (model-a, model-b) are not downloaded yet; trying to download them now.\n"
 
 
-@pytest.mark.parametrize("offline", ["1", "ON", "on", "YES", "yes", "TRUE", "true", "True"])
+@pytest.mark.parametrize("var", ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"])
+@pytest.mark.parametrize("offline", ["1", "ON", "on", "YES", "yes", "TRUE", "true", "True", " 1"])
 def test_no_first_run_notice_when_offline(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], offline: str
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], offline: str, var: str
 ) -> None:
-    monkeypatch.setenv("HF_HUB_OFFLINE", offline)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+    monkeypatch.setenv(var, offline)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
     fe.announce_first_run_download(("model-a", "model-b"))
     assert capsys.readouterr().err == ""
