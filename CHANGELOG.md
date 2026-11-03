@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `poppy migrate-engine` now embeds the same text a fresh write does, so migrated conversation-shaped memories match newly written ones.
 - Setup's unresolved `poppy` path warning now mentions hooks only for Claude Code, Cursor and Codex.
 - `poppy doctor` now warns when Codex has not captured since its hooks changed and asks you to re-trust the hooks.
 - Windows setup now writes hook commands that preserve executable paths in Git Bash, including paths without spaces.

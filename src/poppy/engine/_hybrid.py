@@ -303,6 +303,10 @@ class HybridEngine(RetrievalEngine):
 
     # --- ingest ------------------------------------------------------------
 
+    def embed_text_for(self, content: str, source_timestamp: str | None) -> str:
+        """Render embedding text using the same UTC timestamp kept in storage."""
+        return _enrich_full_content(content, utc_iso(source_timestamp))
+
     def _insert_memory(
         self,
         memory_id: str,
@@ -370,7 +374,7 @@ class HybridEngine(RetrievalEngine):
     def supersede(
         self, old_id: str, memory: Memory, *, before_delete: Callable[[sqlite3.Connection], None] | None = None
     ) -> str:
-        enriched = _enrich_full_content(memory.content, memory.source.timestamp.isoformat())
+        enriched = self.embed_text_for(memory.content, memory.source.timestamp.isoformat())
         embedding = self._embed(enriched)
         with self._lock, write_txn(self._conn):
             if before_delete is not None:
@@ -380,7 +384,7 @@ class HybridEngine(RetrievalEngine):
 
     def ingest(self, memory: Memory) -> str:
         """Store one memory with its full-content index and embedding."""
-        enriched = _enrich_full_content(memory.content, memory.source.timestamp.isoformat())
+        enriched = self.embed_text_for(memory.content, memory.source.timestamp.isoformat())
         # Model loading may fail. Do it before taking the database write lock.
         embedding = self._embed(enriched)
         return self._ingest_prepared(memory, enriched, embedding)
