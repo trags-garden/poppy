@@ -189,16 +189,52 @@ def test_removed_model_override_env_keeps_stock_loading(
 # --- first-run notice --------------------------------------------------------
 
 
+@pytest.mark.parametrize("offline", [None, "", "0", "false", "off", "no"])
 def test_first_run_notice_prints_once_for_cold_models(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], offline: str | None
 ) -> None:
+    if offline is None:
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    else:
+        monkeypatch.setenv("HF_HUB_OFFLINE", offline)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
     fe.announce_first_run_download(("model-a", "model-b"))
     fe.announce_first_run_download(("model-a", "model-b"))
     err = capsys.readouterr().err
-    assert err.count("downloading ONNX retrieval models") == 1
-    assert "model-a" in err and "model-b" in err
-    assert "This happens once." in err
+    assert err == "poppy: retrieval models (model-a, model-b) are not downloaded yet; trying to download them now.\n"
+
+
+@pytest.mark.parametrize("offline", ["1", "ON", "on", "YES", "yes", "TRUE", "true", "True"])
+def test_no_first_run_notice_when_offline(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], offline: str
+) -> None:
+    monkeypatch.setenv("HF_HUB_OFFLINE", offline)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
+    fe.announce_first_run_download(("model-a", "model-b"))
+    assert capsys.readouterr().err == ""
+
+
+def test_cold_load_failure_notice_does_not_promise_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise OSError("connection refused")
+
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
+    _patch_ctors(monkeypatch, boom)
+    models = fe.FastembedModels(cache_dir=tmp_path, idle_timeout_s=0)
+
+    with pytest.raises(ModelUnavailableError) as excinfo:
+        models.embed("test")
+
+    assert str(excinfo.value) == (
+        f"Couldn't load ONNX retrieval model {BI!r} (OSError: connection refused). "
+        "Connect to the internet for the one-time model download."
+    )
+    assert capsys.readouterr().err == (
+        f"poppy: retrieval models ({BI}, {fe.CROSS_ENCODER}) are not downloaded yet; trying to download them now.\n"
+    )
 
 
 def test_no_first_run_notice_when_cached(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

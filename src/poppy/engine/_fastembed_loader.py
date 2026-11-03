@@ -78,13 +78,13 @@ def _silence_fastembed_logs() -> None:
 def announce_first_run_download(model_names: Sequence[str]) -> None:
     """Print a one-time stderr notice if any of ``model_names`` still needs downloading."""
     global _FIRST_RUN_NOTICE_SHOWN
-    if _FIRST_RUN_NOTICE_SHOWN:
+    if _FIRST_RUN_NOTICE_SHOWN or os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "ON", "YES", "TRUE"}:
         return
     _FIRST_RUN_NOTICE_SHOWN = True
     cold = [m for m in model_names if not is_fastembed_model_cached(m)]
     if cold:
         print(
-            f"poppy: downloading ONNX retrieval models ({', '.join(cold)}) on first use. This happens once.",
+            f"poppy: retrieval models ({', '.join(cold)}) are not downloaded yet; trying to download them now.",
             file=sys.stderr,
             flush=True,
         )
