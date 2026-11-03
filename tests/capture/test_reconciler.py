@@ -308,3 +308,23 @@ def test_supersede_target_failure_keeps_processing_batch(engine, monkeypatch, tm
     else:
         assert engine.get("new") is None
         assert engine.get("existing") is not None
+
+
+def test_supersede_key_error_with_live_target_skips_item(engine, monkeypatch, tmp_path):
+    engine.ingest(_mk("existing", "old decision"))
+    replacement = _mk("new", "replacement decision")
+
+    def decide_candidate(engine, candidate, **kwargs):
+        return Decision(Action.SUPERSEDE, candidate, target_id="existing")
+
+    def broken(*args, **kwargs):
+        raise KeyError("unrelated")
+
+    monkeypatch.setattr("poppy.capture.reconciler.decide", decide_candidate)
+    monkeypatch.setattr("poppy.capture.reconciler.supersede_memory", broken)
+
+    summary = reconcile_and_ingest([replacement], engine=engine, cfg=PoppyConfig(), poppy_dir=tmp_path)
+
+    assert (summary.added, summary.skipped) == (0, 1)
+    assert engine.get("new") is None
+    assert engine.get("existing") is not None

@@ -430,9 +430,15 @@ def reconcile_and_ingest(
         elif decision.action is Action.SUPERSEDE and decision.target_id:
             try:
                 supersede_memory(engine, mem, decision.target_id, poppy_dir=poppy_dir)
-            except KeyError:
+            except KeyError as exc:
                 # A target deleted since the decision does not invalidate the
-                # new capture. Keep it as an independent memory.
+                # new capture. Keep it as an independent memory. Any other
+                # KeyError skips the item: adding it while the old memory is
+                # still live would leave a near-duplicate beside it.
+                if engine.get(decision.target_id) is not None:
+                    log.warning("supersede skipped for %s: %s", decision.target_id, exc)
+                    summary.skipped += 1
+                    continue
                 engine.ingest(mem)
                 summary.added += 1
                 continue
