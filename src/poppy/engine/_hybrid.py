@@ -446,6 +446,9 @@ class HybridEngine(RetrievalEngine):
         try:
             # Keep model inference outside the lock, but read both candidate
             # channels together so a writer cannot change rows between them.
+            # shortcut: the lock also covers vector scoring and row mapping, so
+            # writes wait for a full scan; fetch rows under the lock and score
+            # outside it if large stores make writes noticeably slow.
             query_emb = self._embed(query)
             with self._lock:
                 candidates = self._hybrid_retrieve(query, filters, k=FIRST_STAGE_K, query_emb=query_emb)
