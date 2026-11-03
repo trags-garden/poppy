@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 from collections.abc import Callable
 from pathlib import Path
@@ -189,7 +190,8 @@ class PoppyMcpServer:
         except ValueError as exc:
             return {"error": _parameter_error(exc)}
         try:
-            result = edit_memory(
+            result = await asyncio.to_thread(
+                edit_memory,
                 self._engine,
                 id,
                 content=content,
@@ -347,7 +349,7 @@ class PoppyMcpServer:
         # and triggers autosync on success.
         from poppy.write_flow import forget as _forget
 
-        result = _forget(self._engine, self._poppy_dir, id)
+        result = await asyncio.to_thread(_forget, self._engine, self._poppy_dir, id)
         return {"deleted": result.deleted}
 
     async def handle_consolidate(

@@ -197,6 +197,46 @@ def test_pull_applies_live_rows(tmp_path):
     assert load(tmp_path).remotes[client.base_url].last_pulled_at is not None
 
 
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom", "bloom_offline"])
+@pytest.mark.parametrize("updated_delta", [timedelta(0), timedelta(seconds=1)])
+def test_pull_same_text_adopts_cloud_created_at(tmp_path, monkeypatch, engine_kind, updated_delta):
+    from dataclasses import replace
+
+    from test_engine_bloom import _make_engine
+
+    from poppy.errors import ModelUnavailableError
+
+    db = tmp_path / "memories.db"
+    engine = SeedEngine(db) if engine_kind == "seed" else _make_engine(db)
+    tombstones = TombstoneStore(db)
+    local = _memory("m1", updated=_NOW)
+    engine.ingest(local)
+    remote = replace(
+        local,
+        created_at=(_NOW - timedelta(days=1)).astimezone(timezone(timedelta(hours=2))),
+        updated_at=_NOW + updated_delta,
+    )
+    client = _FakeClient(rows=[memory_to_wire(remote)])
+    if engine_kind == "bloom_offline":
+
+        def unavailable(text):
+            raise ModelUnavailableError("model unavailable")
+
+        monkeypatch.setattr(engine, "_embed", unavailable)
+
+    pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path, dry_run=True)
+    assert engine.get(local.id) == local
+
+    result = pull(engine=engine, tombstones=tombstones, client=client, state=SyncState(), poppy_dir=tmp_path)
+
+    assert result.applied_live == 1
+    assert result.errors == 0
+    assert engine.get(local.id) == remote
+    assert engine._conn.execute("SELECT created_at FROM memories WHERE id=?", (local.id,)).fetchone()[0] == (
+        remote.created_at.astimezone(timezone.utc).isoformat()
+    )
+
+
 def test_pulled_custom_type_survives_content_edit_and_push(tmp_path):
     from poppy.lifecycle import edit_memory
 
@@ -4612,6 +4652,33 @@ def test_sync_purges_deletion_held_only_by_a_server_no_longer_in_use(tmp_path, t
     sync(engine=engine, tombstones=tombstones, client=_FakeClient(base_url="https://current.test"), poppy_dir=tmp_path)
     assert tombstones.get("X") is None
     assert tombstones.known_ids("https://old.test") == {"X"}
+
+
+@pytest.mark.parametrize("purge_fails", [False, True])
+def test_sync_quota_still_purges_expired_trash(tmp_path, trash_clock, monkeypatch, purge_fails):
+    from unittest.mock import Mock
+
+    from poppy.sync import sync
+
+    engine, tombstones = _engine_and_tombstones(tmp_path)
+    quota_error = TragsQuotaError(_QUOTA_MSG)
+    client = _FakeClient(upsert_error=quota_error)
+    tombstones.note_remote_memories({"deleted"}, client.base_url)
+    tombstones.add(_memory("deleted", updated=_NOW), tombstoned_at=_NOW, sent_to=client.base_url)
+    engine.ingest(_memory("new", updated=_NOW + timedelta(days=8)))
+    trash_clock(_NOW + timedelta(days=8))
+
+    if purge_fails:
+        failed_purge = Mock(side_effect=OSError("store unavailable"))
+        monkeypatch.setattr(tombstones, "purge_expired", failed_purge)
+
+    with pytest.raises(TragsQuotaError) as caught:
+        sync(engine=engine, tombstones=tombstones, client=client, poppy_dir=tmp_path)
+
+    assert caught.value is quota_error
+    assert (tombstones.get("deleted") is None) is (not purge_fails)
+    if purge_fails:
+        failed_purge.assert_called_once()
 
 
 def test_purge_waits_only_on_the_current_remote(tmp_path, trash_clock):

@@ -404,7 +404,7 @@ class HybridEngine(RetrievalEngine):
             self.delete(old_id)
             return self._ingest_prepared(memory, enriched, embedding)
 
-    def ingest(self, memory: Memory) -> str:
+    def ingest(self, memory: Memory, *, use_incoming_created_at: bool = False) -> str:
         """Store one memory with its full-content index and embedding."""
         enriched = self.embed_text_for(memory.content, memory.source.timestamp.isoformat())
         # Model loading may fail. Do it before taking the database write lock.
@@ -412,14 +412,16 @@ class HybridEngine(RetrievalEngine):
             embedding = self._embed(enriched)
         except ModelUnavailableError as exc:
             with self._keyword_fallback(exc) as seed:
-                return seed.ingest(memory)
-        return self._ingest_prepared(memory, enriched, embedding)
+                return seed.ingest(memory, use_incoming_created_at=use_incoming_created_at)
+        return self._ingest_prepared(memory, enriched, embedding, use_incoming_created_at=use_incoming_created_at)
 
-    def _ingest_prepared(self, memory: Memory, enriched: str, embedding: np.ndarray) -> str:
+    def _ingest_prepared(
+        self, memory: Memory, enriched: str, embedding: np.ndarray, *, use_incoming_created_at: bool = False
+    ) -> str:
         with self._lock, write_txn(self._conn):
             prior = self._conn.execute("SELECT content, created_at FROM memories WHERE id = ?", (memory.id,)).fetchone()
             created_at = memory.created_at
-            if prior is not None and prior["content"] == memory.content:
+            if not use_incoming_created_at and prior is not None and prior["content"] == memory.content:
                 try:
                     created_at = datetime.fromisoformat(prior["created_at"])
                 except (TypeError, ValueError):

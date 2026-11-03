@@ -47,8 +47,8 @@ class RetrievalEngine(ABC):
         return content
 
     @abstractmethod
-    def ingest(self, memory: Memory) -> str:
-        """Store a memory, return its ID."""
+    def ingest(self, memory: Memory, *, use_incoming_created_at: bool = False) -> str:
+        """Store a memory, return its ID. Pull opts into the cloud's creation date."""
 
     def supersede(
         self, old_id: str, memory: Memory, *, before_delete: Callable[[Connection], None] | None = None

@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from test_engine_bloom import _FakeBiEncoder, _FakeCrossEncoder
@@ -21,6 +22,27 @@ def _memory(memory_id: str, content: str) -> Memory:
         updated_at=now,
         confidence=1.0,
     )
+
+
+@pytest.mark.parametrize("engine_kind", ["seed", "bloom"])
+def test_local_same_text_ingest_preserves_created_at(tmp_path, engine_kind):
+    db_path = tmp_path / "memories.db"
+    engine = (
+        SeedEngine(db_path=db_path)
+        if engine_kind == "seed"
+        else BloomEngine(db_path=db_path, bi_encoder=_FakeBiEncoder(), cross_encoder=_FakeCrossEncoder())
+    )
+    original = _memory("m1", "same text")
+    engine.ingest(original)
+    rewritten = replace(
+        original,
+        created_at=original.created_at - timedelta(days=1),
+        updated_at=original.updated_at + timedelta(seconds=1),
+    )
+
+    engine.ingest(rewritten)
+
+    assert engine.get(original.id) == replace(rewritten, created_at=original.created_at)
 
 
 @pytest.mark.parametrize("engine_kind", ["seed", "bloom"])

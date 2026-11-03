@@ -430,12 +430,15 @@ def reconcile_and_ingest(
         elif decision.action is Action.SUPERSEDE and decision.target_id:
             try:
                 supersede_memory(engine, mem, decision.target_id, poppy_dir=poppy_dir)
-            except (ValueError, KeyError) as exc:
-                # The target turned out not to be supersedable — a row
-                # deleted since it was picked, say. Skip
-                # THIS item and keep going: aborting mid-loop would drop every
-                # remaining capture in the batch on the floor. Nothing is
-                # swallowed silently, and nothing is written for this one.
+            except KeyError:
+                # A target deleted since the decision does not invalidate the
+                # new capture. Keep it as an independent memory.
+                engine.ingest(mem)
+                summary.added += 1
+                continue
+            except ValueError as exc:
+                # A refused supersede skips only this item, so the remaining
+                # captures in the batch can still be saved.
                 log.warning("supersede skipped for %s: %s", decision.target_id, exc)
                 summary.skipped += 1
                 continue

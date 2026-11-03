@@ -329,7 +329,7 @@ class SeedEngine(RetrievalEngine):
             expires_at=parse_stored_timestamp(expires_at_raw) if expires_at_raw else None,
         )
 
-    def ingest(self, memory: Memory) -> str:
+    def ingest(self, memory: Memory, *, use_incoming_created_at: bool = False) -> str:
         # Every timestamp column goes in as UTC text, in the one canonical
         # spelling. These columns are compared AS TEXT by the push watermark
         # filter, the expiry purge and the `since` filter, so a row stamped
@@ -383,6 +383,8 @@ class SeedEngine(RetrievalEngine):
                     self._conn.execute(_UPDATE_SQL_ENRICHED, (*params, memory.content, memory.id))
                 else:
                     self._conn.execute(_UPDATE_SQL, (*params, memory.id))
+                if use_incoming_created_at:
+                    self._conn.execute("UPDATE memories SET created_at=? WHERE id=?", (created_iso, memory.id))
             else:
                 params = (
                     memory.id,
