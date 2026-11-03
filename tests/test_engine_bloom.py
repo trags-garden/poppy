@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -139,6 +140,74 @@ def test_stats_reports_bloom(tmp_path: Path) -> None:
     s = engine.stats()
     assert s.engine_name == "bloom"
     assert s.memory_count == 1
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [("stats", ()), ("get", ("m1",)), ("list_all", ()), ("retrieve", ("alpha",))],
+)
+def test_reads_wait_for_engine_lock(tmp_path: Path, method: str, args: tuple) -> None:
+    engine = _make_engine(tmp_path / "t.db")
+    engine.ingest(_memory("m1", "alpha"))
+    read = getattr(engine, method)
+    expected = read(*args)
+    started = threading.Event()
+    done = threading.Event()
+    results = []
+    errors = []
+
+    def reader():
+        started.set()
+        try:
+            results.append(read(*args))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=reader, daemon=True)
+    try:
+        with engine._lock:
+            thread.start()
+            assert started.wait(timeout=5)
+            assert not done.wait(timeout=0.1), f"{method} read while another thread held the lock"
+    finally:
+        thread.join(timeout=5)
+        if not thread.is_alive():
+            engine._conn.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert results == [expected]
+
+
+@pytest.mark.parametrize("model_method", ["_embed", "_rerank"])
+def test_retrieve_does_not_lock_during_inference(tmp_path: Path, monkeypatch, model_method: str) -> None:
+    engine = _make_engine(tmp_path / "t.db")
+    engine.ingest(_memory("m1", "alpha"))
+    original = getattr(engine, model_method)
+    acquired = []
+
+    def probe_lock():
+        locked = engine._lock.acquire(timeout=1)
+        acquired.append(locked)
+        if locked:
+            engine._lock.release()
+
+    def infer(*args):
+        thread = threading.Thread(target=probe_lock, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert acquired == [True]
+        return original(*args)
+
+    monkeypatch.setattr(engine, model_method, infer)
+    try:
+        assert [result.memory.id for result in engine.retrieve("alpha")] == ["m1"]
+        assert acquired == [True]
+    finally:
+        engine._conn.close()
 
 
 def test_opens_legacy_baseline_db_without_error(tmp_path: Path) -> None:

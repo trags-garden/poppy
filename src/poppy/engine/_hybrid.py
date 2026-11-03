@@ -201,9 +201,9 @@ class HybridEngine(RetrievalEngine):
         self._db_path = db_path
         self._model_error_sink: Callable[[ModelUnavailableError], None] | None = None
         # One connection, usable from any thread (the UI serves requests on a
-        # pool, and sync runs on its own), so every write sequence is serialized
-        # on this lock. Without it two threads mistake each other for nested
-        # callers of ``write_txn``: the second one's write joins the first one's
+        # pool, and sync runs on its own), so reads and write sequences are
+        # serialized on this lock. Without it two threads mistake each other
+        # for nested callers of ``write_txn``: the second one's write joins the first one's
         # transaction and reports success, and the first one's failure rolls it
         # back. Reentrant so a write path may call another one on the
         # same thread; seed holds the same discipline.
@@ -446,7 +446,14 @@ class HybridEngine(RetrievalEngine):
 
     def retrieve(self, query: str, filters: Filters | None = None, limit: int = 10) -> list[ScoredMemory]:
         try:
-            candidates = self._hybrid_retrieve(query, filters, k=FIRST_STAGE_K)
+            # Keep model inference outside the lock, but read both candidate
+            # channels together so a writer cannot change rows between them.
+            # shortcut: the lock also covers vector scoring and row mapping, so
+            # writes wait for a full scan; fetch rows under the lock and score
+            # outside it if large stores make writes noticeably slow.
+            query_emb = self._embed(query)
+            with self._lock:
+                candidates = self._hybrid_retrieve(query, filters, k=FIRST_STAGE_K, query_emb=query_emb)
             if not candidates:
                 return []
 
@@ -459,7 +466,9 @@ class HybridEngine(RetrievalEngine):
         reranked.sort(key=lambda x: x.score, reverse=True)
         return reranked[:limit]
 
-    def _hybrid_retrieve(self, query: str, filters: Filters | None, k: int) -> list[ScoredMemory]:
+    def _hybrid_retrieve(
+        self, query: str, filters: Filters | None, k: int, *, query_emb: np.ndarray
+    ) -> list[ScoredMemory]:
         fts_ranks: dict[str, int] = {}
         fts_query = _tokenize_for_fts(query)
         if fts_query:
@@ -486,7 +495,6 @@ class HybridEngine(RetrievalEngine):
                 if self._passes_filters(mem, filters):
                     fts_ranks[row["id"]] = rank_pos
 
-        query_emb = self._embed(query)
         # Embedding-channel filter on engine fingerprint. Rows from another
         # engine's model are excluded from RRF here and only contribute via
         # FTS5 above until re-embedded.
@@ -540,7 +548,8 @@ class HybridEngine(RetrievalEngine):
     # --- single-item accessors / lifecycle --------------------------------
 
     def get(self, memory_id: str) -> Memory | None:
-        row = self._conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         if row is None:
             return None
         return self._row_to_memory(row)
@@ -583,7 +592,8 @@ class HybridEngine(RetrievalEngine):
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
-        rows = self._conn.execute(query, params).fetchall()
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
         return [self._row_to_memory(row) for row in rows]
 
     def purge_expired(self) -> int:
@@ -611,7 +621,8 @@ class HybridEngine(RetrievalEngine):
         # already invisible to every reader, so counting them would report a
         # total nothing in the UI or the CLI can account for.
         clause, bound = unexpired_sql()
-        count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {clause}", (bound,)).fetchone()[0]
+        with self._lock:
+            count = self._conn.execute(f"SELECT COUNT(*) FROM memories WHERE {clause}", (bound,)).fetchone()[0]
         storage = self._db_path.stat().st_size if self._db_path.exists() else 0
         return EngineStats(
             memory_count=count,
