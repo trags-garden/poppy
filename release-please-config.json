@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "python",
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "skip-changelog": true,
+  "draft": true,
+  "force-tag-creation": true,
+  "always-update": true,
+  "pull-request-title-pattern": "chore: release${component} ${version}",
+  "pull-request-header": "Merging this pull request tags the release and starts the PyPI publish, which waits for approval on the `pypi` environment.",
+  "packages": {
+    ".": {
+      "package-name": "poppy-memory",
+      "extra-files": [
+        {"type": "json", "path": "server.json", "jsonpath": "$.version"},
+        {"type": "json", "path": "server.json", "jsonpath": "$.packages[0].version"},
+        {"type": "json", "path": "plugins/poppy/.claude-plugin/plugin.json", "jsonpath": "$.version"}
+      ]
+    }
+  }
+}

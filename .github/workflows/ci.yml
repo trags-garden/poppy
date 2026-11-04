@@ -70,8 +70,10 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      # --locked fails on a stale uv.lock instead of quietly rewriting it, so a
+      # version bump that misses the lockfile cannot pass.
       - name: Install dependencies (no extra)
-        run: uv sync
+        run: uv sync --locked
 
       - name: Assert dependency boundaries hold
         run: |
@@ -160,8 +162,8 @@ jobs:
             exit 1
           fi
 
-  # Build-only release rehearsal on every push. Publishing to PyPI happens
-  # exclusively in publish.yml, which triggers only on v* tags.
+  # Build here to catch packaging errors before a release. Publishing runs
+  # from publish.yml when the release pull request is merged.
   build:
     runs-on: ubuntu-latest
 
