@@ -36,7 +36,7 @@ jobs:
       # changelog heading and the lockfile are re-applied after each rebuild.
       - name: Check out the release branch
         if: steps.rp.outputs.prs_created == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ fromJSON(steps.rp.outputs.pr).headBranchName }}
 
@@ -173,9 +173,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # PEP 440 pre/dev releases are marked so they do not show as "Latest".
+          PRERELEASE=()
+          if printf '%s' "${TAG#v}" | grep -Eiq '(a|b|rc|dev)[0-9]+'; then
+            PRERELEASE=(--prerelease)
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
-            gh release edit "$TAG" --notes-file notes.md --draft=false
+            gh release edit "$TAG" --notes-file notes.md --draft=false "${PRERELEASE[@]}"
           else
-            gh release create "$TAG" dist/* --title "$TAG" --notes-file notes.md
+            gh release create "$TAG" dist/* --title "$TAG" --notes-file notes.md "${PRERELEASE[@]}"
           fi
