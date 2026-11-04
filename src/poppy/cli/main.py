@@ -1694,7 +1694,7 @@ def _warn_if_poppy_unresolved(client: str) -> None:
 
 
 def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
-    """Run install_for_client, turning a corrupt-config abort into a clean CLI error."""
+    """Turn configuration failures into actionable CLI errors."""
     from poppy.setup.claude_code import CorruptConfigError, install_for_client, validate_client_config
 
     try:
@@ -1706,7 +1706,11 @@ def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
                 install_claude_md=kwargs.get("install_claude_md", True),
             )
             kwargs.update(_daemon_setup_kwargs())
-        return install_for_client(**kwargs)
+        try:
+            return install_for_client(**kwargs)
+        except OSError as exc:
+            message = f"could not write {exc.filename}: {exc.strerror}" if exc.filename else f"setup failed: {exc}"
+            raise click.ClickException(message) from exc
     except CorruptConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -1741,7 +1745,7 @@ def _daemon_setup_kwargs() -> dict:
         ensure_daemon_token(poppy_dir)
         install_agent(poppy_dir)
         click.echo(start_daemon(poppy_dir))
-    except (LifecycleError, RuntimeError) as exc:
+    except (LifecycleError, RuntimeError, OSError) as exc:
         raise click.ClickException(
             f"{exc}\nThe daemon agent files may remain installed; the client config was not changed."
         ) from exc
@@ -1784,6 +1788,9 @@ def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: b
             primer_path = install_claude_md_block(claude_dir)
         except CorruptConfigError as exc:
             raise click.ClickException(str(exc)) from exc
+        except OSError as exc:
+            message = f"could not write {exc.filename}: {exc.strerror}" if exc.filename else f"setup failed: {exc}"
+            raise click.ClickException(message) from exc
 
     click.echo(
         "The Poppy plugin for Claude Code is installed and already provides the MCP server, hooks "

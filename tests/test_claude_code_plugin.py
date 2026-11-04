@@ -10,8 +10,12 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
+import signal
 import stat
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -144,6 +148,109 @@ def test_shim_keeps_other_hook_exit_codes(tmp_path):
     assert result.stdout == "fake poppy hook session-end\n"
 
 
+@pytest.fixture(params=["/bin/sh", "dash"])
+def posix_shell(request):
+    shell = shutil.which(request.param)
+    if shell is None:
+        pytest.skip(f"{request.param} is not installed")
+    return shell
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+def test_shim_preserves_hook_stdin(tmp_path, posix_shell):
+    fake = _fake_poppy(tmp_path / "bin")
+    fake.write_text("#!/bin/sh\ncat\n")
+    payload = '{"session_id": "stdin-test"}\n'
+
+    result = subprocess.run(
+        [posix_shell, str(SHIM), "hook", "session-start"],
+        env={"HOME": str(tmp_path), "PATH": f"{fake.parent}:/usr/bin:/bin"},
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+def test_shim_runs_a_hook_with_closed_stdin(tmp_path, posix_shell):
+    fake = _fake_poppy(tmp_path / "bin")
+    fake.write_text("#!/bin/sh\ncat\n")
+
+    result = subprocess.run(
+        [posix_shell, "-c", 'exec 0<&-; exec "$@"', "closed-stdin", posix_shell, str(SHIM), "hook", "x"],
+        env={"HOME": str(tmp_path), "PATH": f"{fake.parent}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
+def _restore_default_signals() -> None:
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_DFL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT", "SIGHUP"])
+def test_shim_forwards_hook_signals_and_waits_for_the_child(tmp_path, posix_shell, signal_name):
+    signum = getattr(signal, signal_name)
+    pid_file = tmp_path / "child.pid"
+    fake = _fake_poppy(tmp_path / "bin")
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, time\n"
+        "from pathlib import Path\n"
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    process = subprocess.Popen(
+        [posix_shell, str(SHIM), "hook", "session-start"],
+        env={"HOME": str(tmp_path), "PATH": f"{fake.parent}:/usr/bin:/bin"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        # A test runner started with nohup ignores HUP, and the launcher would
+        # inherit that, so give the launcher default dispositions.
+        preexec_fn=_restore_default_signals,
+    )
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_file.exists(), "the hook child did not start"
+        child_pid = int(pid_file.read_text())
+        process.send_signal(signum)
+        stdout, stderr = process.communicate(timeout=2)
+
+        expected = 128 + (signal.SIGHUP if signum == signal.SIGHUP else signal.SIGTERM)
+        assert process.returncode == expected, (stdout, stderr)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=2)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
 def test_shim_finds_a_pip_user_install_on_macos(tmp_path):
     _fake_poppy(tmp_path / "Library" / "Python" / "3.12" / "bin")
@@ -215,6 +322,13 @@ def _env(tmp_path: Path) -> dict:
         # A port nothing listens on, so doctor cannot reach a real daemon.
         "POPPY_DAEMON_PORT": "59321",
         "POPPY_TELEMETRY_OFF": "1",
+        # CliRunner inherits installer overrides unless they are explicitly unset.
+        "PIPX_BIN_DIR": None,
+        "UV_TOOL_BIN_DIR": None,
+        "XDG_BIN_HOME": None,
+        "PIPX_HOME": None,
+        "UV_TOOL_DIR": None,
+        "XDG_DATA_HOME": None,
     }
 
 
@@ -290,6 +404,83 @@ def test_setup_with_the_plugin_adds_claude_md_only_when_asked(tmp_path):
     assert "CLAUDE.md block" in result.output
     assert "<!-- POPPY:BEGIN -->" in (claude_dir / "CLAUDE.md").read_text()
     assert "hooks" not in json.loads((claude_dir / "settings.json").read_text())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX directory errors")
+@pytest.mark.parametrize("plugin_installed", [True, False])
+def test_setup_reports_an_unwritable_claude_md(tmp_path, plugin_installed):
+    env = _env(tmp_path)
+    claude_dir = Path(env["CLAUDE_CONFIG_DIR"])
+    if plugin_installed:
+        _record_install(claude_dir)
+    primer = claude_dir / "CLAUDE.md"
+    # Only the primer is unwritable; setup must be able to write the MCP config first.
+    primer.mkdir()
+
+    result = CliRunner().invoke(cli, ["setup", "claude-code", "--claude-md"], env=env)
+
+    assert result.exit_code == 1, result.output
+    assert result.output.startswith("Error: could not write ")
+    assert str(primer) in result.output
+    assert "Is a directory" in result.output
+    assert len(result.output.splitlines()) == 1
+    assert "Traceback" not in result.output
+    assert primer.is_dir()
+
+
+@pytest.mark.parametrize("plugin_installed", [True, False])
+def test_setup_reports_a_failure_without_a_filename(tmp_path, monkeypatch, plugin_installed):
+    env = _env(tmp_path)
+    if plugin_installed:
+        _record_install(Path(env["CLAUDE_CONFIG_DIR"]))
+
+    def fail_install(*args, **kwargs):
+        raise OSError("storage unavailable")
+
+    installer = "install_claude_md_block" if plugin_installed else "install_for_client"
+    monkeypatch.setattr(f"poppy.setup.claude_code.{installer}", fail_install)
+
+    result = CliRunner().invoke(cli, ["setup", "claude-code", "--claude-md"], env=env)
+
+    assert result.exit_code == 1
+    assert result.output == "Error: setup failed: storage unavailable\n"
+
+
+def test_setup_daemon_preflight_preserves_a_read_error(monkeypatch):
+    import poppy.cli.main as main_mod
+
+    error = PermissionError(13, "Permission denied", "settings.json")
+
+    def fail_validation(**kwargs):
+        raise error
+
+    monkeypatch.setattr("poppy.setup.claude_code.validate_client_config", fail_validation)
+
+    with pytest.raises(PermissionError) as excinfo:
+        main_mod._install_or_abort(client="claude-code", daemon_mode=True)
+
+    assert excinfo.value is error
+
+
+def test_setup_daemon_keeps_the_agent_warning_for_a_missing_service_binary(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    settings = Path(env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    original = settings.read_text()
+    monkeypatch.setattr("poppy.mcp_server.auth.ensure_daemon_token", lambda _path: "token")
+    monkeypatch.setattr("poppy.mcp_server.lifecycle.install_agent", lambda _path: None)
+
+    def fail_start(_path):
+        raise FileNotFoundError(2, "No such file or directory", "service-manager")
+
+    monkeypatch.setattr("poppy.mcp_server.lifecycle.start_daemon", fail_start)
+
+    result = CliRunner().invoke(cli, ["setup", "claude-code", "--daemon"], env=env)
+
+    assert result.exit_code == 1
+    assert "service-manager" in result.output
+    assert "could not write" not in result.output
+    assert "The daemon agent files may remain installed; the client config was not changed." in result.output
+    assert settings.read_text() == original
 
 
 def test_setup_with_the_plugin_explains_an_ignored_daemon_flag(tmp_path, monkeypatch):
@@ -368,6 +559,29 @@ def test_doctor_warns_when_the_plugin_finds_poppy_only_on_this_path(tmp_path):
     output = _doctor(env)
 
     assert "Claude Code plugin: WARN, the plugin finds poppy only through this shell's PATH" in output
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+def test_doctor_reports_a_non_executable_plugin_launcher(tmp_path):
+    env = _env(tmp_path)
+    claude_dir = Path(env["CLAUDE_CONFIG_DIR"])
+    _record_install(claude_dir)
+    cached_plugin = tmp_path / "cached-plugin"
+    shim = cached_plugin / "scripts" / "poppy-run"
+    shim.parent.mkdir(parents=True)
+    shim.write_text(SHIM.read_text())
+    shim.chmod(0o644)
+    record_path = claude_dir / "plugins" / "installed_plugins.json"
+    record = _load(record_path)
+    record["plugins"][CLAUDE_CODE_PLUGIN_ID][0]["installPath"] = str(cached_plugin)
+    record_path.write_text(json.dumps(record))
+
+    output = _doctor(env)
+
+    assert "Claude Code plugin: FAIL" in output
+    assert f"{shim} launcher is not executable" in output
+    assert "chmod +x" in output
+    assert "cannot find poppy" not in output
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
