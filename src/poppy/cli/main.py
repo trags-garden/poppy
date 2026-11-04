@@ -1706,13 +1706,13 @@ def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
                 install_claude_md=kwargs.get("install_claude_md", True),
             )
             kwargs.update(_daemon_setup_kwargs())
-        return install_for_client(**kwargs)
+        try:
+            return install_for_client(**kwargs)
+        except OSError as exc:
+            message = f"could not write {exc.filename}: {exc.strerror}" if exc.filename else f"setup failed: {exc}"
+            raise click.ClickException(message) from exc
     except CorruptConfigError as exc:
         raise click.ClickException(str(exc)) from exc
-    except OSError as exc:
-        raise click.ClickException(
-            f"could not write {exc.filename or 'client configuration'}: {exc.strerror or exc}"
-        ) from exc
 
 
 def _record_agent_setup(client: str, *, via: str | None = None) -> None:
@@ -1745,7 +1745,7 @@ def _daemon_setup_kwargs() -> dict:
         ensure_daemon_token(poppy_dir)
         install_agent(poppy_dir)
         click.echo(start_daemon(poppy_dir))
-    except (LifecycleError, RuntimeError) as exc:
+    except (LifecycleError, RuntimeError, OSError) as exc:
         raise click.ClickException(
             f"{exc}\nThe daemon agent files may remain installed; the client config was not changed."
         ) from exc
@@ -1778,7 +1778,7 @@ def _install_simple_client(client: str, *, daemon_mode: bool = False) -> None:
 
 def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: bool, daemon_mode: bool) -> None:
     """Leave the plugin's wiring alone; add only the CLAUDE.md block when asked by flag."""
-    from poppy.setup.claude_code import CorruptConfigError, get_claude_config_dir, install_claude_md_block
+    from poppy.setup.claude_code import CorruptConfigError, install_claude_md_block
 
     # The flag defaults to on, so only an explicit --claude-md writes the
     # always-loaded block next to the plugin's skill.
@@ -1789,8 +1789,8 @@ def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: b
         except CorruptConfigError as exc:
             raise click.ClickException(str(exc)) from exc
         except OSError as exc:
-            path = exc.filename or (claude_dir or get_claude_config_dir()) / "CLAUDE.md"
-            raise click.ClickException(f"could not write {path}: {exc.strerror or exc}") from exc
+            message = f"could not write {exc.filename}: {exc.strerror}" if exc.filename else f"setup failed: {exc}"
+            raise click.ClickException(message) from exc
 
     click.echo(
         "The Poppy plugin for Claude Code is installed and already provides the MCP server, hooks "

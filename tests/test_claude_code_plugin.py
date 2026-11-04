@@ -176,25 +176,34 @@ def test_shim_preserves_hook_stdin(tmp_path, posix_shell):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
+def test_shim_runs_a_hook_with_closed_stdin(tmp_path, posix_shell):
+    fake = _fake_poppy(tmp_path / "bin")
+    fake.write_text("#!/bin/sh\ncat\n")
+
+    result = subprocess.run(
+        [posix_shell, "-c", 'exec 0<&-; exec "$@"', "closed-stdin", posix_shell, str(SHIM), "hook", "x"],
+        env={"HOME": str(tmp_path), "PATH": f"{fake.parent}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
 @pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT", "SIGHUP"])
 def test_shim_forwards_hook_signals_and_waits_for_the_child(tmp_path, posix_shell, signal_name):
     signum = getattr(signal, signal_name)
     pid_file = tmp_path / "child.pid"
-    exit_marker = tmp_path / "child.exited"
     fake = _fake_poppy(tmp_path / "bin")
     fake.write_text(
         f"#!{sys.executable}\n"
-        "import os, signal, time\n"
+        "import os, time\n"
         "from pathlib import Path\n"
-        "def stop(signum, frame):\n"
-        "    time.sleep(0.1)\n"
-        f"    Path({str(exit_marker)!r}).write_text(str(signum))\n"
-        "    raise SystemExit(2)\n"
-        "for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):\n"
-        "    signal.signal(signum, stop)\n"
         f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
-        "while True:\n"
-        "    time.sleep(1)\n"
+        "time.sleep(30)\n"
     )
     process = subprocess.Popen(
         [posix_shell, str(SHIM), "hook", "session-start"],
@@ -212,8 +221,15 @@ def test_shim_forwards_hook_signals_and_waits_for_the_child(tmp_path, posix_shel
         process.send_signal(signum)
         stdout, stderr = process.communicate(timeout=2)
 
-        assert process.returncode == 1, (stdout, stderr)
-        assert exit_marker.read_text() == str(signum)
+        expected = 128 + (signal.SIGHUP if signum == signal.SIGHUP else signal.SIGTERM)
+        assert process.returncode == expected, (stdout, stderr)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
         with pytest.raises(ProcessLookupError):
             os.kill(child_pid, 0)
     finally:
@@ -382,7 +398,7 @@ def test_setup_with_the_plugin_adds_claude_md_only_when_asked(tmp_path):
     assert "hooks" not in json.loads((claude_dir / "settings.json").read_text())
 
 
-@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX file modes and a non-root user")
+@pytest.mark.skipif(os.name == "nt", reason="needs POSIX directory errors")
 @pytest.mark.parametrize("plugin_installed", [True, False])
 def test_setup_reports_an_unwritable_claude_md(tmp_path, plugin_installed):
     env = _env(tmp_path)
@@ -390,23 +406,73 @@ def test_setup_reports_an_unwritable_claude_md(tmp_path, plugin_installed):
     if plugin_installed:
         _record_install(claude_dir)
     primer = claude_dir / "CLAUDE.md"
-    primer.write_text("Existing instructions\n")
-    # Setup replaces regular files atomically, so prevent writes to the directory.
-    claude_dir.chmod(0o555)
-    try:
-        result = CliRunner().invoke(cli, ["setup", "claude-code", "--claude-md"], env=env)
-    finally:
-        claude_dir.chmod(0o755)
+    # Only the primer is unwritable; setup must be able to write the MCP config first.
+    primer.mkdir()
+
+    result = CliRunner().invoke(cli, ["setup", "claude-code", "--claude-md"], env=env)
 
     assert result.exit_code == 1, result.output
     assert result.output.startswith("Error: could not write ")
-    assert str(claude_dir) in result.output
-    if plugin_installed:
-        assert str(primer) in result.output
-    assert "Permission denied" in result.output
+    assert str(primer) in result.output
+    assert "Is a directory" in result.output
     assert len(result.output.splitlines()) == 1
     assert "Traceback" not in result.output
-    assert primer.read_text() == "Existing instructions\n"
+    assert primer.is_dir()
+
+
+@pytest.mark.parametrize("plugin_installed", [True, False])
+def test_setup_reports_a_failure_without_a_filename(tmp_path, monkeypatch, plugin_installed):
+    env = _env(tmp_path)
+    if plugin_installed:
+        _record_install(Path(env["CLAUDE_CONFIG_DIR"]))
+
+    def fail_install(*args, **kwargs):
+        raise OSError("storage unavailable")
+
+    installer = "install_claude_md_block" if plugin_installed else "install_for_client"
+    monkeypatch.setattr(f"poppy.setup.claude_code.{installer}", fail_install)
+
+    result = CliRunner().invoke(cli, ["setup", "claude-code", "--claude-md"], env=env)
+
+    assert result.exit_code == 1
+    assert result.output == "Error: setup failed: storage unavailable\n"
+
+
+def test_setup_daemon_preflight_preserves_a_read_error(monkeypatch):
+    import poppy.cli.main as main_mod
+
+    error = PermissionError(13, "Permission denied", "settings.json")
+
+    def fail_validation(**kwargs):
+        raise error
+
+    monkeypatch.setattr("poppy.setup.claude_code.validate_client_config", fail_validation)
+
+    with pytest.raises(PermissionError) as excinfo:
+        main_mod._install_or_abort(client="claude-code", daemon_mode=True)
+
+    assert excinfo.value is error
+
+
+def test_setup_daemon_keeps_the_agent_warning_for_a_missing_service_binary(tmp_path, monkeypatch):
+    env = _env(tmp_path)
+    settings = Path(env["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    original = settings.read_text()
+    monkeypatch.setattr("poppy.mcp_server.auth.ensure_daemon_token", lambda _path: "token")
+    monkeypatch.setattr("poppy.mcp_server.lifecycle.install_agent", lambda _path: None)
+
+    def fail_start(_path):
+        raise FileNotFoundError(2, "No such file or directory", "service-manager")
+
+    monkeypatch.setattr("poppy.mcp_server.lifecycle.start_daemon", fail_start)
+
+    result = CliRunner().invoke(cli, ["setup", "claude-code", "--daemon"], env=env)
+
+    assert result.exit_code == 1
+    assert "service-manager" in result.output
+    assert "could not write" not in result.output
+    assert "The daemon agent files may remain installed; the client config was not changed." in result.output
+    assert settings.read_text() == original
 
 
 def test_setup_with_the_plugin_explains_an_ignored_daemon_flag(tmp_path, monkeypatch):

@@ -40,23 +40,31 @@ if [ "${1:-}" != hook ]; then
 fi
 # Some shells replace stdin before applying a background command's redirections.
 # Save hook input on a separate descriptor so the child still receives it.
-exec 3<&0
+# Probe on a different descriptor: some shells treat 0<&0 as a no-op even when closed.
+if ( exec 3<&0 ) 2>/dev/null; then
+  exec 3<&0
+else
+  exec 3</dev/null
+fi
+child_pid=""
+forward_signal() {
+  if [ -n "$child_pid" ]; then
+    kill -s "$1" "$child_pid" 2>/dev/null || :
+  fi
+}
+trap 'forward_signal TERM' TERM
+# Background commands inherit SIGINT ignored, and Python keeps it ignored.
+# Forward Ctrl-C as TERM so it still stops the hook.
+trap 'forward_signal TERM' INT
+trap 'forward_signal HUP' HUP
 "$poppy_bin" "$@" <&3 3<&- &
 child_pid=$!
 exec 3<&-
-forward_signal() {
-  interrupted=1
-  kill -s "$1" "$child_pid" 2>/dev/null || :
-}
-trap 'forward_signal TERM' TERM
-trap 'forward_signal INT' INT
-trap 'forward_signal HUP' HUP
 # A trapped signal interrupts wait before the child has necessarily stopped.
 while :; do
-  interrupted=0
   wait "$child_pid"
   status=$?
-  [ "$interrupted" -eq 0 ] && break
+  kill -0 "$child_pid" 2>/dev/null || break
 done
 if [ "$status" -eq 2 ]; then
   exit 1
