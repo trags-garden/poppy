@@ -264,17 +264,20 @@ def test_http_deadline_does_not_wait_for_an_inflight_operation(monkeypatch, slow
         return httpx.Response(200, stream=SlowStream())
 
     mock_endpoint(monkeypatch, respond)
-    budget = 0.1
+    # The budget has to outlast the worker's start-up: the body read checks the
+    # deadline after every chunk, so a budget the worker cannot meet makes it
+    # give up on the first chunk without ever reaching the blocked operation.
+    budget = 1.0
     started = time.monotonic()
     try:
         with pytest.raises(OpenAICompatError, match="timed out"):
             call_openai_compat(
                 "extract", model="m", base_url="https://llm.test/v1", api_key="test-key", timeout_s=budget
             )
-        assert entered.is_set()
+        assert entered.is_set(), "the transport never reached the blocked operation"
         assert read_timeout == [budget]
         assert not release.is_set(), "the caller must return while the operation is still blocked"
-        assert time.monotonic() - started < 1
+        assert time.monotonic() - started < budget + 1
     finally:
         release.set()
         assert closed.wait(2), "the expired request must close its stream when the operation returns"
