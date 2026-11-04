@@ -1,9 +1,12 @@
 """Unavailable models defer embeddings without interrupting writes or recall."""
 
+import socket
+from collections import deque
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 from test_daemon_backfill import CONVERSATION, _full_row
 from test_engine_bloom import _FakeBiEncoder, _FakeCrossEncoder
 from test_engine_migration import _make_memory
@@ -106,6 +109,49 @@ async def test_offline_remember_and_recall_recover_without_restart(
     fresh.ingest(memory)
     assert _full_row(db_path, memory.id) == _full_row(fresh._db_path, memory.id)
     assert daemon._backfill_once(engine, tmp_path) == 0
+
+
+def test_daemon_fallback_notice_buffers_stay_bounded(tmp_path, monkeypatch, offline_models):
+    from poppy.cli import main
+    from poppy.mcp_server import server as server_module
+
+    buffers = []
+    captured = {}
+    original_compose = daemon.create_http_app
+
+    def notice_buffer(*args, **kwargs):
+        buffer = deque(*args, **kwargs)
+        buffers.append(buffer)
+        return buffer
+
+    def compose(mcp_app, **kwargs):
+        captured["engine"] = kwargs["engine"]
+        return original_compose(mcp_app, **kwargs)
+
+    def serve(*args):
+        engine = captured["engine"]
+        try:
+            engine.ingest(_make_memory("stored", "keyword memory"))
+            for _ in range(100):
+                assert [m.memory.id for m in engine.retrieve("keyword")] == ["stored"]
+            assert len(buffers) == 2
+            assert all(len(buffer) == 1 for buffer in buffers)
+            assert buffers[0][0] == buffers[1][0]
+            assert "Connect to the internet for the one-time model download." in buffers[0][0]
+            # A changed failure also replaces the notice rather than adding history.
+            engine._model_error_sink(ModelUnavailableError("latest failure"))
+            assert all(list(buffer) == ["bloom: ModelUnavailableError: latest failure"] for buffer in buffers)
+        finally:
+            engine._conn.close()
+
+    monkeypatch.setattr(main, "deque", notice_buffer)
+    monkeypatch.setattr(server_module, "deque", notice_buffer)
+    monkeypatch.setattr(daemon, "create_http_app", compose)
+    monkeypatch.setattr(daemon, "bind_socket", lambda *args: socket.socket())
+    monkeypatch.setattr(daemon, "run_server", serve)
+
+    result = CliRunner().invoke(main.cli, ["serve", "--transport", "http"], env={"POPPY_DIR": str(tmp_path)})
+    assert result.exit_code == 0, result.output
 
 
 def test_offline_reingest_invalidates_embedding_and_backfills_like_fresh(tmp_path, offline_models):

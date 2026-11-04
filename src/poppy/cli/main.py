@@ -2,6 +2,7 @@ import datetime
 import errno
 import json
 import os
+from collections import deque
 from pathlib import Path
 
 import click
@@ -1203,7 +1204,7 @@ def serve(source: str, transport: str, host: str, port: int, no_daemon: bool):
             raise
 
         with listener, writers.registered(poppy_dir, "daemon"):
-            engine_errors: list[str] = []
+            engine_errors: deque[str] = deque(maxlen=1)
             mcp = create_mcp_server(
                 poppy_dir=poppy_dir,
                 source="mcp",
