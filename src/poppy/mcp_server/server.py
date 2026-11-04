@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
@@ -90,7 +91,9 @@ class PoppyMcpServer:
     ) -> None:
         ensure_poppy_dir(poppy_dir)
         self._poppy_dir = poppy_dir
-        engine_errors: list[str] = []
+        # The sink fires on every keyword-only call while models are unavailable;
+        # keep one notice so a long offline run doesn't grow this without bound.
+        engine_errors: deque[str] = deque(maxlen=1)
         if engine is not None:
             self._engine = engine
         elif engine_error_sink is None:
@@ -245,7 +248,9 @@ class PoppyMcpServer:
         # cross-encoder score doesn't clear the configured probability floor, so
         # a weak-match query returns nothing rather than padding to top-k. Floor
         # 0.0 (default) keeps everything — an exact no-op. Post-retrieve filter
-        # only; engine ranking is untouched.
+        # only; engine ranking is untouched. Keyword-only results are exempt:
+        # their BM25-derived scores are not on the reranker's probability scale
+        # (often below 0.01), so the floor would hide every offline match.
         from poppy.config import load_config
         from poppy.relevance import clears_floor
 
