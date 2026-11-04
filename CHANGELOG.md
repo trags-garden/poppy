@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Repeated keyword-only searches no longer accumulate fallback notices in the daemon's memory.
+- The Claude Code plugin's hook launcher now passes a stop signal on to poppy and waits for it, so a hook that Claude Code times out no longer leaves poppy running in the background.
+- `poppy doctor` now says when the plugin's launcher has lost its executable bit, instead of reporting that it cannot find poppy.
+- `poppy setup claude-code` prints a one-line error instead of a traceback when CLAUDE.md cannot be written.
 
 ## [0.4.0] - 2026-11-03
 

@@ -1694,7 +1694,7 @@ def _warn_if_poppy_unresolved(client: str) -> None:
 
 
 def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
-    """Run install_for_client, turning a corrupt-config abort into a clean CLI error."""
+    """Turn configuration failures into actionable CLI errors."""
     from poppy.setup.claude_code import CorruptConfigError, install_for_client, validate_client_config
 
     try:
@@ -1709,6 +1709,10 @@ def _install_or_abort(*, daemon_mode: bool = False, **kwargs) -> dict:
         return install_for_client(**kwargs)
     except CorruptConfigError as exc:
         raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(
+            f"could not write {exc.filename or 'client configuration'}: {exc.strerror or exc}"
+        ) from exc
 
 
 def _record_agent_setup(client: str, *, via: str | None = None) -> None:
@@ -1774,7 +1778,7 @@ def _install_simple_client(client: str, *, daemon_mode: bool = False) -> None:
 
 def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: bool, daemon_mode: bool) -> None:
     """Leave the plugin's wiring alone; add only the CLAUDE.md block when asked by flag."""
-    from poppy.setup.claude_code import CorruptConfigError, install_claude_md_block
+    from poppy.setup.claude_code import CorruptConfigError, get_claude_config_dir, install_claude_md_block
 
     # The flag defaults to on, so only an explicit --claude-md writes the
     # always-loaded block next to the plugin's skill.
@@ -1784,6 +1788,9 @@ def _setup_alongside_claude_code_plugin(claude_dir: Path | None, *, claude_md: b
             primer_path = install_claude_md_block(claude_dir)
         except CorruptConfigError as exc:
             raise click.ClickException(str(exc)) from exc
+        except OSError as exc:
+            path = exc.filename or (claude_dir or get_claude_config_dir()) / "CLAUDE.md"
+            raise click.ClickException(f"could not write {path}: {exc.strerror or exc}") from exc
 
     click.echo(
         "The Poppy plugin for Claude Code is installed and already provides the MCP server, hooks "

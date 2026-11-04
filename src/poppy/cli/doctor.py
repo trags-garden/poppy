@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -741,6 +742,15 @@ def check_plugin_shim(ctx: DoctorContext, install: dict) -> None:
             "WARN",
             f"{CLAUDE_CODE_PLUGIN_ID} is installed but its files are missing at {install_path}",
             hint="reinstall it with `claude plugin install poppy@trags-garden`",
+        )
+        return
+    if not os.access(shim, os.X_OK):
+        line(
+            "Claude Code plugin",
+            "FAIL",
+            f"{shim} launcher is not executable",
+            hint=f"run `chmod +x {shlex.quote(str(shim))}` "
+            "or reinstall with `claude plugin install poppy@trags-garden`",
         )
         return
     # Without the shell's PATH first, the way a client opened from the Dock

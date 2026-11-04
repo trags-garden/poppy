@@ -38,8 +38,26 @@ fi
 if [ "${1:-}" != hook ]; then
   exec "$poppy_bin" "$@"
 fi
-"$poppy_bin" "$@"
-status=$?
+# Some shells replace stdin before applying a background command's redirections.
+# Save hook input on a separate descriptor so the child still receives it.
+exec 3<&0
+"$poppy_bin" "$@" <&3 3<&- &
+child_pid=$!
+exec 3<&-
+forward_signal() {
+  interrupted=1
+  kill -s "$1" "$child_pid" 2>/dev/null || :
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+# A trapped signal interrupts wait before the child has necessarily stopped.
+while :; do
+  interrupted=0
+  wait "$child_pid"
+  status=$?
+  [ "$interrupted" -eq 0 ] && break
+done
 if [ "$status" -eq 2 ]; then
   exit 1
 fi
