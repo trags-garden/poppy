@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Repeated keyword-only searches no longer accumulate fallback notices in the daemon's memory.
-- Unexpected model-loading errors now surface instead of being reported as a failed download.
 
 ## [0.4.0] - 2026-11-03
 

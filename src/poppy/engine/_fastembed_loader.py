@@ -117,8 +117,6 @@ def _load_fastembed(kind: str, model_name: str, cache_dir: Path, *, local_files_
     try:
         from fastembed import TextEmbedding
         from fastembed.rerank.cross_encoder import TextCrossEncoder
-        from httpx import TransportError
-        from huggingface_hub.utils import HfHubHTTPError, LocalEntryNotFoundError, OfflineModeIsEnabled
     except ImportError as exc:  # pragma: no cover - fastembed is a base dependency
         raise ImportError(
             "fastembed is not installed. It ships in the base `poppy-memory` install; "
@@ -130,10 +128,7 @@ def _load_fastembed(kind: str, model_name: str, cache_dir: Path, *, local_files_
     cache = str(cache_dir)
     try:
         return ctor(model_name, cache_dir=cache, providers=_PROVIDERS, local_files_only=local_files_only or cached)
-    except (OSError, TransportError, HfHubHTTPError, LocalEntryNotFoundError, OfflineModeIsEnabled, ValueError) as exc:
-        # Network, cache and download-source failures (fastembed reports an
-        # exhausted source as ValueError) mean the model can't be obtained now.
-        # Anything else is a real fault and surfaces as-is.
+    except Exception as exc:  # noqa: BLE001 - re-raised as an actionable error below
         if cached and not local_files_only:
             raise  # present locally; a different failure — surface it as-is
         raise _model_unavailable(model_name, exc) from exc

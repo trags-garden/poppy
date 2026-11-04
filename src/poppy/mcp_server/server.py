@@ -91,7 +91,8 @@ class PoppyMcpServer:
     ) -> None:
         ensure_poppy_dir(poppy_dir)
         self._poppy_dir = poppy_dir
-        # Only the latest notice is needed for status; offline calls keep retrying.
+        # The sink fires on every keyword-only call while models are unavailable;
+        # keep one notice so a long offline run doesn't grow this without bound.
         engine_errors: deque[str] = deque(maxlen=1)
         if engine is not None:
             self._engine = engine
