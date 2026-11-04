@@ -39,9 +39,17 @@ def _patch_ctors(monkeypatch: pytest.MonkeyPatch, ctor: Any) -> None:
 # --- _load_fastembed offline semantics ---------------------------------------
 
 
-def test_cold_offline_load_raises_actionable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+# Any failure on a cold cache means the model couldn't be obtained; a failed
+# Xet transfer, for one, raises a plain RuntimeError rather than a network error.
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("connection refused"), RuntimeError("Task error: File reconstruction error: CAS Client Error")],
+)
+def test_cold_offline_load_raises_actionable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: Exception
+) -> None:
     def boom(*_a: Any, **_k: Any) -> Any:
-        raise OSError("connection refused")
+        raise failure
 
     _patch_ctors(monkeypatch, boom)
     monkeypatch.setattr(fe, "is_fastembed_model_cached", lambda *_a, **_k: False)
