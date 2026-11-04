@@ -192,6 +192,11 @@ def test_shim_runs_a_hook_with_closed_stdin(tmp_path, posix_shell):
     assert result.stdout == ""
 
 
+def _restore_default_signals() -> None:
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_DFL)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell shim")
 @pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT", "SIGHUP"])
 def test_shim_forwards_hook_signals_and_waits_for_the_child(tmp_path, posix_shell, signal_name):
@@ -210,6 +215,9 @@ def test_shim_forwards_hook_signals_and_waits_for_the_child(tmp_path, posix_shel
         env={"HOME": str(tmp_path), "PATH": f"{fake.parent}:/usr/bin:/bin"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        # A test runner started with nohup ignores HUP, and the launcher would
+        # inherit that, so give the launcher default dispositions.
+        preexec_fn=_restore_default_signals,
     )
     child_pid = None
     try:
