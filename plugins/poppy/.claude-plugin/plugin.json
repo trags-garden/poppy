@@ -10,5 +10,10 @@
   "homepage": "https://github.com/trags-garden/poppy",
   "repository": "https://github.com/trags-garden/poppy",
   "license": "Apache-2.0",
-  "keywords": ["memory", "mcp", "local-first", "developer-tools"]
+  "keywords": [
+    "memory",
+    "mcp",
+    "local-first",
+    "developer-tools"
+  ]
 }

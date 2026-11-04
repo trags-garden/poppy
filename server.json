@@ -15,9 +15,14 @@
       "version": "0.4.0",
       "runtimeHint": "uvx",
       "packageArguments": [
-        {"type": "positional", "value": "serve"}
+        {
+          "type": "positional",
+          "value": "serve"
+        }
       ],
-      "transport": {"type": "stdio"}
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }
