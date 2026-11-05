@@ -48,9 +48,13 @@ jobs:
 
       - name: Date the changelog and refresh uv.lock
         if: steps.rp.outputs.prs_created == 'true'
+        # The pull request output is passed as text and parsed in the shell:
+        # an expression in env is evaluated before the step's condition, so a
+        # fromJSON on the empty output of a release run would fail the step.
         env:
-          BRANCH: ${{ fromJSON(steps.rp.outputs.pr).headBranchName }}
+          PR_JSON: ${{ steps.rp.outputs.pr }}
         run: |
+          BRANCH=$(python3 -c 'import json, os; print(json.loads(os.environ["PR_JSON"])["headBranchName"])')
           VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           # Move the hand-written Unreleased notes under a dated version
           # heading and leave an empty Unreleased heading above them.
