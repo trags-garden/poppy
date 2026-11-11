@@ -2123,7 +2123,7 @@ def setup_claude_desktop(print_instructions: bool, print_import_prompt: bool):
     help="Override trags-api-url (defaults to the configured value or https://api.trags.ai).",
 )
 def setup_trags(api_url: str | None):
-    """One-command device-code onboarding for Trags cloud sync.
+    """One-command device-code onboarding for Trags sync.
 
     Opens your browser to authorize this machine, then writes the returned
     API key to ~/.poppy/config.json. After this you can run `poppy sync run`.

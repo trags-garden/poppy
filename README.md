@@ -401,7 +401,7 @@ wait, and `poppy doctor` reports missing or outdated embeddings.
 | `poppy setup pi` | | Install Poppy into Pi (MCP via pi-mcp-adapter + AGENTS.md primer in `$PI_CODING_AGENT_DIR`; defaults to `~/.pi/agent`). |
 | `poppy setup goose` | | Install Poppy into Goose (MCP extension + .goosehints primer). |
 | `poppy setup hermes-agent` | | Install Poppy as a Hermes Agent memory provider plugin with SOUL.md guidance. |
-| `poppy setup trags` | `--api-url` | One-command device-code onboarding for Trags cloud sync. |
+| `poppy setup trags` | `--api-url` | One-command device-code onboarding for Trags sync. |
 | `poppy sync push` | `--dry-run` | Send local memories + tombstones to Trags. |
 | `poppy sync pull` | `--dry-run` | Apply Trags rows newer than the last pull watermark. |
 | `poppy sync run` | `--dry-run` | Pull then push, full bidirectional sync. |
@@ -414,7 +414,7 @@ wait, and `poppy doctor` reports missing or outdated embeddings.
 MCP `remember` also rejects blank content. MCP `remember` and `edit` accept only
 `fact`, `decision`, `preference`, `lesson`, `summary`, or `context` as
 `memory_type`; invalid inputs return tool errors. Unknown memory types received
-from cloud sync become `fact`. SessionStart renders each stored note on one line,
+from Trags sync become `fact`. SessionStart renders each stored note on one line,
 collapsing whitespace in its content and type.
 
 Cursor hooks are installed globally at `~/.cursor/hooks.json` by
@@ -556,7 +556,7 @@ What this protects against: theft of the disk or of an unencrypted backup, and
 casual inspection of the store file. What it does not do: this is local
 encryption at rest, not zero-knowledge or end-to-end encryption. The key lives
 in your keychain, so anything running as your user account that can read the
-keychain can decrypt the store. Cloud sync is unaffected and is a separate
+keychain can decrypt the store. Sync to Trags is unaffected and is a separate
 concern (memories synced to Trags are covered by that service's own encryption).
 
 If the keychain entry is lost, the store cannot be recovered, so keep a backup

@@ -1,4 +1,4 @@
-"""One-command device-code onboarding for Trags cloud sync.
+"""One-command device-code onboarding for Trags sync.
 
 Flow:
 1. Generate an ephemeral RSA key pair for this setup attempt.
