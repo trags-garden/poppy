@@ -3,7 +3,7 @@
 Automatic capture can embed a credential verbatim into a memory when the
 extraction LLM copies one out of the transcript ("lesson: staging DB is
 postgres://admin:hunter2@db"). Sync encryption is local-at-rest only (SQLCipher,
-deliberately not end-to-end), so such a memory would reach Trags Cloud in
+deliberately not end-to-end), so such a memory would reach Trags in
 server-readable form unless credentials are redacted before storage.
 
 This deny-list pass masks a handful of high-signal, low-false-positive token
